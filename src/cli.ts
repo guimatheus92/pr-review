@@ -8,7 +8,7 @@ import { showCacheInfo, clearCacheCommand } from './commands/cache.js';
 import { pluginsList, pluginsDoctor } from './commands/plugins.js';
 import { showConfig } from './commands/config.js';
 import { readFileSync } from 'node:fs';
-import type { ReviewerOutput, Severity } from './types.js';
+import type { GatherOutput, ReviewerOutput, Severity } from './types.js';
 
 const program = new Command();
 
@@ -185,7 +185,17 @@ program
           exitCode: 0,
         }));
       }
-      await runPost({ prUrl, outputs, publish: !opts.dryRun });
+      // Line snapping needs the diff; without it, findings citing lines
+      // outside the diff 422 on the batch and burn retries per comment.
+      let gather: GatherOutput | undefined;
+      try {
+        gather = await runGather({ prUrl });
+      } catch (err) {
+        process.stderr.write(
+          `[post] gather failed (${(err as Error).message.split('\n')[0]}); posting without line snapping\n`,
+        );
+      }
+      await runPost({ prUrl, outputs, publish: !opts.dryRun, gather });
     } catch (err) {
       console.error((err as Error).message);
       process.exit(1);

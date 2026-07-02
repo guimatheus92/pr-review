@@ -1,6 +1,6 @@
 import { detectProvider } from '../providers/index.js';
 import { buildValidLinesMap, snapLineToDiff } from '../dispatch/line-snap.js';
-import type { Finding, GatherOutput, ReviewerOutput } from '../types.js';
+import type { ChangedFile, Finding, GatherOutput, ReviewerOutput } from '../types.js';
 import type { BatchComment } from '../providers/types.js';
 
 interface PostOptions {
@@ -18,6 +18,54 @@ export interface PostResult {
   errors: { finding: Finding; error: string }[];
 }
 
+/**
+ * Snap located findings to the nearest valid diff line. When reanchor is set
+ * (GitHub: review comments only attach to diff lines, and no finding may be
+ * dropped), findings that cannot anchor where the reviewer pointed — file
+ * outside the diff, or no location at all — are re-anchored to the first
+ * valid line of the first changed file, with the original location kept in
+ * the body. Without a valid anchor a bad path would 422 the whole batch.
+ */
+export function snapFindingsToDiff(
+  findings: Finding[],
+  changedFiles: ChangedFile[],
+  reanchor: boolean,
+): { findings: Finding[]; snapped: number; reanchored: number; anchor: { file: string; line: number } | null } {
+  const validLines = buildValidLinesMap(changedFiles);
+  let anchor: { file: string; line: number } | null = null;
+  if (reanchor) {
+    for (const [file, lines] of validLines) {
+      if (lines.size > 0) {
+        anchor = { file, line: Math.min(...lines) };
+        break;
+      }
+    }
+  }
+  const out: Finding[] = [];
+  let snapped = 0;
+  let reanchored = 0;
+  for (const f of findings) {
+    const snappedLine = f.file && f.line ? snapLineToDiff(validLines, f.file, f.line) : null;
+    if (snappedLine !== null) {
+      if (snappedLine !== f.line) {
+        snapped++;
+        out.push({ ...f, line: snappedLine });
+      } else {
+        out.push(f);
+      }
+      continue;
+    }
+    if (!anchor) {
+      out.push(f);
+      continue;
+    }
+    reanchored++;
+    const body = f.file && f.line ? `\`${f.file}:${f.line}\` — ${f.body}` : f.body;
+    out.push({ ...f, file: anchor.file, line: anchor.line, body });
+  }
+  return { findings: out, snapped, reanchored, anchor };
+}
+
 export async function runPost(opts: PostOptions): Promise<PostResult> {
   const provider = detectProvider(opts.prUrl);
   const ref = provider.parseUrl(opts.prUrl);
@@ -33,19 +81,19 @@ export async function runPost(opts: PostOptions): Promise<PostResult> {
   }
 
   // Snap reviewer-supplied lines to the nearest valid diff line so inline
-  // comments do not 422 and silently degrade to top-level comments.
+  // comments do not 422 the batch review. On GitHub, findings that cannot
+  // anchor where they point are re-anchored instead of dropped — every
+  // finding must land as a resolvable inline review thread.
   let findings = allFindings;
   if (opts.gather) {
-    const validLines = buildValidLinesMap(opts.gather.changedFiles);
-    let snapped = 0;
-    findings = allFindings.map((f) => {
-      if (!f.file || !f.line) return f;
-      const snappedLine = snapLineToDiff(validLines, f.file, f.line);
-      if (snappedLine === null || snappedLine === f.line) return f;
-      snapped++;
-      return { ...f, line: snappedLine };
-    });
-    if (snapped > 0) process.stderr.write(`[post] snapped ${snapped} finding line(s) to the diff\n`);
+    const snap = snapFindingsToDiff(allFindings, opts.gather.changedFiles, provider.name === 'github');
+    findings = snap.findings;
+    if (snap.snapped > 0) process.stderr.write(`[post] snapped ${snap.snapped} finding line(s) to the diff\n`);
+    if (snap.reanchored > 0) {
+      process.stderr.write(
+        `[post] re-anchored ${snap.reanchored} finding(s) without a diff location to ${snap.anchor!.file}:${snap.anchor!.line}\n`,
+      );
+    }
   }
 
   const headSha = opts.gather?.metadata.headSha ?? (await provider.fetchMetadata(ref)).headSha;

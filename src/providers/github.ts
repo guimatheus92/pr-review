@@ -239,32 +239,23 @@ export class GitHubProvider implements PrProvider {
     if (!finding.file || !finding.line) return null;
     const commitId = await this.resolveHeadSha(ref, headSha);
     const body = finding.body.trim();
-    try {
-      const { data } = await withRetry(
-        () =>
-          this.client().pulls.createReviewComment({
-            owner: ref.owner,
-            repo: ref.repo,
-            pull_number: ref.number,
-            body,
-            commit_id: commitId,
-            path: finding.file!,
-            line: finding.line!,
-            side: 'RIGHT',
-          }),
-        isTransientGitHubError,
-        `${finding.file}:${finding.line}`,
-      );
-      return { id: String(data.id) };
-    } catch (err) {
-      const issueBody = `\`${finding.file}:${finding.line}\` — ${finding.body.trim()}`;
-      const { data } = await this.client().issues.createComment({
-        owner: ref.owner,
-        repo: ref.repo,
-        issue_number: ref.number,
-        body: issueBody,
-      });
-      return { id: `issue-${data.id}` };
-    }
+    // No top-level issue-comment fallback: findings must land as resolvable
+    // review threads. An unanchorable finding surfaces as an error instead.
+    const { data } = await withRetry(
+      () =>
+        this.client().pulls.createReviewComment({
+          owner: ref.owner,
+          repo: ref.repo,
+          pull_number: ref.number,
+          body,
+          commit_id: commitId,
+          path: finding.file!,
+          line: finding.line!,
+          side: 'RIGHT',
+        }),
+      isTransientGitHubError,
+      `${finding.file}:${finding.line}`,
+    );
+    return { id: String(data.id) };
   }
 }

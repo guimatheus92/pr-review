@@ -25,7 +25,7 @@ Node CLI (deterministic plumbing)
   9. runSingleSession()         → one runtime session, reviewers via task()/Task(); verifier only if Phase 1 has CRITICAL/HIGH
      └─ runCodex()              → optional Codex second-opinion reviewer as a parallel sibling process
  10. dedupe                     → intra-batch + against existing comments
- 11. runPost() / renderSummary  → post comments (GitHub batched review, ADO threads) or print summary
+ 11. runPost() / renderSummary  → every finding posts inline (snap + re-anchor; GitHub batched review, ADO threads) or print summary
  12. exit code                  → 0 clean, 1 findings ≥ --fail-on, 2 no parseable findings
 ```
 
@@ -46,7 +46,7 @@ src/
 ├── commands/
 │   ├── review.ts            # full pipeline orchestration; runReview returns the exit code (0/1/2)
 │   ├── gather.ts            # fetch PR metadata + comments in parallel → cache → JSON
-│   ├── post.ts              # post line-snapped comments (GitHub batched review, ADO threads) with retry/backoff
+│   ├── post.ts              # snapFindingsToDiff (snap + re-anchor: every finding lands inline) + batched posting with retry/backoff
 │   ├── init.ts              # scaffold .pr-review/skills/ in a repo
 │   ├── configure.ts         # write ~/.pr-review/config.yaml
 │   ├── plugins.ts           # `plugins list` / `plugins doctor`
@@ -54,7 +54,7 @@ src/
 │   └── config.ts            # `config show`
 ├── providers/
 │   ├── types.ts             # PrProvider interface
-│   ├── github.ts            # @octokit/rest, batched review posting + per-comment fallback
+│   ├── github.ts            # @octokit/rest, batched review posting + per-comment retry (inline only — no issue-comment fallback)
 │   ├── azuredevops.ts       # azure-devops-node-api, LCS diff synthesis (per-run PR/git API cache)
 │   └── index.ts             # detectProvider(url) switch
 ├── dispatch/

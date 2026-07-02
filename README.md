@@ -1,6 +1,6 @@
 # pr-review
 
-A generic, plugin-based PR review tool for GitHub and Azure DevOps, packaged as a plugin for [Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/plugins-creating) **or** Claude Code. Orchestrates parallel reviewer agents in a single agent session (companion plugins optional) and posts line-snapped comments back to the PR. When the `codex` CLI is installed, a Codex second-opinion reviewer runs alongside automatically.
+A generic, plugin-based PR review tool for GitHub and Azure DevOps, packaged as a plugin for [Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/plugins-creating) **or** Claude Code. Orchestrates parallel reviewer agents in a single agent session (companion plugins optional) and posts **every** finding back to the PR as a resolvable inline review comment — never a top-level comment, nothing dropped. When the `codex` CLI is installed, a Codex second-opinion reviewer runs alongside automatically.
 
 ```
 /pr-review https://github.com/org/repo/pull/123
@@ -75,6 +75,14 @@ npm install && npm run build
 ```
 
 Exit codes: `0` clean, `1` findings at/above `--fail-on`, `2` pipeline error (including an orchestrator run that produced no parseable findings).
+
+## Posting guarantees
+
+On a publish run (the default), every finding lands as a resolvable **inline** review thread — so each one can be discussed and resolved in place:
+
+- **Never top-level.** GitHub findings post as review comments (one batched review, per-comment retry on batch failure); ADO findings post as threads. There is no top-level issue-comment fallback.
+- **Nothing dropped.** Lines outside the diff are snapped to the nearest valid diff line. Findings that can't anchor where they point (file outside the diff, or no location) are re-anchored to the first valid diff line, keeping the original `file:line` in the comment body.
+- **Skipping only in `--dry-run`.** Transient posting errors are retried with backoff; anything that still fails is reported as an error in the summary, never silently dropped.
 
 ## Adding your own rules
 

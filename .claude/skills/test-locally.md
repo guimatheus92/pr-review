@@ -10,7 +10,15 @@ description: How to test pr-review changes locally — unit tests, end-to-end ru
 npm run test
 ```
 
-59 tests covering: glob matching, output parsers (JSON, bracketed-markdown, section-header), dedupe (Jaccard similarity, strict/loose/off), diff filtering, frontmatter parsing, config merge.
+Globs `tests/**/*.test.ts` — 77 tests covering: glob matching, output parsers (JSON, bracketed-markdown, section-header), dedupe (Jaccard similarity, strict/loose/off), diff filtering, frontmatter parsing, config merge, line snapping (`tests/line-snap.test.ts`), session context / skills routing (`tests/session-context.test.ts`), and the loader (`tests/loader.test.ts`).
+
+## Skills routing (fast, no runtime spawn)
+
+```bash
+node ./dist/cli.js review <pr-url> --context-only
+```
+
+Prepares `pr-context.md` + the per-reviewer `skills-<reviewer>.md` files in the run dir and prints the skill→reviewer routing table — without spawning the runtime. The reviewers line shows "+ codex (sibling process)" when the Codex second-opinion reviewer would run. This is the fastest way to verify a skill routes to the reviewers you expect.
 
 ## End-to-end (against a real PR)
 
@@ -24,7 +32,11 @@ node ./dist/cli.js review <pr-url> --dry-run
 # With specific options
 node ./dist/cli.js review <pr-url> --skip verifier --no-companions --dry-run
 node ./dist/cli.js review <pr-url> --dedupe-mode off --dry-run   # see all raw findings
+node ./dist/cli.js review <pr-url> --runtime claude --dry-run    # force the Claude Code runtime
+node ./dist/cli.js review <pr-url> --no-codex --dry-run          # skip the Codex second-opinion reviewer
 ```
+
+Exit codes: `0` clean, `1` findings at/above the `--fail-on` threshold, `2` pipeline error (no parseable findings).
 
 ## Testing gather only
 
@@ -44,11 +56,13 @@ node ./dist/cli.js post <pr-url> --findings <path> --publish   # actually post
 ## Plugin installation test
 
 ```bash
-# From inside a copilot session, with cwd at the repo root:
+# From inside a copilot OR claude session, with cwd at the repo root:
 /plugin marketplace add .
 /plugin install pr-review@pr-review
 /pr-review --help
 ```
+
+The plugin layout loads in both hosts; under Claude Code the slash command finds the bundle via `$CLAUDE_PLUGIN_ROOT/dist/cli.cjs`.
 
 ## Verifying what would run
 

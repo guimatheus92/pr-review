@@ -1,7 +1,7 @@
 {
   "name": "pr-review",
   "version": "0.1.0",
-  "description": "Generic, plugin-based PR review for GitHub and Azure DevOps. Orchestrates parallel Copilot CLI reviewers (Opus + GPT) with stack/business-rule plugins.",
+  "description": "Generic, plugin-based PR review for GitHub and Azure DevOps. Orchestrates parallel Copilot CLI reviewer agents with stack/business-rule skills.",
   "private": true,
   "type": "module",
   "bin": {
@@ -11,7 +11,7 @@
     "build": "tsc && npm run bundle",
     "build:watch": "tsc --watch",
     "bundle": "node scripts/bundle.mjs",
-    "test": "node --test --import tsx tests/globs.test.ts tests/parsers.test.ts tests/dedupe.test.ts tests/diff-filter.test.ts tests/frontmatter.test.ts tests/config.test.ts",
+    "test": "node --test --import tsx \"tests/**/*.test.ts\"",
     "clean": "rimraf dist",
     "prepare": "npm run build"
   },

@@ -8,7 +8,7 @@ import { showCacheInfo, clearCacheCommand } from './commands/cache.js';
 import { pluginsList, pluginsDoctor } from './commands/plugins.js';
 import { showConfig } from './commands/config.js';
 import { readFileSync } from 'node:fs';
-import type { ReviewerOutput } from './types.js';
+import type { ReviewerOutput, Severity } from './types.js';
 
 const program = new Command();
 
@@ -54,7 +54,7 @@ program
   .option('--no-autodiscover', 'Disable scanning .pr-review/ conventional paths')
   .option('--dedupe-mode <mode>', "Dedupe mode: strict | loose | off", 'strict')
   .option('--default-model <model>', 'Default model for reviewers without an explicit one')
-  .option('--copilot <path>', 'Path to the copilot CLI binary', 'copilot')
+  .option('--copilot <path>', 'Path to the runtime CLI binary (copilot or claude)')
   .option('--no-cache', 'Bypass gather cache')
   .option('--no-response-cache', 'Bypass per-reviewer response cache')
   .option('--no-companion-warning', 'Suppress the companion-plugin install warning')
@@ -62,6 +62,11 @@ program
     '--no-companions',
     'Skip auto-invoking installed companion plugin agents (pr-review-toolkit) for this run',
   )
+  .option('--context-only', 'Prepare pr-context.md + per-reviewer skills files, print the skill routing, and exit', false)
+  .option('--lang <code>', 'Language for finding titles/bodies (e.g. pt-BR, es)')
+  .option('--fail-on <severity>', 'Exit 1 when any finding at/above this severity survives dedupe (critical|high|medium|low|nit)')
+  .option('--runtime <name>', 'Agent CLI hosting the session: copilot | claude | auto (probe PATH)', undefined)
+  .option('--no-codex', 'Never run the Codex second-opinion reviewer, even when the codex CLI is installed')
   .action(
     async (
       prUrl: string,
@@ -83,11 +88,30 @@ program
         responseCache: boolean;
         companionWarning: boolean;
         companions: boolean;
+        contextOnly: boolean;
+        lang?: string;
+        failOn?: string;
+        runtime?: string;
+        codex: boolean;
       },
     ) => {
       try {
         const skip = opts.skip?.split(',').map((s) => s.trim()).filter(Boolean) ?? [];
-        const { summary } = await runReview({
+        if (opts.runtime && !['copilot', 'claude', 'auto'].includes(opts.runtime)) {
+          console.error(`--runtime must be one of: copilot, claude, auto`);
+          process.exit(2);
+        }
+        let failOn: Severity | undefined;
+        if (opts.failOn) {
+          const norm = opts.failOn.toUpperCase();
+          const allowed: Severity[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'NIT'];
+          if (!(allowed as string[]).includes(norm)) {
+            console.error(`--fail-on must be one of: ${allowed.join(', ').toLowerCase()}`);
+            process.exit(2);
+          }
+          failOn = norm as Severity;
+        }
+        const { summary, exitCode } = await runReview({
           prUrl,
           skip,
           reviewers: opts.reviewer,
@@ -106,11 +130,17 @@ program
           defaultModel: opts.defaultModel,
           noCompanionWarning: !opts.companionWarning,
           withCompanions: opts.companions,
+          contextOnly: opts.contextOnly,
+          language: opts.lang,
+          failOn,
+          runtime: opts.runtime as 'copilot' | 'claude' | 'auto' | undefined,
+          withCodex: opts.codex ? undefined : false,
         });
         process.stdout.write(summary + '\n');
+        if (exitCode !== 0) process.exitCode = exitCode;
       } catch (err) {
         console.error((err as Error).message);
-        process.exit(1);
+        process.exit(2);
       }
     },
   );

@@ -1,10 +1,26 @@
 ---
-description: "pr-review CI/CD integration: GitHub Actions and Azure DevOps Pipelines examples with official documentation links. Use when asked about CI/CD, automation, running pr-review on every PR automatically, or setting up pr-review in a pipeline."
+description: "pr-review CI/CD integration: GitHub Actions and Azure DevOps Pipelines examples, exit codes, --fail-on gating, official documentation links. Use when asked about CI/CD, automation, gating merges on findings, running pr-review on every PR automatically, or setting up pr-review in a pipeline."
 ---
 
 # Running pr-review in CI/CD
 
 The tool runs in CI the same way it runs locally: install Copilot CLI + this plugin, then call `pr-review review <pr-url> --publish` with auth env vars.
+
+## Exit codes and gating
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Clean — no findings at/above the threshold |
+| `1` | Findings at/above the `--fail-on` severity survived dedupe |
+| `2` | Pipeline error — the orchestrator produced no parseable findings |
+
+To gate a pipeline on serious findings, add `--fail-on <severity>` (`critical`\|`high`\|`medium`\|`low`\|`nit`):
+
+```bash
+pr-review review "$PR_URL" --publish --fail-on high
+```
+
+The step fails (exit 1) when any CRITICAL or HIGH finding survives dedupe. Treat exit 2 as an infrastructure failure, not a review verdict.
 
 ## GitHub Actions (official path)
 

@@ -12,8 +12,38 @@ function extractJsonBlock(raw: string): string | null {
   else if (firstArr === -1) start = first;
   else start = Math.min(first, firstArr);
   if (start === -1) return null;
-  const trimmed = raw.slice(start).trim();
-  return trimmed;
+  const balanced = sliceBalancedJson(raw, start);
+  return balanced ?? raw.slice(start).trim();
+}
+
+/**
+ * Slice from `start` to the position where the opening brace/bracket closes,
+ * tracking string literals and escapes — LLM output routinely has trailing
+ * prose after the JSON, which would otherwise defeat JSON.parse.
+ */
+function sliceBalancedJson(raw: string, start: number): string | null {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < raw.length; i++) {
+    const ch = raw[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (inString) {
+      if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{' || ch === '[') depth++;
+    else if (ch === '}' || ch === ']') {
+      depth--;
+      if (depth === 0) return raw.slice(start, i + 1);
+    }
+  }
+  return null;
 }
 
 export function parseJsonFindings(raw: string): Finding[] {

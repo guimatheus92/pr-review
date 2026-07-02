@@ -147,29 +147,35 @@ export interface LoadAllOptions {
   cwd: string;
   config: Config;
   includeBuiltIn?: boolean;
+  /** Single-session mode dispatches only Copilot CLI agents — skip loading user reviewer .md files entirely. */
+  skillsOnly?: boolean;
 }
 
 export function loadAll(opts: LoadAllOptions): LoadedSet {
-  const { cwd, config, includeBuiltIn = true } = opts;
+  const { cwd, config, includeBuiltIn = true, skillsOnly = false } = opts;
   const reviewers: ReviewerDefinition[] = [];
   const skills: SkillDefinition[] = [];
 
-  if (includeBuiltIn) {
+  if (includeBuiltIn && !skillsOnly) {
     reviewers.push(...loadBuiltInReviewers());
   }
 
   if (config.autodiscover) {
     const paths = autodiscoveryPaths(cwd);
-    const r = loadFromPaths([...paths.repoReviewers, ...paths.personalReviewers], 'reviewer') as ReviewerDefinition[];
+    if (!skillsOnly) {
+      const r = loadFromPaths([...paths.repoReviewers, ...paths.personalReviewers], 'reviewer') as ReviewerDefinition[];
+      reviewers.push(...r);
+    }
     const s = loadFromPaths([...paths.repoSkills, ...paths.personalSkills], 'skill') as SkillDefinition[];
-    reviewers.push(...r);
     skills.push(...s);
   }
 
-  const explicitReviewers = loadFromPaths(config.reviewers, 'reviewer') as ReviewerDefinition[];
-  reviewers.push(...explicitReviewers);
-  const explicitReviewersDirs = loadFromPaths(config.reviewersDirs, 'reviewer') as ReviewerDefinition[];
-  reviewers.push(...explicitReviewersDirs);
+  if (!skillsOnly) {
+    const explicitReviewers = loadFromPaths(config.reviewers, 'reviewer') as ReviewerDefinition[];
+    reviewers.push(...explicitReviewers);
+    const explicitReviewersDirs = loadFromPaths(config.reviewersDirs, 'reviewer') as ReviewerDefinition[];
+    reviewers.push(...explicitReviewersDirs);
+  }
 
   const explicitSkills = loadFromPaths(config.skills, 'skill') as SkillDefinition[];
   skills.push(...explicitSkills);
@@ -178,7 +184,7 @@ export function loadAll(opts: LoadAllOptions): LoadedSet {
 
   for (const dir of config.pluginDirs) {
     const set = loadPlugin(dir);
-    reviewers.push(...set.reviewers);
+    if (!skillsOnly) reviewers.push(...set.reviewers);
     skills.push(...set.skills);
   }
   for (const name of config.plugins) {
@@ -188,7 +194,7 @@ export function loadAll(opts: LoadAllOptions): LoadedSet {
       continue;
     }
     const set = loadPlugin(resolved);
-    reviewers.push(...set.reviewers);
+    if (!skillsOnly) reviewers.push(...set.reviewers);
     skills.push(...set.skills);
   }
 

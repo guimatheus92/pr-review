@@ -1,6 +1,6 @@
 # pr-review
 
-A generic, plugin-based PR review tool for GitHub and Azure DevOps, packaged as a [Copilot CLI plugin](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/plugins-creating). Orchestrates parallel reviewers (Opus + GPT) in a single Copilot session and posts line-snapped comments back to the PR.
+A generic, plugin-based PR review tool for GitHub and Azure DevOps, packaged as a plugin for [Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/plugins-creating) **or** Claude Code. Orchestrates parallel reviewer agents in a single agent session (companion plugins optional) and posts line-snapped comments back to the PR. When the `codex` CLI is installed, a Codex second-opinion reviewer runs alongside automatically.
 
 ```
 /pr-review https://github.com/org/repo/pull/123
@@ -20,7 +20,14 @@ Inside a `copilot` session:
 /plugin install pr-review@pr-review
 ```
 
-No `npm install` needed. The plugin ships a pre-bundled `dist/cli.cjs`; the slash command finds it under `~/.copilot/installed-plugins/` and runs it with `node`.
+Or inside a `claude` (Claude Code) session:
+
+```
+/plugin marketplace add guimatheus92/pr-review
+/plugin install pr-review@pr-review
+```
+
+No `npm install` needed. The plugin ships a pre-bundled `dist/cli.cjs`; the slash command finds it via `$CLAUDE_PLUGIN_ROOT` under Claude Code (falling back to `~/.copilot/installed-plugins/`) and runs it with `node`. The plugin layout (`commands/`, `agents/`, `skills/` + `plugin.json`) loads in both hosts.
 
 For local development:
 
@@ -46,7 +53,14 @@ npm install && npm run build
 /pr-review <pr-url> --publish          # post line comments to the PR
 /pr-review <pr-url> --skip security    # skip specific reviewers
 /pr-review <pr-url> --dry-run          # preview without posting
+/pr-review <pr-url> --context-only     # prepare context + skill routing table, don't run reviewers
+/pr-review <pr-url> --lang pt-BR       # language for finding titles/bodies (default: en)
+/pr-review <pr-url> --fail-on high     # exit 1 if any high/critical finding survives dedupe
+/pr-review <pr-url> --runtime claude   # host the session in Claude Code instead of Copilot CLI
+/pr-review <pr-url> --no-codex         # skip the Codex second-opinion reviewer
 ```
+
+Exit codes: `0` clean, `1` findings at/above `--fail-on`, `2` pipeline error (including an orchestrator run that produced no parseable findings).
 
 ## Adding your own rules
 
@@ -59,6 +73,8 @@ your-repo/
         ├── our-auth-conventions.md    # injected as context into matching reviewers
         └── team-style-guide.md
 ```
+
+Optional frontmatter targets a skill: `applies_to` (globs — the skill is injected only when an in-scope changed file matches) and `inject_into` (reviewer names — omit to reach all reviewers). Preview the routing with `--context-only`, which prints a skill→reviewer table and exits without running reviewers.
 
 Existing skills from `.claude/skills/`, `.copilot/skills/`, `.github/skills/`, or `.agents/skills/` work as-is. See [reviewers vs skills](skills/reviewers-vs-skills/SKILL.md) for the full authoring guide.
 
@@ -76,10 +92,20 @@ Existing skills from `.claude/skills/`, `.copilot/skills/`, `.github/skills/`, o
 
 Skip with `--skip <name>`, override by placing a same-named `.md` in `.pr-review/skills/`.
 
+When the `codex` CLI is installed, an optional `codex` second-opinion reviewer also runs — as a sibling process in parallel with the agent session, reading the same PR context. A different model family catches what the primary model misses. Its findings merge into the normal dedupe/post pipeline. Opt out with `--no-codex`, `invoke_codex: false`, `PR_REVIEW_NO_CODEX=1`, or `--skip codex`.
+
 ## CLI reference
 
 ```bash
 pr-review review <pr-url> [flags]            # full pipeline
+#   --context-only          prepare pr-context.md + per-reviewer skills files,
+#                           print the skill→reviewer routing table, exit
+#   --lang <code>           output language for findings (yaml: language, env: PR_REVIEW_LANG)
+#   --fail-on <severity>    critical|high|medium|low|nit → exit 1 on surviving findings
+#   --runtime <name>        copilot|claude|auto — which agent CLI hosts the session
+#                           (yaml: runtime, env: PR_REVIEW_RUNTIME; default auto)
+#   --no-codex              skip the Codex second-opinion reviewer
+#   --copilot <path>        path to the runtime CLI binary (kept for back-compat)
 pr-review gather <pr-url> [--out <path>]     # fetch + cache metadata only
 pr-review post <pr-url> --findings <path>    # post pre-computed findings
 pr-review init [--with-config] [--force]     # scaffold .pr-review/skills/
@@ -92,7 +118,7 @@ pr-review cache info | clear                 # manage local cache
 
 ## Further reading
 
-All documentation lives as Copilot CLI skills under `skills/` — any agent can discover and use them via frontmatter.
+All documentation lives as agent skills under `skills/` (loaded by Copilot CLI and Claude Code alike) — any agent can discover and use them via frontmatter.
 
 | Topic | Skill |
 |---|---|
@@ -109,4 +135,4 @@ All documentation lives as Copilot CLI skills under `skills/` — any agent can 
 
 ## License
 
-MIT.
+MIT — see [LICENSE](LICENSE).

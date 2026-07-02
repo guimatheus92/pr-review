@@ -42,6 +42,7 @@ const STARTER_SKILL_TEMPLATE = (stack: StackProfile | null): string => {
   return `---
 description: Team-specific rules for code review. Fill this in with your team's conventions, business rules, and architectural constraints.
 ${globsLine}
+# inject_into: [security, architecture]   # optional — restrict to specific reviewers; omit to reach all
 ---
 
 # Team Rules
@@ -53,7 +54,9 @@ This is a starter template. Replace this content with your team's rules. Example
 - **Forbidden patterns**: e.g. "Direct \`HttpClient\` instantiation is banned; use \`IHttpClientFactory\`."
 - **Required test patterns**: e.g. "Every controller action must have at least one integration test."
 
-The pr-review tool injects this file's content as **context** into every matching built-in reviewer (security, architecture, etc.), so your rules are considered alongside the generic review criteria — no duplication.
+pr-review injects this file into each reviewer whose name matches \`inject_into\` (all reviewers when omitted), whenever a changed file matches \`applies_to\` (all PRs when empty). Preview exactly which reviewers receive it with:
+
+    pr-review review <pr-url> --context-only
 `;
 };
 
@@ -75,10 +78,10 @@ const CONFIG_TEMPLATE = `# .pr-review.yaml — per-repo config (committed; share
 # extra_skills:
 #   - ./ARCHITECTURE.md
 
-# Override per-model concurrency (Phase 4 feature).
-# concurrency_by_model:
-#   claude-opus-4.8: 3
-#   gpt-5: 8
+# Language for finding titles/bodies (default: en).
+# language: pt-BR
+
+# Precedence: defaults < ~/.pr-review/config.yaml < this file < env vars < CLI flags.
 `;
 
 export interface InitResult {

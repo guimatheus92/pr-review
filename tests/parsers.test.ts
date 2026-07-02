@@ -206,3 +206,21 @@ test('parseReviewerOutput — falls back to JSON when markdown expected but unpa
   assert.equal(result.length, 1);
   assert.equal(result[0]!.severity, 'NIT');
 });
+
+test('parseJsonFindings — trailing prose after the JSON does not defeat the parse', () => {
+  const raw = `[{"severity":"LOW","title":"t","body":"b with {braces} and \\"quotes\\"","file":"a.ts","line":1}]
+
+I hope this review helps! Let me know if you need anything else.`;
+  const result = parseJsonFindings(raw);
+  assert.equal(result.length, 1);
+  assert.equal(result[0]!.title, 't');
+});
+
+test('parseJsonFindings — leading prose then object with findings key then prose', () => {
+  const raw = `Here are my findings:
+{"findings": [{"severity":"HIGH","title":"x","body":"y","file":"f.ts","line":2}]}
+Done.`;
+  const result = parseJsonFindings(raw);
+  assert.equal(result.length, 1);
+  assert.equal(result[0]!.severity, 'HIGH');
+});

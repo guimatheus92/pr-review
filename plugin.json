@@ -1,9 +1,9 @@
 {
   "name": "pr-review",
-  "description": "Generic, plugin-based PR review for GitHub and Azure DevOps. Orchestrates parallel Copilot CLI reviewers (Opus + GPT) with stack/business-rule plugins.",
+  "description": "Generic, plugin-based PR review for GitHub and Azure DevOps. Orchestrates parallel reviewer agents in a single session (Copilot CLI or Claude Code), with optional Codex second opinion and stack/business-rule skills.",
   "version": "0.1.0",
   "author": {
-    "name": "Gabriel Matheus",
+    "name": "Guilherme Matheus",
     "email": "guilherme_matheus12@hotmail.com"
   },
   "license": "MIT",

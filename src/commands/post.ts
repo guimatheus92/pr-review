@@ -1,10 +1,14 @@
 import { detectProvider } from '../providers/index.js';
-import type { Finding, ReviewerOutput } from '../types.js';
+import { buildValidLinesMap, snapLineToDiff } from '../dispatch/line-snap.js';
+import type { Finding, GatherOutput, ReviewerOutput } from '../types.js';
+import type { BatchComment } from '../providers/types.js';
 
 interface PostOptions {
   prUrl: string;
   outputs: ReviewerOutput[];
   publish: boolean;
+  /** When provided, enables line snapping (via changedFiles patches) and skips the head-SHA fetch. */
+  gather?: GatherOutput;
 }
 
 export interface PostResult {
@@ -28,10 +32,53 @@ export async function runPost(opts: PostOptions): Promise<PostResult> {
     return result;
   }
 
-  for (const f of allFindings) {
+  // Snap reviewer-supplied lines to the nearest valid diff line so inline
+  // comments do not 422 and silently degrade to top-level comments.
+  let findings = allFindings;
+  if (opts.gather) {
+    const validLines = buildValidLinesMap(opts.gather.changedFiles);
+    let snapped = 0;
+    findings = allFindings.map((f) => {
+      if (!f.file || !f.line) return f;
+      const snappedLine = snapLineToDiff(validLines, f.file, f.line);
+      if (snappedLine === null || snappedLine === f.line) return f;
+      snapped++;
+      return { ...f, line: snappedLine };
+    });
+    if (snapped > 0) process.stderr.write(`[post] snapped ${snapped} finding line(s) to the diff\n`);
+  }
+
+  const headSha = opts.gather?.metadata.headSha ?? (await provider.fetchMetadata(ref)).headSha;
+
+  // Batch path: one review with all inline comments (single write, immune to
+  // the per-comment burst quota). Falls back to per-comment on batch failure.
+  let remaining = findings;
+  if (provider.postBatchComments) {
+    const inline = findings.filter((f) => f.file && f.line);
+    if (inline.length > 0) {
+      const comments: BatchComment[] = inline.map((f) => ({
+        path: f.file!,
+        line: f.line!,
+        body: f.body.trim(),
+      }));
+      try {
+        const batch = await provider.postBatchComments(ref, headSha, comments);
+        result.attempted += inline.length;
+        result.posted += batch.posted;
+        remaining = findings.filter((f) => !(f.file && f.line));
+        process.stderr.write(`[post] posted ${batch.posted} inline comment(s) as one review\n`);
+      } catch (err) {
+        process.stderr.write(
+          `[post] batch review failed (${(err as Error).message.split('\n')[0]}); falling back to per-comment posting\n`,
+        );
+      }
+    }
+  }
+
+  for (const f of remaining) {
     result.attempted++;
     try {
-      const out = await provider.postLineComment(ref, f);
+      const out = await provider.postLineComment(ref, f, headSha);
       if (out) {
         result.posted++;
       } else {

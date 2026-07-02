@@ -1,38 +1,42 @@
 # pr-review
 
-Generic, plugin-based PR review tool for GitHub and Azure DevOps, packaged as a Copilot CLI plugin. Orchestrates parallel reviewer agents in a single Copilot session via the `task` tool.
+Generic, plugin-based PR review tool for GitHub and Azure DevOps, packaged as a plugin for Copilot CLI or Claude Code. Orchestrates parallel reviewer agents in a single agent session via the `task` tool (Copilot) / `Task` tool (Claude Code).
 
 ## Build & test
 
 ```bash
 npm run build          # tsc + esbuild → dist/cli.cjs
-npm run test           # node --test (59 tests, ~500ms)
+npm run test           # node --test tests/**/*.test.ts (77 tests, ~500ms)
 npm run build:watch    # tsc watch (re-run `npm run bundle` for esbuild)
 ```
 
-The bundle at `dist/cli.cjs` is the single-file distribution artifact. The slash command (`commands/pr-review.md`) finds it under `~/.copilot/installed-plugins/` and runs `node "$CLI" review $ARGUMENTS`.
+The bundle at `dist/cli.cjs` is the single-file distribution artifact. The slash command (`commands/pr-review.md`) finds it via `$CLAUDE_PLUGIN_ROOT/dist/cli.cjs` under Claude Code (falling back to `~/.copilot/installed-plugins/`) and runs `node "$CLI" review $ARGUMENTS`.
 
 ## Architecture
 
-**Two-layer model:** slash command → Node CLI → single Copilot session dispatching reviewer agents via `task()`.
+**Two-layer model:** slash command → Node CLI → single agent session (Copilot CLI or Claude Code) dispatching reviewer agents via `task()` / `Task()`.
 
 - `src/cli.ts` — commander entry, subcommand routing
 - `src/commands/review.ts` — main pipeline: gather → early-exit → single-session dispatch → dedupe → post
-- `src/dispatch/single-session.ts` — writes PR context file, builds orchestrator prompt, spawns one `copilot` process
-- `src/providers/github.ts` / `azuredevops.ts` — PR data fetchers + comment posters
+- `src/dispatch/single-session.ts` — writes PR context file + per-reviewer `skills-<reviewer>.md` files, builds orchestrator prompt (single source of the reviewer output contract), spawns one runtime process
+- `src/dispatch/runtime.ts` — runtime selection (resolveRuntime, runtimeSpawnArgs, taskCall, normalizeModel); `--runtime copilot|claude|auto` (default auto: probes PATH, copilot first)
+- `src/dispatch/codex.ts` — optional Codex second-opinion reviewer; runs as a sibling process in parallel with the orchestrator session when the `codex` CLI is installed (opt out: `--no-codex`)
+- `src/dispatch/line-snap.ts` — snaps finding line numbers to the nearest valid diff line before posting
+- `src/providers/github.ts` / `azuredevops.ts` — PR data fetchers + comment posters (GitHub inline comments go out as one review batch, with per-comment fallback)
 - `src/dispatch/parsers.ts` — JSON / bracketed-markdown / section-header output parsers
 - `src/dedupe.ts` — Jaccard token similarity, strict/loose/off modes
-- `src/config.ts` — 5-level config merge (flags > repo yaml > global yaml > env > defaults)
+- `src/config.ts` — 5-level config merge (flags > env > repo yaml > global yaml > defaults)
+- `src/util/retry.ts` — retry/backoff helper for transient posting errors
 - `src/plugins/loader.ts` — discovers skills from standard paths (.claude/skills, .copilot/skills, .agents/skills, etc.)
-- `src/plugins/companions.ts` — detects installed companion plugins (pr-review-toolkit, code-review)
-- `agents/*.md` — 7 built-in reviewer agents registered as `pr-review:<name>`
+- `src/plugins/companions.ts` — detects installed companion plugins (pr-review-toolkit, code-review); copilot via `copilot plugin list`, claude via `~/.claude/plugins/installed_plugins.json`
+- `agents/*.md` — 7 built-in reviewer agents registered as `pr-review:<name>`; no `model:` in frontmatter — they inherit the session model (required for cross-runtime operation)
 
 ## Key conventions
 
 - **No repo pollution.** All run artifacts go to `~/.pr-review/runs/<id>/`. Never write files to the user's working directory.
 - **Clean output.** Posted comments contain only the finding body — no severity prefix, no bot chrome. Summary findings also render body-only, separated by `---`.
 - **Skills, not reviewers.** User-authored content goes in `.pr-review/skills/` (injected as context into built-in reviewers). Standalone reviewers are the exception, not the default.
-- **Single session.** All reviewers dispatch in one `copilot` process via `task()`. Never spawn N separate sessions.
+- **Single session.** All reviewers dispatch in one runtime process (copilot or claude) via `task()` / `Task()`. Never spawn N separate sessions. The only sibling process is the optional Codex second-opinion reviewer.
 - **Stack-agnostic built-ins.** The 7 agents in `agents/*.md` must never reference specific frameworks. Stack-specific rules belong in user skills.
 - **esbuild bundle.** `dist/cli.cjs` is a single-file zero-dependency bundle. No `npm install` needed at the plugin install site.
 
@@ -48,3 +52,6 @@ Tests use `node:test` + `node:assert`. Run with `npm run test`. Tests are in `te
 - **Change auto-discovery paths:** Edit `autodiscoveryPaths()` in `src/config.ts`.
 - **Change dedupe behavior:** Edit `src/dedupe.ts`. Threshold constants are at the top.
 - **Change diff exclusions:** Edit `DEFAULT_EXCLUDES` in `src/dispatch/diff-filter.ts`.
+- **Change runtime spawn args or model mapping:** Edit `src/dispatch/runtime.ts`.
+- **Change Codex reviewer behavior:** Edit `src/dispatch/codex.ts`.
+- **Preview reviewer context:** `pr-review review <url> --context-only` — writes pr-context.md + per-reviewer skills files, prints the skill→reviewer routing table, exits without spawning the runtime.

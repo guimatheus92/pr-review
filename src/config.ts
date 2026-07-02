@@ -19,6 +19,11 @@ export interface Config {
   skipReviewers: string[];
   companionWarn: boolean;
   invokeCompanions: boolean;
+  language: string;
+  /** Agent CLI hosting the session: copilot | claude | auto (probe PATH). */
+  runtime: 'copilot' | 'claude' | 'auto';
+  /** Run the Codex second-opinion reviewer when the codex CLI is installed. */
+  invokeCodex: boolean;
 }
 
 const DEFAULTS: Config = {
@@ -37,6 +42,9 @@ const DEFAULTS: Config = {
   skipReviewers: [],
   companionWarn: true,
   invokeCompanions: true,
+  language: 'en',
+  runtime: 'auto',
+  invokeCodex: true,
 };
 
 interface RawConfig {
@@ -54,6 +62,9 @@ interface RawConfig {
   skip_reviewers?: string[];
   companion_warn?: boolean;
   invoke_companions?: boolean;
+  language?: string;
+  runtime?: 'copilot' | 'claude' | 'auto';
+  invoke_codex?: boolean;
 }
 
 function expandHome(p: string): string {
@@ -94,6 +105,9 @@ function applyRaw(target: Config, raw: RawConfig, baseDir: string): void {
   if (raw.skip_reviewers) target.skipReviewers.push(...raw.skip_reviewers);
   if (typeof raw.companion_warn === 'boolean') target.companionWarn = raw.companion_warn;
   if (typeof raw.invoke_companions === 'boolean') target.invokeCompanions = raw.invoke_companions;
+  if (raw.language) target.language = raw.language;
+  if (raw.runtime) target.runtime = raw.runtime;
+  if (typeof raw.invoke_codex === 'boolean') target.invokeCodex = raw.invoke_codex;
 }
 
 function applyEnv(target: Config): void {
@@ -101,6 +115,10 @@ function applyEnv(target: Config): void {
   if (process.env.PR_REVIEW_REVIEWERS_DIR) target.reviewersDirs.push(expandHome(process.env.PR_REVIEW_REVIEWERS_DIR));
   if (process.env.PR_REVIEW_SKILLS_DIR) target.skillsDirs.push(expandHome(process.env.PR_REVIEW_SKILLS_DIR));
   if (process.env.PR_REVIEW_NO_COMPANION_WARN) target.companionWarn = false;
+  if (process.env.PR_REVIEW_LANG) target.language = process.env.PR_REVIEW_LANG;
+  const envRuntime = process.env.PR_REVIEW_RUNTIME;
+  if (envRuntime === 'copilot' || envRuntime === 'claude' || envRuntime === 'auto') target.runtime = envRuntime;
+  if (process.env.PR_REVIEW_NO_CODEX) target.invokeCodex = false;
 }
 
 export interface ConfigOverrides {
@@ -115,6 +133,9 @@ export interface ConfigOverrides {
   autodiscover?: boolean;
   dedupeMode?: 'strict' | 'loose' | 'off';
   invokeCompanions?: boolean;
+  language?: string;
+  runtime?: 'copilot' | 'claude' | 'auto';
+  invokeCodex?: boolean;
 }
 
 export interface LoadConfigOpts {
@@ -129,9 +150,6 @@ export function loadConfig(opts: LoadConfigOpts = {}): { config: Config; sources
   const config: Config = JSON.parse(JSON.stringify(DEFAULTS));
   const sources: Record<string, string> = { defaults: 'built-in' };
 
-  applyEnv(config);
-  sources.env = 'environment variables';
-
   const globalPath = join(home, '.pr-review', 'config.yaml');
   if (existsSync(globalPath)) {
     applyRaw(config, readYamlFile(globalPath), home);
@@ -143,6 +161,10 @@ export function loadConfig(opts: LoadConfigOpts = {}): { config: Config; sources
     applyRaw(config, readYamlFile(repoPath), cwd);
     sources.repo = repoPath;
   }
+
+  // Env overrides files (defaults < global yaml < repo yaml < env < flags).
+  applyEnv(config);
+  sources.env = 'environment variables';
 
   const o = opts.cliOverrides ?? {};
   if (o.reviewers) config.reviewers.push(...o.reviewers.map((p) => resolve(cwd, expandHome(p))));
@@ -157,6 +179,9 @@ export function loadConfig(opts: LoadConfigOpts = {}): { config: Config; sources
   if (typeof o.autodiscover === 'boolean') config.autodiscover = o.autodiscover;
   if (o.dedupeMode) config.dedupeMode = o.dedupeMode;
   if (typeof o.invokeCompanions === 'boolean') config.invokeCompanions = o.invokeCompanions;
+  if (o.language) config.language = o.language;
+  if (o.runtime) config.runtime = o.runtime;
+  if (typeof o.invokeCodex === 'boolean') config.invokeCodex = o.invokeCodex;
   if (Object.keys(o).length > 0) sources.flags = 'CLI flags';
 
   return { config, sources };

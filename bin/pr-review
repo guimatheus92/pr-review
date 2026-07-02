@@ -1,0 +1,6 @@
+#!/usr/bin/env node
+import('../dist/cli.cjs').catch((err) => {
+  console.error('pr-review failed to start:', err?.stack ?? err);
+  console.error('\nIf you have not built the project, run: npm install && npm run build');
+  process.exit(1);
+});

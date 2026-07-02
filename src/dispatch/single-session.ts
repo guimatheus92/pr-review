@@ -592,11 +592,23 @@ function spawnRuntime(args: {
   assertSafeArg('add-dir', args.addDir);
   return new Promise((resolve) => {
     const argv = runtimeSpawnArgs(args.runtime, args.model, args.addDir);
-    const child = spawn(args.binary, argv, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
-      shell: process.platform === 'win32',
-    });
+    // DEP0190: passing an args ARRAY with shell:true is deprecated — Node
+    // concatenates the args unescaped. win32 still needs a shell for the
+    // claude.cmd/copilot.cmd shims, so build the command line ourselves from
+    // the SAFE_ARG_RE-validated parts, double-quoting each one (the regex
+    // forbids `"` and every cmd metacharacter, so quoting is sound). Other
+    // platforms spawn the binary directly — no shell at all.
+    const child =
+      process.platform === 'win32'
+        ? spawn([args.binary, ...argv].map((part) => `"${part}"`).join(' '), {
+            stdio: ['pipe', 'pipe', 'pipe'],
+            windowsHide: true,
+            shell: true,
+          })
+        : spawn(args.binary, argv, {
+            stdio: ['pipe', 'pipe', 'pipe'],
+            windowsHide: true,
+          });
     child.stdin.write(args.promptBody);
     child.stdin.end();
 

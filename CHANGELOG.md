@@ -4,6 +4,9 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+### Fixed
+- win32 orchestrator spawn no longer triggers Node DEP0190 (args array + `shell: true` concatenates unescaped): the command line is now built explicitly from SAFE_ARG_RE-validated, individually double-quoted parts; non-Windows platforms spawn the binary directly without a shell.
+
 ## [0.1.5] — 2026-07-02
 
 ### Fixed

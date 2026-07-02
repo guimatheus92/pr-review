@@ -6,16 +6,18 @@ allowed-tools: ["Bash"]
 
 You are running the `pr-review` CLI. You are NOT reviewing the PR yourself. The CLI does the gathering, dispatch, de-duplication, and posting.
 
-Locate the bundled CLI inside this plugin's install directory and run it. Under Claude Code the plugin root is exported as `$CLAUDE_PLUGIN_ROOT`; under Copilot CLI the plugin lives beneath `~/.copilot/installed-plugins/`:
+Locate the bundled CLI inside this plugin's install directory and run it. Under Claude Code `${CLAUDE_PLUGIN_ROOT}` expands to the plugin root at load time (with a plugin-cache search as fallback); under Copilot CLI the plugin lives beneath `~/.copilot/installed-plugins/`:
 
 ```bash
-if [ -n "$CLAUDE_PLUGIN_ROOT" ] && [ -f "$CLAUDE_PLUGIN_ROOT/dist/cli.cjs" ]; then
-  CLI="$CLAUDE_PLUGIN_ROOT/dist/cli.cjs"
-else
-  CLI=$(find ~/.copilot/installed-plugins -name cli.cjs -path '*/pr-review/dist/*' 2>/dev/null | head -1)
+CLI="${CLAUDE_PLUGIN_ROOT}/dist/cli.cjs"
+if [ ! -f "$CLI" ]; then
+  CLI=$(find ~/.claude/plugins/cache -name cli.cjs -path '*/pr-review/*/dist/*' -not -path '*/node_modules/*' 2>/dev/null | sort | tail -1)
 fi
-if [ -z "$CLI" ]; then
-  echo "pr-review bundle not found (checked \$CLAUDE_PLUGIN_ROOT and ~/.copilot/installed-plugins/). Is the plugin installed?" >&2
+if [ -z "$CLI" ] || [ ! -f "$CLI" ]; then
+  CLI=$(find ~/.copilot/installed-plugins -name cli.cjs -path '*/pr-review/dist/*' 2>/dev/null | sort | tail -1)
+fi
+if [ -z "$CLI" ] || [ ! -f "$CLI" ]; then
+  echo "pr-review bundle not found (checked \${CLAUDE_PLUGIN_ROOT}, ~/.claude/plugins/cache, ~/.copilot/installed-plugins). Is the plugin installed?" >&2
   exit 1
 fi
 node "$CLI" review $ARGUMENTS

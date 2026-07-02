@@ -4,6 +4,9 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+### Fixed
+- GitHub batch review no longer posts a review body ("Automated review findings.") — the body rendered as an extra "left a comment" box in the PR timeline on top of the inline comments. Findings must only ever appear inline; with a populated `comments[]`, GitHub accepts the body-less `event: COMMENT` review (the web UI submits body-less reviews the same way).
+
 ## [0.1.4] — 2026-07-02
 
 ### Added

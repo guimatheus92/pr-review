@@ -41,7 +41,8 @@ export function buildValidLinesMap(files: ChangedFile[]): Map<string, Set<number
 /**
  * Snap a reviewer-supplied line number to the nearest valid line in the diff
  * for that file. Returns `null` when the file is not part of the diff or has
- * no addressable lines — the caller falls back to a non-inline comment.
+ * no addressable lines — the caller re-anchors the finding to a valid diff
+ * line (findings always post inline, never as top-level comments).
  */
 export function snapLineToDiff(
   validLinesByFile: Map<string, Set<number>>,

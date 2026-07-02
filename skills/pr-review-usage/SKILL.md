@@ -52,7 +52,7 @@ Posting line comments back to the PR is the default. Add `--dry-run` to preview 
 4. Prepares the run dir: `pr-context.md` plus one `skills-<reviewer>.md` per reviewer containing the skills routed to it (`inject_into` + `applies_to` matching)
 5. Spawns one agent session (Copilot CLI or Claude Code, per `--runtime`; default `auto` picks whichever is on PATH, copilot first) that dispatches all reviewers in parallel via `task()` / `Task()`; the verifier is dispatched only if Phase 1 produced a CRITICAL/HIGH finding. If the `codex` CLI is installed, a Codex second-opinion reviewer runs in parallel as a sibling process (opt out with `--no-codex`)
 6. De-duplicates findings against existing comments
-7. Posts line-snapped comments (default; GitHub inline comments go as one batched review) — or just prints the summary with `--dry-run`
+7. Posts **every** finding as a resolvable inline review comment (default) — lines are snapped to the diff, GitHub comments go as one batched review, and findings that can't anchor where they point are re-anchored to the first valid diff line with the original `file:line` in the body. Never a top-level comment, nothing dropped. `--dry-run` prints the summary instead
 
 Exit codes: `0` clean, `1` findings at/above the `--fail-on` threshold survived dedupe, `2` pipeline error (the orchestrator produced no parseable findings).
 

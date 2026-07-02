@@ -7,8 +7,5 @@
     "email": "gmatheus@microsoft.com"
   },
   "license": "MIT",
-  "keywords": ["pr-review", "code-review", "azure-devops", "github", "copilot"],
-  "commands": "commands/",
-  "agents": "agents/",
-  "skills": "skills/"
+  "keywords": ["pr-review", "code-review", "azure-devops", "github", "copilot", "claude"]
 }

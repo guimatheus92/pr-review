@@ -4,7 +4,7 @@ description: "pr-review companion plugins: pr-review-toolkit and code-review ins
 
 # Companion Plugins
 
-`pr-review` is fully functional on its own. It also **auto-invokes** two Anthropic-authored Claude-Code plugins when they're installed — no flag needed. Both come from the Claude-Code marketplace and install cleanly into Copilot CLI.
+`pr-review` is fully functional on its own. It also **auto-invokes** two Anthropic-authored Claude-Code plugins when they're installed — no flag needed. Both come from the Claude-Code marketplace and install cleanly into Copilot CLI and Claude Code.
 
 ## The two companions
 
@@ -13,9 +13,9 @@ description: "pr-review companion plugins: pr-review-toolkit and code-review ins
 | [`pr-review-toolkit`](https://claude.com/plugins/pr-review-toolkit) | `/pr-review-toolkit:review-pr <pr-url>` | Dispatches six specialized review agents internally: `code-reviewer`, `code-simplifier`, `comment-analyzer`, `pr-test-analyzer`, `silent-failure-hunter`, `type-design-analyzer`. Returns a consolidated finding set. |
 | [`code-review`](https://claude.com/plugins/code-review) | `/code-review:code-review <pr-url>` | Five-agent parallel fan-out with 0–100 confidence scoring; only ≥80 are surfaced. |
 
-## Install (slash commands inside `copilot`)
+## Install (slash commands inside `copilot` or `claude`)
 
-`/plugin marketplace add` and `/plugin install` are **slash commands inside a `copilot` interactive session** — not `copilot plugin ...` bash subcommands. Start `copilot`, then type at the prompt:
+`/plugin marketplace add` and `/plugin install` are **slash commands inside an interactive session** (`copilot` or `claude`) — not `copilot plugin ...` bash subcommands. Start the session, then type at the prompt:
 
 ```
 /plugin marketplace add anthropics/claude-code
@@ -23,17 +23,19 @@ description: "pr-review companion plugins: pr-review-toolkit and code-review ins
 /plugin install code-review@claude-code-plugins
 ```
 
-Verify with `/plugin list` inside the session, or `copilot plugin list` from bash (the read-only subcommand exists at the bash level).
+Verify with `/plugin list` inside the session, or `copilot plugin list` from bash (the read-only subcommand exists at the bash level for Copilot CLI).
 
 ## How auto-invocation works
 
-`pr-review` queries `copilot plugin list` at the start of every `review` run. For each installed companion in `KNOWN_COMPANIONS` with `invocable: true`, the CLI registers a single reviewer named `companion:<plugin>` whose prompt body is the plugin's entry slash command plus the PR URL — for example:
+Detection depends on the runtime: for the copilot runtime, `pr-review` queries `copilot plugin list` at the start of every `review` run; for the claude runtime it reads `~/.claude/plugins/installed_plugins.json` (keys are `name@marketplace`) — no subprocess. For each installed companion in `KNOWN_COMPANIONS` with `invocable: true`, the CLI registers a single reviewer named `companion:<plugin>` whose prompt body is the plugin's entry slash command plus the PR URL — for example:
 
 ```
 /pr-review-toolkit:review-pr https://dev.azure.com/.../pullrequest/12345
 ```
 
-That prompt is sent to a fresh `copilot --model <model> -p ...` subprocess via stdin. The companion plugin's own orchestrator handles PR fetching, internal sub-agent dispatch, and finding consolidation. Its stdout is captured and parsed by `pr-review`'s markdown-findings parser; the findings then flow through dedupe and posting like any other reviewer.
+That prompt is dispatched via `task()` / `Task()` inside the same single review session as the built-in reviewers. The companion plugin's own orchestrator handles PR fetching, internal sub-agent dispatch, and finding consolidation. Its output is parsed by `pr-review`'s markdown-findings parser; the findings then flow through dedupe and posting like any other reviewer.
+
+Skill routing note: companion agents receive only skills **without** `inject_into` — a skill scoped to specific built-in reviewers is never sent to a companion.
 
 Each companion appears as one row in the summary:
 
@@ -47,13 +49,13 @@ Each companion appears as one row in the summary:
 
 ## Why companions are slow
 
-Each companion plugin's slash command kicks off the plugin's internal orchestrator, which dispatches its own sub-agents (Claude Code's `Task` primitive is available inside the `copilot -p` session). pr-review-toolkit runs six agents; code-review runs five. Wall-clock time per companion is typically 5–15 minutes.
+Each companion plugin's slash command kicks off the plugin's internal orchestrator, which dispatches its own sub-agents inside the review session. pr-review-toolkit runs six agents; code-review runs five. Wall-clock time per companion is typically 5–15 minutes.
 
 The default per-reviewer timeout is 5 minutes, but companion reviewers get a 20-minute timeout automatically (`timeoutMs: 20 * 60 * 1000` in [src/plugins/companions.ts](../../src/plugins/companions.ts)).
 
 ## Cost note
 
-Companion plugins roughly **2-3x review cost** because the entire orchestrator runs inside one of our subprocesses, spinning up Anthropic's internal agents on top. If review cost matters and the built-ins are sufficient, opt out:
+Companion plugins roughly **2-3x review cost** because each one runs its entire internal orchestrator inside the review session, spinning up Anthropic's internal agents on top. With pr-review-toolkit + code-review + the codex second-opinion reviewer all present, a run can total up to 15 reviewers (6 built-ins + verifier + 7 companion agents + codex). If review cost matters and the built-ins are sufficient, opt out:
 
 ```bash
 pr-review review <url> --no-companions
@@ -72,7 +74,7 @@ Both plugins return prose findings (markdown), not JSON. The markdown parser at 
 - `### [SEVERITY] Title` lines
 - `File: path:line` references in the body
 
-If a companion's format ever changes and findings stop being extracted, the raw output is still in the per-reviewer cache and the summary will show 0 findings with a clear note. Check `out/prompt-companion_<plugin>.md` to see what was sent and the response cache for the raw output.
+If a companion's format ever changes and findings stop being extracted, the raw output is still in the run dir (`~/.pr-review/runs/<id>/`) and the summary will show 0 findings with a clear note. Check the orchestrator prompt and raw per-reviewer outputs there to see what was sent and what came back.
 
 ## Warning behavior
 

@@ -9,7 +9,9 @@ description: "pr-review caching: gather cache, response cache, invalidation, byp
 | Layer | Location | Key | Invalidation |
 |---|---|---|---|
 | PR metadata (gather) | `~/.pr-review/cache/<provider>/<owner__repo>/<n>/` | `<headSha>-<lastCommentId>.json` | New commit or new comment |
-| Per-reviewer LLM responses | `~/.pr-review/cache/responses/` | `<reviewer>-<prompt-sha>.json` | Different prompt (new diff, new skill content) |
+| Per-reviewer LLM responses | `~/.pr-review/cache/responses/` | `<reviewer>-<prompt-sha>.json` | **Unused by the single-session review path** — reviewers run as `task()` agents inside one session, so there is no per-reviewer response to cache |
+
+On a gather cache miss, the existing comments fetched to compute the cache key are reused for the run — they are not fetched twice.
 
 ## Commands
 
@@ -24,10 +26,9 @@ pr-review cache clear --all          # clear everything
 | Flag | Effect |
 |---|---|
 | `--no-cache` | Skip gather cache (always re-fetch metadata) |
-| `--no-response-cache` | Skip per-reviewer response cache (always re-run reviewers) |
 
 ## Design notes
 
-- Gather cache hits save ~5-10s per run (skips API calls).
-- Response cache is keyed by prompt SHA, not PR URL. A new commit changes the diff which changes the prompt which auto-busts the cache.
-- Run artifacts (orchestrator prompt, raw outputs, findings JSON, summary) go to `~/.pr-review/runs/<id>/` — these are not cached, just persisted for debugging.
+- Gather cache hits save ~5-10s per run (skips API calls). The key is `headSha` + last comment id, so a new commit or comment auto-busts it.
+- The per-reviewer response cache is not used by the single-session review path.
+- Run artifacts (orchestrator prompt, `pr-context.md`, per-reviewer `skills-<reviewer>.md` files, `phase1-findings.json`, raw outputs, findings JSON, summary) go to `~/.pr-review/runs/<id>/` — these are not cached, just persisted for debugging.

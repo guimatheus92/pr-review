@@ -1,8 +1,10 @@
 import * as azdev from 'azure-devops-node-api';
 import { execFileSync } from 'node:child_process';
+import pLimit from 'p-limit';
 import type { GitPullRequest, GitPullRequestCommentThread, Comment } from 'azure-devops-node-api/interfaces/GitInterfaces.js';
 import type { ChangedFile, ExistingComment, Finding, PrMetadata, PrRef } from '../types.js';
 import type { PrProvider } from './types.js';
+import { withRetry } from '../util/retry.js';
 
 const URL_RES = [
   /^https?:\/\/dev\.azure\.com\/([^\/]+)\/([^\/]+)\/_git\/([^\/]+)\/pullrequest\/(\d+)/i,
@@ -10,6 +12,9 @@ const URL_RES = [
 ];
 
 const ADO_AZURE_AD_RESOURCE_ID = '499b84ac-1321-427f-aa17-267ca6975798';
+
+// Concurrent per-file content fetches during diff synthesis.
+const FILE_FETCH_CONCURRENCY = 5;
 
 interface AdoCredential {
   token: string;
@@ -56,9 +61,18 @@ function orgHost(url: string): string {
   throw new Error(`Unrecognized ADO URL host: ${url}`);
 }
 
+function isTransientAdoError(err: Error): boolean {
+  const status = (err as { statusCode?: number }).statusCode;
+  return status === 429 || (status !== undefined && status >= 500);
+}
+
+type GitApi = Awaited<ReturnType<azdev.WebApi['getGitApi']>>;
+
 export class AzureDevOpsProvider implements PrProvider {
   readonly name = 'azuredevops' as const;
   private connections: Map<string, azdev.WebApi> = new Map();
+  private gitApis: Map<string, Promise<GitApi>> = new Map();
+  private prCache: Map<string, Promise<GitPullRequest>> = new Map();
 
   private connection(orgUrl: string): azdev.WebApi {
     const cached = this.connections.get(orgUrl);
@@ -71,6 +85,16 @@ export class AzureDevOpsProvider implements PrProvider {
     const conn = new azdev.WebApi(orgUrl, handler);
     this.connections.set(orgUrl, conn);
     return conn;
+  }
+
+  private gitApi(ref: PrRef): Promise<GitApi> {
+    const orgUrl = orgHost(ref.url);
+    let api = this.gitApis.get(orgUrl);
+    if (!api) {
+      api = this.connection(orgUrl).getGitApi();
+      this.gitApis.set(orgUrl, api);
+    }
+    return api;
   }
 
   parseUrl(url: string): PrRef | null {
@@ -90,17 +114,21 @@ export class AzureDevOpsProvider implements PrProvider {
     return null;
   }
 
-  private async getPr(ref: PrRef): Promise<GitPullRequest> {
-    const conn = this.connection(orgHost(ref.url));
-    const git = await conn.getGitApi();
-    return git.getPullRequestById(ref.number, ref.project);
+  /** One PR fetch per (url, number) for the provider instance's lifetime — posting N findings must not re-fetch N times. */
+  private getPr(ref: PrRef): Promise<GitPullRequest> {
+    const key = `${orgHost(ref.url)}#${ref.project}#${ref.number}`;
+    let pr = this.prCache.get(key);
+    if (!pr) {
+      pr = this.gitApi(ref).then((git) => git.getPullRequestById(ref.number, ref.project));
+      this.prCache.set(key, pr);
+    }
+    return pr;
   }
 
   async fetchMetadata(ref: PrRef): Promise<PrMetadata> {
     const pr = await this.getPr(ref);
     const linkedItems: PrMetadata['linkedItems'] = [];
-    const conn = this.connection(orgHost(ref.url));
-    const git = await conn.getGitApi();
+    const git = await this.gitApi(ref);
     try {
       const work = await git.getPullRequestWorkItemRefs(pr.repository!.id!, pr.pullRequestId!, ref.project);
       for (const w of work ?? []) {
@@ -131,9 +159,8 @@ export class AzureDevOpsProvider implements PrProvider {
   }
 
   async fetchChangedFiles(ref: PrRef): Promise<ChangedFile[]> {
-    const conn = this.connection(orgHost(ref.url));
-    const git = await conn.getGitApi();
-    const pr = await git.getPullRequestById(ref.number, ref.project);
+    const git = await this.gitApi(ref);
+    const pr = await this.getPr(ref);
     const repoId = pr.repository!.id!;
     const headSha = pr.lastMergeSourceCommit?.commitId;
     const baseSha = pr.lastMergeTargetCommit?.commitId;
@@ -146,41 +173,45 @@ export class AzureDevOpsProvider implements PrProvider {
       latest.id!,
       ref.project,
     );
-    const files: ChangedFile[] = [];
-    for (const change of changes.changeEntries ?? []) {
-      const path = change.item?.path?.replace(/^\//, '') ?? '';
-      if (!path) continue;
-      const status: ChangedFile['status'] =
-        change.changeType === 1
-          ? 'added'
-          : change.changeType === 2
-            ? 'modified'
-            : change.changeType === 16
-              ? 'deleted'
-              : 'modified';
-      let patch: string | undefined;
-      if (status !== 'deleted' && headSha) {
-        const [headContent, baseContent] = await Promise.all([
-          this.fetchFileText(git, repoId, ref.project!, path, headSha),
-          baseSha && status !== 'added' ? this.fetchFileText(git, repoId, ref.project!, path, baseSha) : Promise.resolve(null),
-        ]);
-        patch = this.synthesizePatch(path, baseContent, headContent, baseSha ?? '', headSha);
-      }
-      let additions = 0;
-      let deletions = 0;
-      if (patch) {
-        for (const line of patch.split('\n')) {
-          if (line.startsWith('+') && !line.startsWith('+++')) additions++;
-          else if (line.startsWith('-') && !line.startsWith('---')) deletions++;
-        }
-      }
-      files.push({ path, status, additions, deletions, patch });
-    }
-    return files;
+    const limit = pLimit(FILE_FETCH_CONCURRENCY);
+    const results = await Promise.all(
+      (changes.changeEntries ?? []).map((change) =>
+        limit(async (): Promise<ChangedFile | null> => {
+          const path = change.item?.path?.replace(/^\//, '') ?? '';
+          if (!path) return null;
+          const status: ChangedFile['status'] =
+            change.changeType === 1
+              ? 'added'
+              : change.changeType === 2
+                ? 'modified'
+                : change.changeType === 16
+                  ? 'deleted'
+                  : 'modified';
+          let patch: string | undefined;
+          if (status !== 'deleted' && headSha) {
+            const [headContent, baseContent] = await Promise.all([
+              this.fetchFileText(git, repoId, ref.project!, path, headSha),
+              baseSha && status !== 'added' ? this.fetchFileText(git, repoId, ref.project!, path, baseSha) : Promise.resolve(null),
+            ]);
+            patch = this.synthesizePatch(path, baseContent, headContent, baseSha ?? '', headSha);
+          }
+          let additions = 0;
+          let deletions = 0;
+          if (patch) {
+            for (const line of patch.split('\n')) {
+              if (line.startsWith('+') && !line.startsWith('+++')) additions++;
+              else if (line.startsWith('-') && !line.startsWith('---')) deletions++;
+            }
+          }
+          return { path, status, additions, deletions, patch };
+        }),
+      ),
+    );
+    return results.filter((f): f is ChangedFile => f !== null);
   }
 
   private async fetchFileText(
-    git: Awaited<ReturnType<azdev.WebApi['getGitApi']>>,
+    git: GitApi,
     repoId: string,
     project: string,
     path: string,
@@ -228,46 +259,64 @@ export class AzureDevOpsProvider implements PrProvider {
   }
 
   private lcsLineDiff(a: string[], b: string[]): string {
-    const m = a.length;
-    const n = b.length;
+    // PR edits localize: strip the common prefix/suffix so the O(n²) DP matrix
+    // only covers the changed region instead of the whole file.
+    let prefix = 0;
+    const maxPrefix = Math.min(a.length, b.length);
+    while (prefix < maxPrefix && a[prefix] === b[prefix]) prefix++;
+    let suffix = 0;
+    const maxSuffix = Math.min(a.length, b.length) - prefix;
+    while (suffix < maxSuffix && a[a.length - 1 - suffix] === b[b.length - 1 - suffix]) suffix++;
+
+    const coreA = a.slice(prefix, a.length - suffix);
+    const coreB = b.slice(prefix, b.length - suffix);
+
+    const m = coreA.length;
+    const n = coreB.length;
     const dp: number[][] = Array(m + 1)
       .fill(null)
       .map(() => Array(n + 1).fill(0));
     for (let i = 1; i <= m; i++) {
       for (let j = 1; j <= n; j++) {
-        if (a[i - 1] === b[j - 1]) dp[i]![j] = dp[i - 1]![j - 1]! + 1;
+        if (coreA[i - 1] === coreB[j - 1]) dp[i]![j] = dp[i - 1]![j - 1]! + 1;
         else dp[i]![j] = Math.max(dp[i - 1]![j]!, dp[i]![j - 1]!);
       }
     }
-    const out: string[] = [];
+    const core: string[] = [];
     let i = m;
     let j = n;
     while (i > 0 && j > 0) {
-      if (a[i - 1] === b[j - 1]) {
-        out.push(` ${a[i - 1]}`);
+      if (coreA[i - 1] === coreB[j - 1]) {
+        core.push(` ${coreA[i - 1]}`);
         i--;
         j--;
       } else if (dp[i - 1]![j]! >= dp[i]![j - 1]!) {
-        out.push(`-${a[i - 1]}`);
+        core.push(`-${coreA[i - 1]}`);
         i--;
       } else {
-        out.push(`+${b[j - 1]}`);
+        core.push(`+${coreB[j - 1]}`);
         j--;
       }
     }
     while (i > 0) {
-      out.push(`-${a[--i]}`);
+      core.push(`-${coreA[--i]}`);
     }
     while (j > 0) {
-      out.push(`+${b[--j]}`);
+      core.push(`+${coreB[--j]}`);
     }
-    return out.reverse().join('\n');
+    core.reverse();
+
+    const out: string[] = [
+      ...a.slice(0, prefix).map((l) => ` ${l}`),
+      ...core,
+      ...a.slice(a.length - suffix).map((l) => ` ${l}`),
+    ];
+    return out.join('\n');
   }
 
   async fetchFullDiff(ref: PrRef): Promise<string> {
-    const conn = this.connection(orgHost(ref.url));
-    const git = await conn.getGitApi();
-    const pr = await git.getPullRequestById(ref.number, ref.project);
+    const git = await this.gitApi(ref);
+    const pr = await this.getPr(ref);
     const sourceSha = pr.lastMergeSourceCommit?.commitId;
     const targetSha = pr.lastMergeTargetCommit?.commitId;
     if (!sourceSha || !targetSha) return '';
@@ -288,9 +337,8 @@ export class AzureDevOpsProvider implements PrProvider {
   }
 
   async fetchExistingComments(ref: PrRef): Promise<ExistingComment[]> {
-    const conn = this.connection(orgHost(ref.url));
-    const git = await conn.getGitApi();
-    const pr = await git.getPullRequestById(ref.number, ref.project);
+    const git = await this.gitApi(ref);
+    const pr = await this.getPr(ref);
     const threads = await git.getThreads(pr.repository!.id!, ref.number, ref.project);
     const out: ExistingComment[] = [];
     for (const t of threads ?? []) {
@@ -312,30 +360,31 @@ export class AzureDevOpsProvider implements PrProvider {
     return out;
   }
 
-  async postLineComment(ref: PrRef, finding: Finding): Promise<{ id: string } | null> {
-    const conn = this.connection(orgHost(ref.url));
-    const git = await conn.getGitApi();
-    const pr = await git.getPullRequestById(ref.number, ref.project);
+  async postLineComment(ref: PrRef, finding: Finding, _headSha?: string): Promise<{ id: string } | null> {
+    const git = await this.gitApi(ref);
+    const pr = await this.getPr(ref);
     const repoId = pr.repository!.id!;
     const body = finding.body.trim();
-    if (finding.file && finding.line) {
-      const thread: GitPullRequestCommentThread = {
-        comments: [{ parentCommentId: 0, content: body, commentType: 1 } as Comment],
-        status: 1,
-        threadContext: {
-          filePath: `/${finding.file.replace(/^\//, '')}`,
-          rightFileStart: { line: finding.line, offset: 1 },
-          rightFileEnd: { line: finding.line, offset: 1 },
-        },
-      };
-      const created = await git.createThread(thread, repoId, ref.number, ref.project);
-      return { id: `${created.id}` };
-    }
-    const general: GitPullRequestCommentThread = {
-      comments: [{ parentCommentId: 0, content: body, commentType: 1 } as Comment],
-      status: 1,
-    };
-    const created = await git.createThread(general, repoId, ref.number, ref.project);
+    const thread: GitPullRequestCommentThread =
+      finding.file && finding.line
+        ? {
+            comments: [{ parentCommentId: 0, content: body, commentType: 1 } as Comment],
+            status: 1,
+            threadContext: {
+              filePath: `/${finding.file.replace(/^\//, '')}`,
+              rightFileStart: { line: finding.line, offset: 1 },
+              rightFileEnd: { line: finding.line, offset: 1 },
+            },
+          }
+        : {
+            comments: [{ parentCommentId: 0, content: body, commentType: 1 } as Comment],
+            status: 1,
+          };
+    const created = await withRetry(
+      () => git.createThread(thread, repoId, ref.number, ref.project),
+      isTransientAdoError,
+      finding.file ? `${finding.file}:${finding.line ?? '-'}` : 'general comment',
+    );
     return { id: `${created.id}` };
   }
 }

@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # win32 has dedicated spawn handling (copilot.cmd shim) — test both.
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - run: npm run test
+      - name: Bundle freshness — dist/cli.cjs must match src/
+        if: matrix.os == 'ubuntu-latest'
+        run: git diff --exit-code dist/cli.cjs || (echo '::error::dist/cli.cjs is stale — run `npm run build` and commit the bundle' && exit 1)

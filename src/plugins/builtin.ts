@@ -45,20 +45,26 @@ interface Frontmatter {
 
 const FRONTMATTER_RE = /^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n([\s\S]*)$/;
 
-export function parseFrontmatter(raw: string): { meta: Frontmatter; body: string } {
+export function parseFrontmatter(raw: string, sourcePath?: string): { meta: Frontmatter; body: string } {
+  raw = raw.replace(/^\uFEFF/, ''); // Windows editors/PowerShell write a UTF-8 BOM, which would defeat the ^--- match
   const m = raw.match(FRONTMATTER_RE);
   if (!m) return { meta: {}, body: raw };
   try {
     const meta = (parseYaml(m[1]!) as Frontmatter) ?? {};
     return { meta, body: m[2]! };
-  } catch {
+  } catch (err) {
+    if (sourcePath) {
+      process.stderr.write(
+        `[skills] warning: invalid frontmatter YAML in ${sourcePath} — frontmatter ignored (${(err as Error).message.split('\n')[0]})\n`,
+      );
+    }
     return { meta: {}, body: raw };
   }
 }
 
 export function loadReviewerFile(filePath: string, isBuiltIn = false): ReviewerDefinition {
   const raw = readFileSync(filePath, 'utf8');
-  const { meta, body } = parseFrontmatter(raw);
+  const { meta, body } = parseFrontmatter(raw, filePath);
   const name = inferNameFromPath(filePath);
   return {
     name,
@@ -75,7 +81,7 @@ export function loadReviewerFile(filePath: string, isBuiltIn = false): ReviewerD
 
 export function loadSkillFile(filePath: string): SkillDefinition {
   const raw = readFileSync(filePath, 'utf8');
-  const { meta, body } = parseFrontmatter(raw);
+  const { meta, body } = parseFrontmatter(raw, filePath);
   return {
     name: inferNameFromPath(filePath),
     description: meta.description,

@@ -6,11 +6,20 @@ description: "pr-review quickstart: install, authenticate, daily usage, common f
 
 ## Install (once)
 
+Copilot CLI:
+
 ```bash
 copilot plugin marketplace add gmatheus/pr-review     # if installing from GitHub
 # OR
 copilot plugin marketplace add /path/to/pr-review     # if installing from local
 copilot plugin install pr-review@pr-review
+```
+
+Claude Code (slash commands inside a `claude` session):
+
+```
+/plugin marketplace add gmatheus/pr-review
+/plugin install pr-review@pr-review
 ```
 
 ## Authenticate
@@ -24,7 +33,7 @@ For Azure DevOps PRs:
 
 ## Daily flow
 
-From inside a `copilot` session in any repo:
+From inside a `copilot` or `claude` session in any repo:
 
 ```
 /pr-review https://github.com/<org>/<repo>/pull/<n>
@@ -36,18 +45,20 @@ Add `--dry-run` to see findings without posting; `--publish` to post line commen
 ## What it does
 
 1. Detects the provider from the URL (GitHub or ADO)
-2. Gathers PR metadata, diff, linked work items, existing comments (cached for re-runs)
-3. Picks reviewers: built-in (security, quality, architecture, performance, test-coverage, silent-failure, verifier) + auto-discovered from `.pr-review/reviewers/` + any plugins
-4. Materializes per-reviewer prompts with the diff, metadata, existing comments to skip, and matching skills as context
-5. Spawns parallel `copilot` subprocesses (one per reviewer, mixed Opus + GPT possible)
+2. Gathers PR metadata, diff, linked work items, existing comments — metadata and comments fetched in parallel, cached for re-runs
+3. Triages deterministically: docs-only PRs (all in-scope files are docs) dispatch only the `quality` reviewer; skipped reviewers are logged
+4. Prepares the run dir: `pr-context.md` plus one `skills-<reviewer>.md` per reviewer containing the skills routed to it (`inject_into` + `applies_to` matching)
+5. Spawns one agent session (Copilot CLI or Claude Code, per `--runtime`; default `auto` picks whichever is on PATH, copilot first) that dispatches all reviewers in parallel via `task()` / `Task()`; the verifier is dispatched only if Phase 1 produced a CRITICAL/HIGH finding. If the `codex` CLI is installed, a Codex second-opinion reviewer runs in parallel as a sibling process (opt out with `--no-codex`)
 6. De-duplicates findings against existing comments
-7. Posts line-snapped comments (with `--publish`) or prints a summary
+7. Posts line-snapped comments (with `--publish`; GitHub inline comments go as one batched review) or prints a summary
 
-## Add, remove, or override reviewers
+Exit codes: `0` clean, `1` findings at/above the `--fail-on` threshold survived dedupe, `2` pipeline error (the orchestrator produced no parseable findings).
 
-Drop `.md` files in `.pr-review/skills/` (for reference content augmenting built-in reviewers) or `.pr-review/reviewers/` (for standalone review passes). The tool picks them up automatically. To remove a built-in, use `--skip <name>` per-invocation or `skip_reviewers:` in config. To override a built-in with your team's stricter version, place a file with the same name (e.g. `security.md`) in `.pr-review/reviewers/` and it wins.
+## Add or remove review content
 
-Full lifecycle (list, add, remove, override) in the `adding-your-own-md` skill. The seven built-in reviewers and how to manage them are in [README.md](../../README.md#managing-reviewers).
+Drop `.md` files in `.pr-review/skills/` (reference content injected into the built-in reviewers). The tool picks them up automatically. Standalone reviewer files in `.pr-review/reviewers/` are **not** loaded by the single-session review path — author skills instead. To remove a built-in reviewer, use `--skip <name>` per-invocation or `skip_reviewers:` in config. To test where a skill routes, run with `--context-only`.
+
+Full lifecycle (list, add, remove) in the `adding-your-own-md` skill. The seven built-in reviewers and how to manage them are in [README.md](../../README.md#managing-reviewers).
 
 ## Common flags
 
@@ -55,11 +66,13 @@ Full lifecycle (list, add, remove, override) in the `adding-your-own-md` skill. 
 |---|---|
 | `--dry-run` | Don't post comments |
 | `--publish` | Post line comments back to the PR |
+| `--context-only` | Prepare `pr-context.md` + skills files and print the skill→reviewer routing table, without spawning the runtime |
+| `--runtime <name>` | `copilot`\|`claude`\|`auto` — which agent CLI hosts the session (default `auto`) |
+| `--no-codex` | Skip the Codex second-opinion reviewer |
+| `--lang <code>` | Language for finding titles/bodies (default `en`) |
+| `--fail-on <severity>` | Exit 1 if findings at/above this severity survive dedupe (`critical`\|`high`\|`medium`\|`low`\|`nit`) |
 | `--skip <names>` | Skip reviewers by comma-separated name |
 | `--no-cache` | Bypass the gather cache |
-| `--no-response-cache` | Bypass the per-reviewer response cache |
-| `--reviewer <file>` | Include a specific .md file as a reviewer |
-| `--reviewers-dir <path>` | Include a directory of .md reviewers |
 | `--skill <file>` | Include a specific .md file as a skill |
 | `--skills-dir <path>` | Include a directory of .md skills |
 | `--plugin-dir <path>` | Include a packaged plugin (has its own plugin.yaml) |

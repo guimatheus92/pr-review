@@ -21,11 +21,13 @@ export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
   }
 
   process.stderr.write(`[gather] fetching metadata for ${ref.provider} PR #${ref.number}…\n`);
-  const metadata = await provider.fetchMetadata(ref);
+  const [metadata, existingComments] = await Promise.all([
+    provider.fetchMetadata(ref),
+    provider.fetchExistingComments(ref),
+  ]);
 
   if (useCache) {
-    const commentsPreview = await provider.fetchExistingComments(ref);
-    const sortedIds = commentsPreview
+    const sortedIds = existingComments
       .slice()
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     const lastCommentId = sortedIds.length > 0 ? sortedIds[sortedIds.length - 1]!.id : 'none';
@@ -43,10 +45,9 @@ export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
     }
   }
 
-  const [changedFilesRaw, fullDiff, existingComments] = await Promise.all([
+  const [changedFilesRaw, fullDiff] = await Promise.all([
     provider.fetchChangedFiles(ref),
     provider.fetchFullDiff(ref),
-    provider.fetchExistingComments(ref),
   ]);
 
   const changedFiles = applyDiffExclusions(changedFilesRaw, opts.extraExcludes);

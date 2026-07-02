@@ -56,3 +56,5 @@ Tests use `node:test` + `node:assert`. Run with `npm run test`. Tests are in `te
 - **Change runtime spawn args or model mapping:** Edit `src/dispatch/runtime.ts`.
 - **Change Codex reviewer behavior:** Edit `src/dispatch/codex.ts`.
 - **Preview reviewer context:** `pr-review review <url> --context-only` — writes pr-context.md + per-reviewer skills files, prints the skill→reviewer routing table, exits without spawning the runtime.
+- **Check the environment:** `pr-review doctor` — runtimes on PATH, resolved runtime/model, codex + companions, provider auth, config sources.
+- **Cut a release:** `node scripts/release.mjs <patch|minor|major|x.y.z>` — bumps every manifest, verifies no stale version string, rolls CHANGELOG, rebuilds, commits and tags (push left to you).

@@ -270,6 +270,19 @@ plugins
     }
   });
 
+program
+  .command('doctor')
+  .description('Environment preflight: runtimes, codex, companions, provider auth, effective config')
+  .action(async () => {
+    try {
+      const { runDoctor } = await import('./commands/doctor.js');
+      process.exitCode = await runDoctor();
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(2);
+    }
+  });
+
 const config = program.command('config').description('Inspect the effective configuration');
 config
   .command('show')

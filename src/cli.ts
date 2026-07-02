@@ -42,8 +42,8 @@ program
 program
   .command('review <pr-url>')
   .description('Run the full review pipeline in parallel; print/post findings')
-  .option('--dry-run', 'Do not post comments (default unless --publish given)', false)
-  .option('--publish', 'Post findings as line comments on the PR', false)
+  .option('--dry-run', 'Preview findings without posting comments (posting is the default)', false)
+  .option('--publish', '(deprecated: posting is now the default; use --dry-run to preview)', false)
   .option('--skip <names>', 'Comma-separated reviewer names to skip')
   .option('--reviewer <path...>', 'Include a specific .md file as a reviewer (repeatable)')
   .option('--reviewers-dir <path...>', 'Include a directory of reviewer .md files (repeatable)')
@@ -120,8 +120,8 @@ program
           skillsDirs: opts.skillsDir,
           plugins: opts.plugin,
           pluginDirs: opts.pluginDir,
-          dryRun: opts.dryRun || !opts.publish,
-          publish: opts.publish,
+          dryRun: opts.dryRun,
+          publish: !opts.dryRun && !opts.contextOnly,
           copilotBinary: opts.copilot,
           useCache: opts.cache,
           useResponseCache: opts.responseCache,
@@ -149,8 +149,8 @@ program
   .command('post <pr-url>')
   .description('Post pre-computed findings (from a JSON file) as line comments')
   .requiredOption('--findings <path>', 'Path to a findings.json file produced by `review`')
-  .option('--dry-run', 'Show what would be posted without posting', false)
-  .option('--publish', 'Actually post the comments', false)
+  .option('--dry-run', 'Show what would be posted without posting (posting is the default)', false)
+  .option('--publish', '(deprecated: posting is now the default; use --dry-run to preview)', false)
   .action(async (prUrl: string, opts: { findings: string; dryRun: boolean; publish: boolean }) => {
     try {
       const raw = JSON.parse(readFileSync(opts.findings, 'utf8')) as { reviewers?: Array<{ reviewer: string; model: string; findings: ReviewerOutput['findings'] }>; finalFindings?: ReviewerOutput['findings'] } | Array<{ reviewer: string; model: string; findings: ReviewerOutput['findings'] }>;
@@ -185,7 +185,7 @@ program
           exitCode: 0,
         }));
       }
-      await runPost({ prUrl, outputs, publish: opts.publish && !opts.dryRun });
+      await runPost({ prUrl, outputs, publish: !opts.dryRun });
     } catch (err) {
       console.error((err as Error).message);
       process.exit(1);

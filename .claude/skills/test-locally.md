@@ -50,7 +50,7 @@ node ./dist/cli.js gather <pr-url>
 ```bash
 # Use findings from a previous run
 node ./dist/cli.js post <pr-url> --findings ~/.pr-review/runs/<id>/pr-review-findings.json --dry-run
-node ./dist/cli.js post <pr-url> --findings <path> --publish   # actually post
+node ./dist/cli.js post <pr-url> --findings <path>            # actually post (default)
 ```
 
 ## Plugin installation test

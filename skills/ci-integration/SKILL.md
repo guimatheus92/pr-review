@@ -4,7 +4,7 @@ description: "pr-review CI/CD integration: GitHub Actions and Azure DevOps Pipel
 
 # Running pr-review in CI/CD
 
-The tool runs in CI the same way it runs locally: install Copilot CLI + this plugin, then call `pr-review review <pr-url> --publish` with auth env vars.
+The tool runs in CI the same way it runs locally: install Copilot CLI + this plugin, then call `pr-review review <pr-url>` with auth env vars.
 
 ## Exit codes and gating
 
@@ -17,7 +17,7 @@ The tool runs in CI the same way it runs locally: install Copilot CLI + this plu
 To gate a pipeline on serious findings, add `--fail-on <severity>` (`critical`\|`high`\|`medium`\|`low`\|`nit`):
 
 ```bash
-pr-review review "$PR_URL" --publish --fail-on high
+pr-review review "$PR_URL" --fail-on high
 ```
 
 The step fails (exit 1) when any CRITICAL or HIGH finding survives dedupe. Treat exit 2 as an infrastructure failure, not a review verdict.
@@ -65,7 +65,7 @@ jobs:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_PR_REVIEW_TOKEN }}   # token belonging to an identity with a Copilot seat
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          pr-review review ${{ github.event.pull_request.html_url }} --publish
+          pr-review review ${{ github.event.pull_request.html_url }}
 ```
 
 **Notes:**
@@ -107,7 +107,7 @@ steps:
 
   - bash: |
       PR_URL="https://dev.azure.com/$(System.TeamFoundationCollectionUri)$(System.TeamProject)/_git/$(Build.Repository.Name)/pullrequest/$(System.PullRequest.PullRequestId)"
-      pr-review review "$PR_URL" --publish
+      pr-review review "$PR_URL"
     displayName: 'Review the PR'
     env:
       AZURE_DEVOPS_PAT: $(System.AccessToken)

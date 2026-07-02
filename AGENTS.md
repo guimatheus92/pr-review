@@ -6,7 +6,7 @@ Generic, plugin-based PR review tool for GitHub and Azure DevOps, packaged as a 
 
 ```bash
 npm run build          # tsc + esbuild → dist/cli.cjs
-npm run test           # node --test tests/**/*.test.ts (77 tests, ~500ms)
+npm run test           # node scripts/test.mjs → node --test over tests/*.test.ts (110 tests, ~600ms)
 npm run build:watch    # tsc watch (re-run `npm run bundle` for esbuild)
 ```
 

@@ -61,12 +61,96 @@ function orgHost(url: string): string {
   throw new Error(`Unrecognized ADO URL host: ${url}`);
 }
 
-function isTransientAdoError(err: Error): boolean {
-  const status = (err as { statusCode?: number }).statusCode;
+/** Exported for tests. azure-devops-node-api surfaces HTTP codes as `statusCode`; check `status` too so a library change cannot silently kill retries. */
+export function isTransientAdoError(err: Error): boolean {
+  const e = err as { statusCode?: number; status?: number };
+  const status = e.statusCode ?? e.status;
   return status === 429 || (status !== undefined && status >= 500);
 }
 
 type GitApi = Awaited<ReturnType<azdev.WebApi['getGitApi']>>;
+
+/**
+ * Synthesize a unified-diff patch from base/head file contents. Exported for
+ * tests: this patch feeds buildValidLinesMap (line snapping) and the reviewer
+ * context, so wrong offsets silently snap every ADO finding to a wrong line.
+ */
+export function synthesizePatch(
+  path: string,
+  base: string | null,
+  head: string | null,
+  baseSha: string,
+  headSha: string,
+): string {
+  const baseLines = (base ?? '').split('\n');
+  const headLines = (head ?? '').split('\n');
+  if (!base && head) {
+    return `--- /dev/null\n+++ b/${path} (${headSha.slice(0, 12)})\n${headLines.map((l) => `+${l}`).join('\n')}`;
+  }
+  if (base && !head) {
+    return `--- a/${path} (${baseSha.slice(0, 12)})\n+++ /dev/null\n${baseLines.map((l) => `-${l}`).join('\n')}`;
+  }
+  const lcs = lcsLineDiff(baseLines, headLines);
+  const header = `--- a/${path} (${baseSha.slice(0, 12)})\n+++ b/${path} (${headSha.slice(0, 12)})`;
+  return `${header}\n${lcs}`;
+}
+
+/** Exported for tests. */
+export function lcsLineDiff(a: string[], b: string[]): string {
+  // PR edits localize: strip the common prefix/suffix so the O(n²) DP matrix
+  // only covers the changed region instead of the whole file.
+  let prefix = 0;
+  const maxPrefix = Math.min(a.length, b.length);
+  while (prefix < maxPrefix && a[prefix] === b[prefix]) prefix++;
+  let suffix = 0;
+  const maxSuffix = Math.min(a.length, b.length) - prefix;
+  while (suffix < maxSuffix && a[a.length - 1 - suffix] === b[b.length - 1 - suffix]) suffix++;
+
+  const coreA = a.slice(prefix, a.length - suffix);
+  const coreB = b.slice(prefix, b.length - suffix);
+
+  const m = coreA.length;
+  const n = coreB.length;
+  const dp: number[][] = Array(m + 1)
+    .fill(null)
+    .map(() => Array(n + 1).fill(0));
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (coreA[i - 1] === coreB[j - 1]) dp[i]![j] = dp[i - 1]![j - 1]! + 1;
+      else dp[i]![j] = Math.max(dp[i - 1]![j]!, dp[i]![j - 1]!);
+    }
+  }
+  const core: string[] = [];
+  let i = m;
+  let j = n;
+  while (i > 0 && j > 0) {
+    if (coreA[i - 1] === coreB[j - 1]) {
+      core.push(` ${coreA[i - 1]}`);
+      i--;
+      j--;
+    } else if (dp[i - 1]![j]! >= dp[i]![j - 1]!) {
+      core.push(`-${coreA[i - 1]}`);
+      i--;
+    } else {
+      core.push(`+${coreB[j - 1]}`);
+      j--;
+    }
+  }
+  while (i > 0) {
+    core.push(`-${coreA[--i]}`);
+  }
+  while (j > 0) {
+    core.push(`+${coreB[--j]}`);
+  }
+  core.reverse();
+
+  const out: string[] = [
+    ...a.slice(0, prefix).map((l) => ` ${l}`),
+    ...core,
+    ...a.slice(a.length - suffix).map((l) => ` ${l}`),
+  ];
+  return out.join('\n');
+}
 
 export class AzureDevOpsProvider implements PrProvider {
   readonly name = 'azuredevops' as const;
@@ -193,7 +277,7 @@ export class AzureDevOpsProvider implements PrProvider {
               this.fetchFileText(git, repoId, ref.project!, path, headSha),
               baseSha && status !== 'added' ? this.fetchFileText(git, repoId, ref.project!, path, baseSha) : Promise.resolve(null),
             ]);
-            patch = this.synthesizePatch(path, baseContent, headContent, baseSha ?? '', headSha);
+            patch = synthesizePatch(path, baseContent, headContent, baseSha ?? '', headSha);
           }
           let additions = 0;
           let deletions = 0;
@@ -236,82 +320,6 @@ export class AzureDevOpsProvider implements PrProvider {
     } catch {
       return null;
     }
-  }
-
-  private synthesizePatch(
-    path: string,
-    base: string | null,
-    head: string | null,
-    baseSha: string,
-    headSha: string,
-  ): string {
-    const baseLines = (base ?? '').split('\n');
-    const headLines = (head ?? '').split('\n');
-    if (!base && head) {
-      return `--- /dev/null\n+++ b/${path} (${headSha.slice(0, 12)})\n${headLines.map((l) => `+${l}`).join('\n')}`;
-    }
-    if (base && !head) {
-      return `--- a/${path} (${baseSha.slice(0, 12)})\n+++ /dev/null\n${baseLines.map((l) => `-${l}`).join('\n')}`;
-    }
-    const lcs = this.lcsLineDiff(baseLines, headLines);
-    const header = `--- a/${path} (${baseSha.slice(0, 12)})\n+++ b/${path} (${headSha.slice(0, 12)})`;
-    return `${header}\n${lcs}`;
-  }
-
-  private lcsLineDiff(a: string[], b: string[]): string {
-    // PR edits localize: strip the common prefix/suffix so the O(n²) DP matrix
-    // only covers the changed region instead of the whole file.
-    let prefix = 0;
-    const maxPrefix = Math.min(a.length, b.length);
-    while (prefix < maxPrefix && a[prefix] === b[prefix]) prefix++;
-    let suffix = 0;
-    const maxSuffix = Math.min(a.length, b.length) - prefix;
-    while (suffix < maxSuffix && a[a.length - 1 - suffix] === b[b.length - 1 - suffix]) suffix++;
-
-    const coreA = a.slice(prefix, a.length - suffix);
-    const coreB = b.slice(prefix, b.length - suffix);
-
-    const m = coreA.length;
-    const n = coreB.length;
-    const dp: number[][] = Array(m + 1)
-      .fill(null)
-      .map(() => Array(n + 1).fill(0));
-    for (let i = 1; i <= m; i++) {
-      for (let j = 1; j <= n; j++) {
-        if (coreA[i - 1] === coreB[j - 1]) dp[i]![j] = dp[i - 1]![j - 1]! + 1;
-        else dp[i]![j] = Math.max(dp[i - 1]![j]!, dp[i]![j - 1]!);
-      }
-    }
-    const core: string[] = [];
-    let i = m;
-    let j = n;
-    while (i > 0 && j > 0) {
-      if (coreA[i - 1] === coreB[j - 1]) {
-        core.push(` ${coreA[i - 1]}`);
-        i--;
-        j--;
-      } else if (dp[i - 1]![j]! >= dp[i]![j - 1]!) {
-        core.push(`-${coreA[i - 1]}`);
-        i--;
-      } else {
-        core.push(`+${coreB[j - 1]}`);
-        j--;
-      }
-    }
-    while (i > 0) {
-      core.push(`-${coreA[--i]}`);
-    }
-    while (j > 0) {
-      core.push(`+${coreB[--j]}`);
-    }
-    core.reverse();
-
-    const out: string[] = [
-      ...a.slice(0, prefix).map((l) => ` ${l}`),
-      ...core,
-      ...a.slice(a.length - suffix).map((l) => ` ${l}`),
-    ];
-    return out.join('\n');
   }
 
   async fetchFullDiff(ref: PrRef): Promise<string> {

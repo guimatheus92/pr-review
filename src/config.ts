@@ -5,8 +5,6 @@ import { parse as parseYaml } from 'yaml';
 
 export interface Config {
   defaultModel: string;
-  defaultConcurrency: number;
-  concurrencyByModel: Record<string, number>;
   autodiscover: boolean;
   reviewers: string[];
   reviewersDirs: string[];
@@ -28,8 +26,6 @@ export interface Config {
 
 const DEFAULTS: Config = {
   defaultModel: 'claude-opus-4.8',
-  defaultConcurrency: 4,
-  concurrencyByModel: {},
   autodiscover: true,
   reviewers: [],
   reviewersDirs: [],
@@ -49,8 +45,6 @@ const DEFAULTS: Config = {
 
 interface RawConfig {
   default_model?: string;
-  default_concurrency?: number;
-  concurrency_by_model?: Record<string, number>;
   autodiscover?: boolean;
   extra_reviewers?: string[];
   extra_reviewers_dirs?: string[];
@@ -84,8 +78,6 @@ function readYamlFile(path: string): RawConfig {
 
 function applyRaw(target: Config, raw: RawConfig, baseDir: string): void {
   if (raw.default_model) target.defaultModel = raw.default_model;
-  if (typeof raw.default_concurrency === 'number') target.defaultConcurrency = raw.default_concurrency;
-  if (raw.concurrency_by_model) Object.assign(target.concurrencyByModel, raw.concurrency_by_model);
   if (typeof raw.autodiscover === 'boolean') target.autodiscover = raw.autodiscover;
   if (raw.extra_reviewers) target.reviewers.push(...raw.extra_reviewers.map((p) => resolve(baseDir, expandHome(p))));
   if (raw.extra_reviewers_dirs)

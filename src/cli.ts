@@ -14,8 +14,8 @@ const program = new Command();
 
 program
   .name('pr-review')
-  .description('Generic, plugin-based PR review for GitHub and Azure DevOps via Copilot CLI')
-  .version('0.1.0');
+  .description('Generic, plugin-based PR review for GitHub and Azure DevOps via Copilot CLI or Claude Code')
+  .version('0.1.3');
 
 program
   .command('gather <pr-url>')
@@ -54,9 +54,8 @@ program
   .option('--no-autodiscover', 'Disable scanning .pr-review/ conventional paths')
   .option('--dedupe-mode <mode>', "Dedupe mode: strict | loose | off", 'strict')
   .option('--default-model <model>', 'Default model for reviewers without an explicit one')
-  .option('--copilot <path>', 'Path to the runtime CLI binary (copilot or claude)')
+  .option('--copilot <path>', 'Path to the copilot CLI binary (implies --runtime copilot unless --runtime is given)')
   .option('--no-cache', 'Bypass gather cache')
-  .option('--no-response-cache', 'Bypass per-reviewer response cache')
   .option('--no-companion-warning', 'Suppress the companion-plugin install warning')
   .option(
     '--no-companions',
@@ -85,7 +84,6 @@ program
         defaultModel?: string;
         copilot: string;
         cache: boolean;
-        responseCache: boolean;
         companionWarning: boolean;
         companions: boolean;
         contextOnly: boolean;
@@ -124,7 +122,6 @@ program
           publish: !opts.dryRun && !opts.contextOnly,
           copilotBinary: opts.copilot,
           useCache: opts.cache,
-          useResponseCache: opts.responseCache,
           autodiscover: opts.autodiscover,
           dedupeMode: opts.dedupeMode,
           defaultModel: opts.defaultModel,

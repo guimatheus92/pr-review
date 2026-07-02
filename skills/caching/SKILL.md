@@ -1,5 +1,5 @@
 ---
-description: "pr-review caching: gather cache, response cache, invalidation, bypass flags, and management commands. Use when asked about caching behavior, stale data, cache clearing, or why a re-run is fast."
+description: "pr-review caching: gather cache, invalidation, bypass flags, and management commands. Use when asked about caching behavior, stale data, cache clearing, or why a re-run is fast."
 ---
 
 # Caching
@@ -30,5 +30,5 @@ pr-review cache clear --all          # clear everything
 ## Design notes
 
 - Gather cache hits save ~5-10s per run (skips API calls). The key is `headSha` + last comment id, so a new commit or comment auto-busts it.
-- The per-reviewer response cache is not used by the single-session review path.
+- The per-reviewer response cache was removed; only stale files may remain under `responses/` until `pr-review cache clear`.
 - Run artifacts (orchestrator prompt, `pr-context.md`, per-reviewer `skills-<reviewer>.md` files, `phase1-findings.json`, raw outputs, findings JSON, summary) go to `~/.pr-review/runs/<id>/` — these are not cached, just persisted for debugging.

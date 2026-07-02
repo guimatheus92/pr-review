@@ -109,8 +109,13 @@ export class GitHubProvider implements PrProvider {
             title: issue.title,
             state: issue.state,
           };
-        } catch {
-          return null; // Best-effort
+        } catch (err) {
+          // Best-effort, but never silently: reviewers lose linked-issue
+          // context when this drops, so say which one and why.
+          process.stderr.write(
+            `[gather] could not fetch linked issue #${id}: ${(err as Error).message.split('\n')[0]}\n`,
+          );
+          return null;
         }
       }),
     );

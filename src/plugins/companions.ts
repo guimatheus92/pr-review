@@ -111,10 +111,19 @@ export function parsePluginListOutput(stdout: string): string[] {
   return installed;
 }
 
-/** Claude Code records installs in ~/.claude/plugins/installed_plugins.json, keyed "name@marketplace". */
+/**
+ * Claude Code records installs in ~/.claude/plugins/installed_plugins.json,
+ * keyed "name@marketplace". Total function: malformed content yields [] —
+ * companion detection is best-effort and must never crash a review run.
+ */
 export function parseInstalledPluginsJson(raw: string): string[] {
-  const parsed = JSON.parse(raw) as { plugins?: Record<string, unknown> };
-  return Object.keys(parsed.plugins ?? {}).map((k) => k.split('@')[0]!);
+  try {
+    const parsed = JSON.parse(raw) as { plugins?: Record<string, unknown> };
+    if (!parsed || typeof parsed !== 'object' || !parsed.plugins) return [];
+    return Object.keys(parsed.plugins).map((k) => k.split('@')[0]!);
+  } catch {
+    return [];
+  }
 }
 
 function detectClaudePlugins(): string[] {

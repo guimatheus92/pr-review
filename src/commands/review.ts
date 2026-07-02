@@ -30,7 +30,6 @@ interface ReviewCmdOptions {
   publish?: boolean;
   copilotBinary?: string;
   useCache?: boolean;
-  useResponseCache?: boolean;
   autodiscover?: boolean;
   dedupeMode?: 'strict' | 'loose' | 'off';
   defaultModel?: string;
@@ -62,6 +61,22 @@ const SEVERITY_RANK: Record<string, number> = {
 
 const MAX_FILES_GUARD = 500;
 const MAX_PATCH_BYTES = 2_000_000;
+
+/**
+ * The three-state exit contract, exported for tests: 2 = pipeline failure
+ * (wins over everything — no parseable findings is never a clean PR),
+ * 1 = findings at/above --fail-on survived dedupe, 0 = clean.
+ */
+export function decideExitCode(
+  findingsUnavailable: boolean,
+  finalFindings: Finding[],
+  failOn?: Severity,
+): 0 | 1 | 2 {
+  if (findingsUnavailable) return 2;
+  if (!failOn) return 0;
+  const threshold = SEVERITY_RANK[failOn] ?? 0;
+  return finalFindings.some((f) => (SEVERITY_RANK[f.severity] ?? 99) <= threshold) ? 1 : 0;
+}
 
 function earlyExitGate(gather: GatherOutput): string | null {
   const m = gather.metadata;
@@ -264,6 +279,8 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   );
 
   // Codex runs as a sibling process, in parallel with the orchestrator session.
+  // runCodexReviewer resolves on every failure path (spawn error, timeout,
+  // unreadable output) with `error` set — no catch wrapper needed.
   let codexPromise: Promise<ReviewerOutput> | null = null;
   if (includeCodex) {
     const ctx = prepareSessionContext(sessionOpts);
@@ -271,15 +288,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
       contextPath: ctx.contextPath,
       skillsPath: ctx.skillsFiles['codex'],
       outDir,
-    }).catch((err: Error) => ({
-      reviewerName: 'codex',
-      model: 'codex',
-      findings: [],
-      rawOutput: '',
-      durationMs: 0,
-      exitCode: -1,
-      error: err.message,
-    }));
+    });
   }
 
   const session = await runSingleSession(sessionOpts);
@@ -348,19 +357,13 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
 
   process.stderr.write(`[review] wrote summary to ${join(outDir, 'pr-review-summary.md')}\n`);
 
-  let exitCode: ReviewResult['exitCode'] = 0;
-  if (session.findingsUnavailable) {
+  const exitCode = decideExitCode(session.findingsUnavailable, finalFindings, opts.failOn);
+  if (exitCode === 2) {
     process.stderr.write(
       `[review] pipeline failure: the orchestrator produced no parseable findings (this is NOT a clean PR)\n`,
     );
-    exitCode = 2;
-  } else if (opts.failOn) {
-    const threshold = SEVERITY_RANK[opts.failOn] ?? 0;
-    const hit = finalFindings.filter((f) => (SEVERITY_RANK[f.severity] ?? 99) <= threshold);
-    if (hit.length > 0) {
-      process.stderr.write(`[review] --fail-on ${opts.failOn}: ${hit.length} finding(s) at/above threshold\n`);
-      exitCode = 1;
-    }
+  } else if (exitCode === 1) {
+    process.stderr.write(`[review] --fail-on ${opts.failOn}: findings at/above threshold\n`);
   }
   return { outputs, summary, exitCode };
 }

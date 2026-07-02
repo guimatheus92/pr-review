@@ -30,3 +30,8 @@ test('snapLineToDiff — exact hit, nearest snap, and missing file', () => {
   assert.equal(snapLineToDiff(map, 'src/not-in-diff.ts', 5), null);
   assert.equal(snapLineToDiff(map, 'src/excluded.ts', 11), null);
 });
+
+test('snapLineToDiff — equidistant tie-break keeps the LOWER valid line', () => {
+  const map = new Map([['f.ts', new Set([10, 12])]]);
+  assert.equal(snapLineToDiff(map, 'f.ts', 11), 10);
+});

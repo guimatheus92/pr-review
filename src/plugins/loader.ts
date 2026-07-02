@@ -149,6 +149,17 @@ export interface LoadAllOptions {
   includeBuiltIn?: boolean;
   /** Single-session mode dispatches only Copilot CLI agents — skip loading user reviewer .md files entirely. */
   skillsOnly?: boolean;
+  /** Override the home directory used for autodiscovery (tests). */
+  home?: string;
+}
+
+function isPrReviewDir(p: string): boolean {
+  return /[\/\\]\.pr-review[\/\\]skills$/.test(p);
+}
+
+/** A skill from a generic shared dir must declare review intent via targeting frontmatter. */
+function hasReviewTargeting(s: SkillDefinition): boolean {
+  return s.appliesTo.length > 0 || (s.injectInto !== undefined && s.injectInto.length > 0);
 }
 
 export function loadAll(opts: LoadAllOptions): LoadedSet {
@@ -161,13 +172,28 @@ export function loadAll(opts: LoadAllOptions): LoadedSet {
   }
 
   if (config.autodiscover) {
-    const paths = autodiscoveryPaths(cwd);
+    const paths = opts.home ? autodiscoveryPaths(cwd, opts.home) : autodiscoveryPaths(cwd);
     if (!skillsOnly) {
       const r = loadFromPaths([...paths.repoReviewers, ...paths.personalReviewers], 'reviewer') as ReviewerDefinition[];
       reviewers.push(...r);
     }
-    const s = loadFromPaths([...paths.repoSkills, ...paths.personalSkills], 'skill') as SkillDefinition[];
-    skills.push(...s);
+    const allDirs = [...paths.repoSkills, ...paths.personalSkills];
+    const prDirs = allDirs.filter(isPrReviewDir);
+    const genericDirs = allDirs.filter((p) => !isPrReviewDir(p));
+    // .pr-review/skills is review-intent by location — everything loads.
+    skills.push(...(loadFromPaths(prDirs, 'skill') as SkillDefinition[]));
+    // Generic agent-skill dirs (.claude, .copilot, .github, .agents) hold
+    // unrelated skills too; only skills that declare applies_to/inject_into
+    // are review rules — the rest would flood every reviewer's context.
+    const generic = loadFromPaths(genericDirs, 'skill') as SkillDefinition[];
+    const targeted = generic.filter(hasReviewTargeting);
+    const skipped = generic.length - targeted.length;
+    if (skipped > 0) {
+      process.stderr.write(
+        `[skills] skipped ${skipped} untargeted skill(s) from shared dirs (.claude/.copilot/.github/.agents) — add applies_to/inject_into frontmatter or move them to .pr-review/skills/ to include them in reviews\n`,
+      );
+    }
+    skills.push(...targeted);
   }
 
   if (!skillsOnly) {

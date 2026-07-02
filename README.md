@@ -76,7 +76,7 @@ your-repo/
 
 Optional frontmatter targets a skill: `applies_to` (globs — the skill is injected only when an in-scope changed file matches) and `inject_into` (reviewer names — omit to reach all reviewers). Preview the routing with `--context-only`, which prints a skill→reviewer table and exits without running reviewers.
 
-Existing skills from `.claude/skills/`, `.copilot/skills/`, `.github/skills/`, or `.agents/skills/` work as-is. See [reviewers vs skills](skills/reviewers-vs-skills/SKILL.md) for the full authoring guide.
+Skills from the shared dirs (`.claude/skills/`, `.copilot/skills/`, `.github/skills/`, `.agents/skills/`) are also picked up, but only when they declare review targeting (`applies_to` and/or `inject_into`) — those dirs hold general-purpose agent skills too, and untargeted ones would flood every reviewer's context. Anything in `.pr-review/skills/` is included unconditionally. See [reviewers vs skills](skills/reviewers-vs-skills/SKILL.md) for the full authoring guide.
 
 ## Built-in reviewers
 

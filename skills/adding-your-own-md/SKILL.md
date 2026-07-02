@@ -29,7 +29,7 @@ Skills are standard `SKILL.md` reference docs, so they load from every conventio
 | `<repo>/.agents/skills/*.md` | Skills | Per-repo (AGENTS.md universal convention) |
 | `~/.pr-review/skills/*.md`, `~/.claude/skills/*.md`, `~/.copilot/skills/*.md`, `~/.agents/skills/*.md` | Skills | Personal, cross-repo |
 
-**If you already have skills authored for Claude Code or Copilot CLI in any of those standard locations, they work as-is** — pr-review picks them up without copying. The standard `SKILL.md` frontmatter is what we read:
+**Skills in `.pr-review/skills/` (repo or home) are always included** — the location itself declares review intent. Skills in the shared dirs (`.claude/`, `.copilot/`, `.github/`, `.agents/`) are included **only when they declare review targeting** (`applies_to` and/or `inject_into` frontmatter): those dirs hold general-purpose agent skills too, and pr-review skips untargeted ones (with a stderr note) so they don't flood every reviewer's context. The standard `SKILL.md` frontmatter is what we read:
 
 - `applies_to` (globs) → which in-scope changed files trigger the skill (default: all files)
 - `inject_into` (reviewer short names: `security`, `quality`, `architecture`, `performance`, `test-coverage`, `silent-failure`, `verifier`) → which reviewers see the context (default: all reviewers). Companion agents receive only skills WITHOUT `inject_into`; the verifier receives the union of all injected skills.
@@ -38,7 +38,7 @@ Skills are standard `SKILL.md` reference docs, so they load from every conventio
 
 Routed skills are written per reviewer to `skills-<reviewer>.md` in the run dir (`~/.pr-review/runs/<id>/`). Skill bodies are capped at 16 KB each and each per-reviewer file at 64 KB — truncation warns on stderr.
 
-The only reason to use `.pr-review/skills/` specifically is when you want a skill that's exclusive to pr-review — e.g. a review-only checklist you don't want surfacing in regular Claude Code sessions.
+Use `.pr-review/skills/` when the content is review-specific (it loads unconditionally and stays out of regular agent sessions); add `applies_to`/`inject_into` to a skill in a shared dir when you want one file to serve both your normal agent sessions and pr-review.
 
 ## Other ways to add content
 

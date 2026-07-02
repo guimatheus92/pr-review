@@ -92,3 +92,27 @@ test('parseInstalledPluginsJson — claude runtime plugin detection', async () =
   const names = parseInstalledPluginsJson(raw);
   assert.deepEqual(names.sort(), ['code-review', 'codex', 'pr-review-toolkit']);
 });
+
+test('autodiscovery — untargeted skills from generic shared dirs are skipped; .pr-review/skills loads everything', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'pr-review-loader-'));
+  const home = mkdtempSync(join(tmpdir(), 'pr-review-loader-home-'));
+  try {
+    const prDir = join(cwd, '.pr-review', 'skills');
+    const claudeDir = join(cwd, '.claude', 'skills');
+    mkdirSync(prDir, { recursive: true });
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(join(prDir, 'untargeted-pr.md'), 'Review rule with no frontmatter.\n');
+    writeFileSync(join(claudeDir, 'generic-agent-skill.md'), '---\ndescription: video editing helper\n---\nNot a review rule.\n');
+    writeFileSync(
+      join(claudeDir, 'targeted-rule.md'),
+      '---\ndescription: api rules\napplies_to: ["**/*.ts"]\n---\nA real review rule.\n',
+    );
+    const { config } = loadConfig({ cwd, homeOverride: home });
+    const { skills } = loadAll({ cwd, config, skillsOnly: true, home });
+    const names = skills.map((s) => s.name).sort();
+    assert.deepEqual(names, ['targeted-rule', 'untargeted-pr']);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});

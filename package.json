@@ -1,6 +1,6 @@
 {
   "name": "pr-review",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Generic, plugin-based PR review for GitHub and Azure DevOps. Orchestrates parallel Copilot CLI reviewer agents with stack/business-rule skills.",
   "private": true,
   "type": "module",

@@ -132,6 +132,7 @@ pr-review gather <pr-url> [--out <path>]     # fetch + cache metadata only
 pr-review post <pr-url> --findings <path>    # post pre-computed findings
 pr-review init [--with-config] [--force]     # scaffold .pr-review/skills/
 pr-review configure [path] [--force]         # write ~/.pr-review/config.yaml
+pr-review doctor                             # environment preflight: runtimes, codex, companions, auth
 pr-review plugins list                       # list loaded reviewers + skills
 pr-review plugins doctor                     # check companion plugin status
 pr-review config show                        # print merged config + sources

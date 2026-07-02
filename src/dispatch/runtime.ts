@@ -9,7 +9,8 @@ export type RuntimeChoice = Runtime | 'auto';
 export const RUNTIMES: Runtime[] = ['copilot', 'claude'];
 export const RUNTIME_CHOICES: RuntimeChoice[] = ['copilot', 'claude', 'auto'];
 
-function binaryOnPath(name: string): boolean {
+/** Exported for `pr-review doctor`. */
+export function binaryOnPath(name: string): boolean {
   const probe = process.platform === 'win32' ? 'where' : 'which';
   try {
     execFileSync(probe, [name], { stdio: ['ignore', 'pipe', 'ignore'] });

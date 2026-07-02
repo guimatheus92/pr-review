@@ -1,4 +1,4 @@
-import { execFile, spawn } from 'node:child_process';
+import { exec, spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ReviewerOutput } from '../types.js';
@@ -9,13 +9,10 @@ const CODEX_TIMEOUT_MS = 15 * 60 * 1000;
 
 export function detectCodex(binary = 'codex'): Promise<boolean> {
   return new Promise((res) => {
-    execFile(
-      binary,
-      ['--version'],
-      // shell on win32: codex installs as a .cmd shim, invisible to a raw execFile
-      { timeout: 10_000, windowsHide: true, shell: process.platform === 'win32' },
-      (err) => res(!err),
-    );
+    // exec (not execFile): codex installs as a .cmd shim on win32, which only a
+    // shell can launch, and shell+args-array trips DEP0190. Binary is our own
+    // constant/config value, not untrusted input.
+    exec(`${binary} --version`, { timeout: 10_000, windowsHide: true }, (err) => res(!err));
   });
 }
 

@@ -89,3 +89,11 @@ pr-review configure                            # interactive prompts
 ```
 
 Both write `~/.pr-review/config.yaml`. Repo-level config goes in `.pr-review.yaml` (committed).
+
+## Diagnose the environment
+
+```bash
+pr-review doctor   # runtimes on PATH, resolved runtime/model, codex + companions, GitHub/ADO auth, config sources
+```
+
+Run it first when a review fails to start — it answers "which runtime would be used and what's missing" without spawning anything.

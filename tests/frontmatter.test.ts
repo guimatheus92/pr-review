@@ -56,3 +56,11 @@ skill body`;
   const { meta } = parseFrontmatter(raw);
   assert.deepEqual(meta.inject_into, ['security', 'architecture']);
 });
+
+test('parseFrontmatter — UTF-8 BOM before the frontmatter fence is stripped', () => {
+  const raw = '﻿---\ndescription: bom test\ninject_into: [quality]\n---\nBody.\n';
+  const { meta, body } = parseFrontmatter(raw);
+  assert.equal(meta.description, 'bom test');
+  assert.deepEqual(meta.inject_into, ['quality']);
+  assert.equal(body.trim(), 'Body.');
+});

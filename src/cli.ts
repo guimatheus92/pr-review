@@ -8,14 +8,18 @@ import { showCacheInfo, clearCacheCommand } from './commands/cache.js';
 import { pluginsList, pluginsDoctor } from './commands/plugins.js';
 import { showConfig } from './commands/config.js';
 import { readFileSync } from 'node:fs';
-import type { ReviewerOutput } from './types.js';
+import { RUNTIME_CHOICES, type RuntimeChoice } from './dispatch/runtime.js';
+import type { GatherOutput, ReviewerOutput, Severity } from './types.js';
+
+// Injected by scripts/bundle.mjs from package.json; dev runs via tsx see the fallback.
+declare const __PR_REVIEW_VERSION__: string | undefined;
 
 const program = new Command();
 
 program
   .name('pr-review')
-  .description('Generic, plugin-based PR review for GitHub and Azure DevOps via Copilot CLI')
-  .version('0.1.0');
+  .description('Generic, plugin-based PR review for GitHub and Azure DevOps via Copilot CLI or Claude Code')
+  .version(typeof __PR_REVIEW_VERSION__ === 'string' ? __PR_REVIEW_VERSION__ : '0.0.0-dev');
 
 program
   .command('gather <pr-url>')
@@ -42,8 +46,8 @@ program
 program
   .command('review <pr-url>')
   .description('Run the full review pipeline in parallel; print/post findings')
-  .option('--dry-run', 'Do not post comments (default unless --publish given)', false)
-  .option('--publish', 'Post findings as line comments on the PR', false)
+  .option('--dry-run', 'Preview findings without posting comments (posting is the default)', false)
+  .option('--publish', '(deprecated: posting is now the default; use --dry-run to preview)', false)
   .option('--skip <names>', 'Comma-separated reviewer names to skip')
   .option('--reviewer <path...>', 'Include a specific .md file as a reviewer (repeatable)')
   .option('--reviewers-dir <path...>', 'Include a directory of reviewer .md files (repeatable)')
@@ -54,14 +58,18 @@ program
   .option('--no-autodiscover', 'Disable scanning .pr-review/ conventional paths')
   .option('--dedupe-mode <mode>', "Dedupe mode: strict | loose | off", 'strict')
   .option('--default-model <model>', 'Default model for reviewers without an explicit one')
-  .option('--copilot <path>', 'Path to the copilot CLI binary', 'copilot')
+  .option('--copilot <path>', 'Path to the copilot CLI binary (implies --runtime copilot unless --runtime is given)')
   .option('--no-cache', 'Bypass gather cache')
-  .option('--no-response-cache', 'Bypass per-reviewer response cache')
   .option('--no-companion-warning', 'Suppress the companion-plugin install warning')
   .option(
     '--no-companions',
     'Skip auto-invoking installed companion plugin agents (pr-review-toolkit) for this run',
   )
+  .option('--context-only', 'Prepare pr-context.md + per-reviewer skills files, print the skill routing, and exit', false)
+  .option('--lang <code>', 'Language for finding titles/bodies (e.g. pt-BR, es)')
+  .option('--fail-on <severity>', 'Exit 1 when any finding at/above this severity survives dedupe (critical|high|medium|low|nit)')
+  .option('--runtime <name>', 'Agent CLI hosting the session: copilot | claude | auto (probe PATH)', undefined)
+  .option('--no-codex', 'Never run the Codex second-opinion reviewer, even when the codex CLI is installed')
   .action(
     async (
       prUrl: string,
@@ -80,14 +88,32 @@ program
         defaultModel?: string;
         copilot: string;
         cache: boolean;
-        responseCache: boolean;
         companionWarning: boolean;
         companions: boolean;
+        contextOnly: boolean;
+        lang?: string;
+        failOn?: string;
+        runtime?: string;
+        codex: boolean;
       },
     ) => {
       try {
         const skip = opts.skip?.split(',').map((s) => s.trim()).filter(Boolean) ?? [];
-        const { summary } = await runReview({
+        if (opts.runtime && !(RUNTIME_CHOICES as string[]).includes(opts.runtime)) {
+          console.error(`--runtime must be one of: ${RUNTIME_CHOICES.join(', ')}`);
+          process.exit(2);
+        }
+        let failOn: Severity | undefined;
+        if (opts.failOn) {
+          const norm = opts.failOn.toUpperCase();
+          const allowed: Severity[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'NIT'];
+          if (!(allowed as string[]).includes(norm)) {
+            console.error(`--fail-on must be one of: ${allowed.join(', ').toLowerCase()}`);
+            process.exit(2);
+          }
+          failOn = norm as Severity;
+        }
+        const { summary, exitCode } = await runReview({
           prUrl,
           skip,
           reviewers: opts.reviewer,
@@ -96,21 +122,26 @@ program
           skillsDirs: opts.skillsDir,
           plugins: opts.plugin,
           pluginDirs: opts.pluginDir,
-          dryRun: opts.dryRun || !opts.publish,
-          publish: opts.publish,
+          dryRun: opts.dryRun,
+          publish: !opts.dryRun && !opts.contextOnly,
           copilotBinary: opts.copilot,
           useCache: opts.cache,
-          useResponseCache: opts.responseCache,
           autodiscover: opts.autodiscover,
           dedupeMode: opts.dedupeMode,
           defaultModel: opts.defaultModel,
           noCompanionWarning: !opts.companionWarning,
           withCompanions: opts.companions,
+          contextOnly: opts.contextOnly,
+          language: opts.lang,
+          failOn,
+          runtime: opts.runtime as RuntimeChoice | undefined,
+          withCodex: opts.codex ? undefined : false,
         });
         process.stdout.write(summary + '\n');
+        if (exitCode !== 0) process.exitCode = exitCode;
       } catch (err) {
         console.error((err as Error).message);
-        process.exit(1);
+        process.exit(2);
       }
     },
   );
@@ -119,8 +150,8 @@ program
   .command('post <pr-url>')
   .description('Post pre-computed findings (from a JSON file) as line comments')
   .requiredOption('--findings <path>', 'Path to a findings.json file produced by `review`')
-  .option('--dry-run', 'Show what would be posted without posting', false)
-  .option('--publish', 'Actually post the comments', false)
+  .option('--dry-run', 'Show what would be posted without posting (posting is the default)', false)
+  .option('--publish', '(deprecated: posting is now the default; use --dry-run to preview)', false)
   .action(async (prUrl: string, opts: { findings: string; dryRun: boolean; publish: boolean }) => {
     try {
       const raw = JSON.parse(readFileSync(opts.findings, 'utf8')) as { reviewers?: Array<{ reviewer: string; model: string; findings: ReviewerOutput['findings'] }>; finalFindings?: ReviewerOutput['findings'] } | Array<{ reviewer: string; model: string; findings: ReviewerOutput['findings'] }>;
@@ -155,7 +186,17 @@ program
           exitCode: 0,
         }));
       }
-      await runPost({ prUrl, outputs, publish: opts.publish && !opts.dryRun });
+      // Line snapping needs the diff; without it, findings citing lines
+      // outside the diff 422 on the batch and burn retries per comment.
+      let gather: GatherOutput | undefined;
+      try {
+        gather = await runGather({ prUrl });
+      } catch (err) {
+        process.stderr.write(
+          `[post] gather failed (${(err as Error).message.split('\n')[0]}); posting without line snapping\n`,
+        );
+      }
+      await runPost({ prUrl, outputs, publish: !opts.dryRun, gather });
     } catch (err) {
       console.error((err as Error).message);
       process.exit(1);
@@ -226,6 +267,19 @@ plugins
     } catch (err) {
       console.error((err as Error).message);
       process.exit(1);
+    }
+  });
+
+program
+  .command('doctor')
+  .description('Environment preflight: runtimes, codex, companions, provider auth, effective config')
+  .action(async () => {
+    try {
+      const { runDoctor } = await import('./commands/doctor.js');
+      process.exitCode = await runDoctor();
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(2);
     }
   });
 

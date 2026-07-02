@@ -4,12 +4,14 @@ import { runGather } from './gather.js';
 import { runPost } from './post.js';
 import { loadAll } from '../plugins/loader.js';
 import { loadConfig, type ConfigOverrides } from '../config.js';
-import { runSingleSession } from '../dispatch/single-session.js';
+import { prepareSessionContext, runSingleSession } from '../dispatch/single-session.js';
+import { resolveRuntime, type Runtime, type RuntimeChoice } from '../dispatch/runtime.js';
+import { detectCodex, runCodexReviewer } from '../dispatch/codex.js';
 import { ensureRunDir } from '../util/tmp.js';
 import { detectProvider } from '../providers/index.js';
 import { dedupeAgainstExisting, dedupeWithinBatch } from '../dedupe.js';
 import { detectCompanions, formatWarning } from '../plugins/companions.js';
-import type { Finding, GatherOutput, ReviewerOutput } from '../types.js';
+import type { Finding, GatherOutput, ReviewerOutput, Severity } from '../types.js';
 
 function sanitizeForFilename(name: string): string {
   return name.replace(/[\\\/:*?"<>|]/g, '_');
@@ -28,12 +30,24 @@ interface ReviewCmdOptions {
   publish?: boolean;
   copilotBinary?: string;
   useCache?: boolean;
-  useResponseCache?: boolean;
   autodiscover?: boolean;
   dedupeMode?: 'strict' | 'loose' | 'off';
   defaultModel?: string;
   noCompanionWarning?: boolean;
   withCompanions?: boolean;
+  /** Prepare pr-context.md + per-reviewer skills files, print the routing, and exit without spawning copilot. */
+  contextOnly?: boolean;
+  language?: string;
+  failOn?: Severity;
+  runtime?: RuntimeChoice;
+  withCodex?: boolean;
+}
+
+export interface ReviewResult {
+  outputs: ReviewerOutput[];
+  summary: string;
+  /** 0 = clean; 1 = findings at/above --fail-on; 2 = pipeline failure (no parseable findings). */
+  exitCode: 0 | 1 | 2;
 }
 
 const SEVERITY_RANK: Record<string, number> = {
@@ -47,6 +61,22 @@ const SEVERITY_RANK: Record<string, number> = {
 
 const MAX_FILES_GUARD = 500;
 const MAX_PATCH_BYTES = 2_000_000;
+
+/**
+ * The three-state exit contract, exported for tests: 2 = pipeline failure
+ * (wins over everything — no parseable findings is never a clean PR),
+ * 1 = findings at/above --fail-on survived dedupe, 0 = clean.
+ */
+export function decideExitCode(
+  findingsUnavailable: boolean,
+  finalFindings: Finding[],
+  failOn?: Severity,
+): 0 | 1 | 2 {
+  if (findingsUnavailable) return 2;
+  if (!failOn) return 0;
+  const threshold = SEVERITY_RANK[failOn] ?? 0;
+  return finalFindings.some((f) => (SEVERITY_RANK[f.severity] ?? 99) <= threshold) ? 1 : 0;
+}
 
 function earlyExitGate(gather: GatherOutput): string | null {
   const m = gather.metadata;
@@ -112,7 +142,7 @@ function renderSummary(
   return lines.join('\n');
 }
 
-export async function runReview(opts: ReviewCmdOptions): Promise<{ outputs: ReviewerOutput[]; summary: string }> {
+export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   const overallStart = Date.now();
   const cwd = process.cwd();
   const provider = detectProvider(opts.prUrl);
@@ -132,15 +162,41 @@ export async function runReview(opts: ReviewCmdOptions): Promise<{ outputs: Revi
   if (typeof opts.autodiscover === 'boolean') cliOverrides.autodiscover = opts.autodiscover;
   if (opts.dedupeMode) cliOverrides.dedupeMode = opts.dedupeMode;
   if (typeof opts.withCompanions === 'boolean') cliOverrides.invokeCompanions = opts.withCompanions;
+  if (opts.language) cliOverrides.language = opts.language;
+  if (opts.runtime) cliOverrides.runtime = opts.runtime;
+  if (typeof opts.withCodex === 'boolean') cliOverrides.invokeCodex = opts.withCodex;
 
   const { config } = loadConfig({ cwd, cliOverrides });
+
+  // CLI --skip replaces the config list for the run (same rule the session uses).
+  const effectiveSkip = opts.skip?.length ? opts.skip : config.skipReviewers;
+
+  let runtime: Runtime;
+  try {
+    runtime = resolveRuntime(config.runtime, opts.copilotBinary);
+  } catch (err) {
+    if (!opts.contextOnly) throw err;
+    // --context-only never spawns the runtime; a machine with neither CLI can
+    // still preview the context and skill routing.
+    runtime = 'copilot';
+    process.stderr.write(`[review] ${(err as Error).message} — continuing with --context-only using copilot prompt vocabulary\n`);
+  }
+  process.stderr.write(`[review] runtime: ${runtime}\n`);
+
+  const wantCodex = config.invokeCodex && !effectiveSkip.includes('codex');
+  let codexAvailable = false;
+  const codexDetectPromise = wantCodex
+    ? detectCodex().then((ok) => {
+        codexAvailable = ok;
+      })
+    : Promise.resolve();
 
   let installedCompanions: string[] = [];
   let companionPromise: Promise<void> = Promise.resolve();
   if (config.invokeCompanions || config.companionWarn) {
     companionPromise = (async () => {
       try {
-        const state = await detectCompanions(opts.copilotBinary);
+        const state = await detectCompanions(opts.copilotBinary, runtime);
         installedCompanions = state.installed;
         if (state.missing.length > 0 && config.companionWarn && !opts.noCompanionWarning) {
           const warn = formatWarning(state.missing);
@@ -172,35 +228,91 @@ export async function runReview(opts: ReviewCmdOptions): Promise<{ outputs: Revi
       earlyExitReason,
     ].join('\n');
     writeFileSync(join(outDir, 'pr-review-summary.md'), summary, 'utf8');
-    return { outputs: [], summary };
+    return { outputs: [], summary, exitCode: 0 };
   }
 
-  await companionPromise;
+  await Promise.all([companionPromise, codexDetectPromise]);
+  const includeCodex = wantCodex && codexAvailable;
+  if (wantCodex && !codexAvailable) {
+    process.stderr.write(`[codex] codex CLI not found on PATH — skipping the second-opinion reviewer\n`);
+  }
 
-  const loaded = loadAll({ cwd, config });
-  process.stderr.write(
-    `[review] loaded ${loaded.skills.length} skill(s); ${loaded.reviewers.length} user reviewer(s) ` +
-      `(user reviewers not yet supported in single-session mode; will be in a follow-up)\n`,
-  );
+  // Single-session mode dispatches runtime-registered agents only; user-authored
+  // context goes in skills, so reviewer .md loading is skipped entirely.
+  const loaded = loadAll({ cwd, config, skillsOnly: true });
+  process.stderr.write(`[review] loaded ${loaded.skills.length} skill(s)\n`);
 
-  process.stderr.write(
-    `[review] single-session dispatch: 6 built-in + verifier + ` +
-      `${config.invokeCompanions ? `${installedCompanions.length} companion(s)` : '0 companions'}\n`,
-  );
-
-  const session = await runSingleSession({
+  const sessionOpts = {
     prUrl: opts.prUrl,
     gather,
     skills: loaded.skills,
     installedCompanions,
-    skipReviewers: opts.skip ?? config.skipReviewers,
+    skipReviewers: effectiveSkip,
     outDir,
     copilotBinary: opts.copilotBinary,
     defaultModel: config.defaultModel,
     invokeCompanions: config.invokeCompanions,
-  });
+    language: config.language,
+    runtime,
+    includeCodex,
+  };
+
+  if (opts.contextOnly) {
+    const ctx = prepareSessionContext(sessionOpts);
+    const lines: string[] = [
+      `# PR Review Context Preview`,
+      ``,
+      `**Run dir:** ${outDir}`,
+      `**Context file:** ${ctx.contextPath}`,
+      `**Runtime:** ${runtime}`,
+      `**Reviewers to dispatch:** ${ctx.dispatchedReviewers.join(', ') || '(none)'}${includeCodex ? ' + codex (sibling process)' : ''}`,
+    ];
+    if (ctx.triageSkipped.length > 0) {
+      lines.push(`**Skipped by triage (docs-only PR):** ${ctx.triageSkipped.join(', ')}`);
+    }
+    lines.push(``, `## Skill routing`, ``);
+    if (ctx.skillRouting.length === 0) {
+      lines.push('_No skills loaded._');
+    } else {
+      lines.push(`| Skill | Injected into | Source |`, `|---|---|---|`);
+      for (const r of ctx.skillRouting) {
+        lines.push(`| ${r.skill} | ${r.targets.length ? r.targets.join(', ') : '(nobody — no matching files/reviewers)'} | ${r.source} |`);
+      }
+    }
+    const summary = lines.join('\n');
+    writeFileSync(join(outDir, 'pr-review-summary.md'), summary, 'utf8');
+    return { outputs: [], summary, exitCode: 0 };
+  }
+
+  process.stderr.write(
+    `[review] single-session dispatch: built-ins + verifier + ` +
+      `${config.invokeCompanions ? `${installedCompanions.length} companion(s)` : '0 companions'}` +
+      `${includeCodex ? ' + codex' : ''}\n`,
+  );
+
+  // Context is prepared exactly once and shared by the session and the codex
+  // sibling — a second prepare would rewrite every context/skills file.
+  const sessionCtx = prepareSessionContext(sessionOpts);
+
+  // Codex runs as a sibling process, in parallel with the orchestrator session.
+  // runCodexReviewer resolves on every failure path (spawn error, timeout,
+  // unreadable output) with `error` set — no catch wrapper needed.
+  let codexPromise: Promise<ReviewerOutput> | null = null;
+  if (includeCodex) {
+    codexPromise = runCodexReviewer({
+      contextPath: sessionCtx.contextPath,
+      skillsPath: sessionCtx.skillsFiles['codex'],
+      outDir,
+    });
+  }
+
+  const session = await runSingleSession(sessionOpts, sessionCtx);
 
   const outputs = session.outputs;
+  if (codexPromise) {
+    const codexOut = await codexPromise;
+    outputs.push(codexOut);
+  }
 
   for (const out of outputs) {
     try {
@@ -209,8 +321,9 @@ export async function runReview(opts: ReviewCmdOptions): Promise<{ outputs: Revi
         JSON.stringify(out.findings, null, 2),
         'utf8',
       );
-    } catch {
-      // best-effort
+    } catch (err) {
+      // debug artifact only — but say which one failed and why
+      process.stderr.write(`[review] could not write raw-${out.reviewerName}.json: ${(err as Error).message}\n`);
     }
   }
 
@@ -237,7 +350,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<{ outputs: Revi
         exitCode: 0,
       },
     ];
-    postResult = await runPost({ prUrl: opts.prUrl, outputs: wrapper, publish: true });
+    postResult = await runPost({ prUrl: opts.prUrl, outputs: wrapper, publish: true, gather });
   } else if (opts.dryRun) {
     process.stderr.write(`[review] --dry-run: skipping post\n`);
   }
@@ -259,5 +372,17 @@ export async function runReview(opts: ReviewCmdOptions): Promise<{ outputs: Revi
   );
 
   process.stderr.write(`[review] wrote summary to ${join(outDir, 'pr-review-summary.md')}\n`);
-  return { outputs, summary };
+
+  const exitCode = decideExitCode(session.findingsUnavailable, finalFindings, opts.failOn);
+  if (exitCode === 2) {
+    const codexNote = outputs.some((o) => o.reviewerName === 'codex' && o.findings.length > 0)
+      ? ' Codex second-opinion findings were still collected/posted, but a lone sibling pass is not a complete review.'
+      : '';
+    process.stderr.write(
+      `[review] pipeline failure: the orchestrator produced no parseable findings (this is NOT a clean PR).${codexNote}\n`,
+    );
+  } else if (exitCode === 1) {
+    process.stderr.write(`[review] --fail-on ${opts.failOn}: findings at/above threshold\n`);
+  }
+  return { outputs, summary, exitCode };
 }

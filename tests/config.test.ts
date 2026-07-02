@@ -70,6 +70,50 @@ test('loadConfig — env var overrides defaults', () => {
   }
 });
 
+test('loadConfig — env var overrides yaml files (defaults < global < repo < env < flags)', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'pr-review-cfg-'));
+  const home = mkdtempSync(join(tmpdir(), 'pr-review-home-'));
+  const prior = process.env.PR_REVIEW_DEFAULT_MODEL;
+  try {
+    writeFileSync(join(tmp, '.pr-review.yaml'), 'default_model: repo-model\n');
+    process.env.PR_REVIEW_DEFAULT_MODEL = 'env-set-model';
+    const { config } = loadConfig({ cwd: tmp, homeOverride: home });
+    assert.equal(config.defaultModel, 'env-set-model');
+    const { config: withFlag } = loadConfig({
+      cwd: tmp,
+      homeOverride: home,
+      cliOverrides: { defaultModel: 'flag-model' },
+    });
+    assert.equal(withFlag.defaultModel, 'flag-model');
+  } finally {
+    if (prior === undefined) delete process.env.PR_REVIEW_DEFAULT_MODEL;
+    else process.env.PR_REVIEW_DEFAULT_MODEL = prior;
+    rmSync(tmp, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('loadConfig — language: default en, yaml key, env override', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'pr-review-cfg-'));
+  const home = mkdtempSync(join(tmpdir(), 'pr-review-home-'));
+  const prior = process.env.PR_REVIEW_LANG;
+  try {
+    const { config: defaults } = loadConfig({ cwd: tmp, homeOverride: home });
+    assert.equal(defaults.language, 'en');
+    writeFileSync(join(tmp, '.pr-review.yaml'), 'language: pt-BR\n');
+    const { config: fromYaml } = loadConfig({ cwd: tmp, homeOverride: home });
+    assert.equal(fromYaml.language, 'pt-BR');
+    process.env.PR_REVIEW_LANG = 'es';
+    const { config: fromEnv } = loadConfig({ cwd: tmp, homeOverride: home });
+    assert.equal(fromEnv.language, 'es');
+  } finally {
+    if (prior === undefined) delete process.env.PR_REVIEW_LANG;
+    else process.env.PR_REVIEW_LANG = prior;
+    rmSync(tmp, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('autodiscoveryPaths — built-in reviewers are agents (no reviewer dirs auto-discovered); skills broaden to standard paths', () => {
   const paths = autodiscoveryPaths('/repo', '/home/user');
   assert.equal(paths.repoReviewers.length, 0);

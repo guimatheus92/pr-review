@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { CACHE_ROOT, gatherCachePath, lastCommentIdFrom, responseCachePath } from './keys.js';
-import type { GatherOutput, PrRef, ReviewerOutput } from '../types.js';
+import { CACHE_ROOT, gatherCachePath, lastCommentIdFrom } from './keys.js';
+import type { GatherOutput, PrRef } from '../types.js';
 
 function writeJson(path: string, data: unknown): void {
   mkdirSync(dirname(path), { recursive: true });
@@ -37,25 +37,12 @@ export function writeGatherCache(gather: GatherOutput): string {
   return path;
 }
 
-export function readResponseCache(reviewerName: string, promptBody: string): CacheHit<ReviewerOutput> | null {
-  const path = responseCachePath(reviewerName, promptBody);
-  const data = readJson<ReviewerOutput>(path);
-  if (!data) return null;
-  const stat = statSync(path);
-  return { data, path, ageMs: Date.now() - stat.mtimeMs };
-}
-
-export function writeResponseCache(reviewerName: string, promptBody: string, output: ReviewerOutput): string {
-  const path = responseCachePath(reviewerName, promptBody);
-  writeJson(path, output);
-  return path;
-}
-
 export interface CacheInfo {
   root: string;
   totalFiles: number;
   totalBytes: number;
   gatherEntries: number;
+  /** Left over from the removed per-reviewer response cache; counts stale files under responses/ until cleared. */
   responseEntries: number;
 }
 

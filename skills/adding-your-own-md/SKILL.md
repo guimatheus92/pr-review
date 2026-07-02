@@ -4,7 +4,9 @@ description: "pr-review reviewer/skill lifecycle: adding, removing, overriding, 
 
 # Managing Your Reviewers and Skills
 
-You don't write code to manage reviewers. You drop `.md` files in conventional folders, and the loader picks them up. To remove or override, you delete a file or shadow it by name.
+You don't write code to manage review content. You drop `.md` files in conventional folders, and the loader picks them up. To remove, you delete a file or skip a reviewer by name.
+
+**Important:** the single-session review path loads **skills only** (`loadAll` runs with `skillsOnly`). User-authored reviewer `.md` files are not dispatched during `pr-review review` — skills injected into the seven built-in reviewers are the extension mechanism.
 
 ## What's loaded right now
 
@@ -16,12 +18,10 @@ Output groups reviewers (active passes that produce findings) and skills (passiv
 
 ## Where files are auto-discovered
 
-Reviewers are pr-review-specific (active prompts with output contracts), so they load only from `.pr-review/reviewers/`. Skills are standard `SKILL.md` reference docs, so they load from every conventional skill path that Copilot CLI / Claude Code / GitHub already use.
+Skills are standard `SKILL.md` reference docs, so they load from every conventional skill path that Copilot CLI / Claude Code / GitHub already use.
 
 | Path | Type | Scope |
 |---|---|---|
-| `<repo>/.pr-review/reviewers/*.md` | Reviewers | Per-repo (committed; team shares) |
-| `~/.pr-review/reviewers/*.md` | Reviewers | Personal, cross-repo |
 | `<repo>/.pr-review/skills/*.md` | Skills | Per-repo |
 | `<repo>/.claude/skills/*.md` | Skills | Per-repo (Claude Code convention) |
 | `<repo>/.copilot/skills/*.md` | Skills | Per-repo (Copilot CLI convention) |
@@ -29,41 +29,43 @@ Reviewers are pr-review-specific (active prompts with output contracts), so they
 | `<repo>/.agents/skills/*.md` | Skills | Per-repo (AGENTS.md universal convention) |
 | `~/.pr-review/skills/*.md`, `~/.claude/skills/*.md`, `~/.copilot/skills/*.md`, `~/.agents/skills/*.md` | Skills | Personal, cross-repo |
 
-**If you already have skills authored for Claude Code or Copilot CLI in any of those standard locations, they work as-is** — pr-review picks them up without copying. The standard `SKILL.md` frontmatter is what we read:
+**Skills in `.pr-review/skills/` (repo or home) are always included** — the location itself declares review intent. Skills in the shared dirs (`.claude/`, `.copilot/`, `.github/`, `.agents/`) are included **only when they declare review targeting** (`applies_to` and/or `inject_into` frontmatter): those dirs hold general-purpose agent skills too, and pr-review skips untargeted ones (with a stderr note) so they don't flood every reviewer's context. The standard `SKILL.md` frontmatter is what we read:
 
-- `applies_to` (globs) → which changed files trigger the skill (default: all files)
-- `inject_into` (reviewer names) → which reviewers see the context (default: all matching reviewers)
+- `applies_to` (globs) → which in-scope changed files trigger the skill (default: all files)
+- `inject_into` (reviewer short names: `security`, `quality`, `architecture`, `performance`, `test-coverage`, `silent-failure`, `verifier`) → which reviewers see the context (default: all reviewers). Companion agents receive only skills WITHOUT `inject_into`; the verifier receives the union of all injected skills.
 - Any other field (`name`, `allowed-tools`, etc.) is preserved but ignored
+- Malformed frontmatter YAML prints a stderr warning naming the file
 
-The only reason to use `.pr-review/skills/` specifically is when you want a skill that's exclusive to pr-review — e.g. a review-only checklist you don't want surfacing in regular Claude Code sessions.
+Routed skills are written per reviewer to `skills-<reviewer>.md` in the run dir (`~/.pr-review/runs/<id>/`). Skill bodies are capped at 16 KB each and each per-reviewer file at 64 KB — truncation warns on stderr.
+
+Use `.pr-review/skills/` when the content is review-specific (it loads unconditionally and stays out of regular agent sessions); add `applies_to`/`inject_into` to a skill in a shared dir when you want one file to serve both your normal agent sessions and pr-review.
 
 ## Other ways to add content
 
 | Scope | Path | Visibility | Tracked in git? |
 |---|---|---|---|
-| **Built-in** | `skills/reviewers/<name>/SKILL.md` inside the plugin install | All users of pr-review globally | Yes — in the plugin source |
+| **Built-in** | `agents/<name>.md` inside the plugin install | All users of pr-review globally | Yes — in the plugin source |
 | **Plugin** | A `plugin.yaml`-wrapped directory passed via `--plugin-dir` | Whoever opts in via flag or yaml | Depends on where it's published |
 
 ## Adding
 
-### Adding a per-repo reviewer or skill (zero ceremony, team-shared)
+### Adding a per-repo skill (zero ceremony, team-shared)
 
 ```bash
-mkdir -p .pr-review/skills .pr-review/reviewers
+mkdir -p .pr-review/skills
 cp docs/our-auth-conventions.md  .pr-review/skills/       # context injected into reviewers
-cp docs/special-review-pass.md   .pr-review/reviewers/    # standalone reviewer
 git add .pr-review && git commit -m "add review rules"
 ```
 
-The next `/pr-review <url>` picks them up automatically. No flags. No config.
+The next `/pr-review <url>` picks it up automatically. No flags. No config.
 
-### Adding a personal reviewer or skill (cross-repo, just you)
+### Adding a personal skill (cross-repo, just you)
 
 Same idea, but in your home directory:
 
 ```bash
-mkdir -p ~/.pr-review/skills ~/.pr-review/reviewers
-cp ~/notes/personal-checklist.md  ~/.pr-review/reviewers/
+mkdir -p ~/.pr-review/skills
+cp ~/notes/personal-checklist.md  ~/.pr-review/skills/
 ```
 
 Loaded automatically on every `pr-review` run from any repo. Use for cross-team review habits you carry with you.
@@ -71,17 +73,16 @@ Loaded automatically on every `pr-review` run from any repo. Use for cross-team 
 ### Adding an ad-hoc file for one run
 
 ```bash
-pr-review review <pr-url> --reviewer ./AD-HOC.md
 pr-review review <pr-url> --skill ./extra-context.md
-pr-review review <pr-url> --reviewers-dir ./other/path
+pr-review review <pr-url> --skills-dir ./other/path
 ```
 
 ### Reviewer vs skill (quick decision)
 
-- **Skill** — reference material that should augment existing reviewers (most common). Goes in `skills/`. No own findings; content is injected into matching reviewers as context.
-- **Reviewer** — complete review prompt with "look for X, output JSON" instructions. Goes in `reviewers/`. Spawns its own subprocess and produces its own findings.
+- **Skill** — reference material that augments the built-in reviewers. Goes in `skills/`. No own findings; content is injected into matching reviewers as context.
+- **Reviewer** — the seven built-in review passes dispatched via `task()` in the single session. User reviewer `.md` files are not loaded by the review path.
 
-When in doubt: skill. See [`reviewers-vs-skills`](../reviewers-vs-skills/SKILL.md) for the full distinction.
+Author skills. See [`reviewers-vs-skills`](../reviewers-vs-skills/SKILL.md) for the full distinction.
 
 ## Removing
 
@@ -89,7 +90,7 @@ When in doubt: skill. See [`reviewers-vs-skills`](../reviewers-vs-skills/SKILL.m
 
 ```bash
 pr-review review <pr-url> --skip security
-pr-review review <pr-url> --skip security,tests,verifier   # multiple
+pr-review review <pr-url> --skip security,test-coverage,verifier   # multiple
 ```
 
 ### Always skip in this repo
@@ -113,63 +114,53 @@ skip_reviewers:
   - verifier
 ```
 
-### Removing a per-repo or personal reviewer entirely
+### Removing a per-repo or personal skill entirely
 
 Just delete the file:
 
 ```bash
-rm .pr-review/reviewers/my-old-reviewer.md
+rm .pr-review/skills/my-old-skill.md
 ```
 
 ### Removing a built-in from the plugin source
 
 ```bash
 cd "$(copilot plugin path pr-review)"
-rm -r skills/reviewers/security
+rm agents/security.md
 npm run build
 ```
 
 Most people don't need this — `--skip` or `skip_reviewers` are reversible and don't fork the plugin. Only remove from source if you're maintaining a custom fork.
 
-## Overriding a built-in
+## Tightening a built-in
 
-If you want, say, the `security` reviewer to use your team's stricter rules instead of the built-in defaults, place a file with the same name in a higher-priority scope. **Same name wins from a user location**:
+Reviewer files can't be shadowed in the single-session path (user reviewer `.md` files aren't loaded). To make, say, the `security` reviewer apply your team's stricter rules, author a **skill** targeted at it:
 
-```bash
-# Per-repo override (whole team gets your security reviewer)
-cp our-team-security-rules.md .pr-review/reviewers/security.md
-
-# Personal override (just you)
-cp my-security-checklist.md ~/.pr-review/reviewers/security.md
+```markdown
+---
+description: Team security rules
+inject_into: [security]
+applies_to: ["**/*.cs"]
+---
+# Our stricter security rules
+...
 ```
 
-When `pr-review plugins list` runs, you'll see your file's path next to `security` instead of the built-in path — confirming the override took effect.
-
-Override resolution order (highest priority wins by name):
-
-1. CLI flags: `--reviewer`, `--reviewers-dir`
-2. Repo `.pr-review/reviewers/`
-3. Repo `.pr-review.yaml` `extra_reviewers` entries
-4. Personal `~/.pr-review/reviewers/`
-5. Personal `~/.pr-review/config.yaml` `extra_reviewers` entries
-6. Packaged plugins (`--plugin-dir`, `--plugin`)
-7. Built-ins (lowest priority — easiest to shadow)
-
-The CLI prints a warning if two non-built-in reviewers collide on the same name (so accidental shadowing across plugins is visible).
+Drop it in `.pr-review/skills/` (team) or `~/.pr-review/skills/` (personal). The security reviewer then evaluates the diff against its built-in criteria plus yours.
 
 ## Verifying changes took effect
 
 ```bash
-pr-review plugins list                # shows the resolved set with file paths
-pr-review plugins list --reviewers-dir ./tmp   # preview with extra paths added
-pr-review config show                 # shows effective config + which file each setting came from
+pr-review plugins list                    # shows the resolved set with file paths
+pr-review review <pr-url> --context-only  # prints the skill→reviewer routing table (no runtime spawn)
+pr-review config show                     # shows effective config + which file each setting came from
 ```
 
-Use these before running a real review so you don't burn tokens to discover a misconfig.
+`--context-only` also writes `pr-context.md` and the `skills-<reviewer>.md` files to the run dir so you can inspect exactly what each reviewer would receive. Use these before running a real review so you don't burn tokens to discover a misconfig.
 
 ## File format (any scope)
 
-A `.md` file is the minimum. Frontmatter is optional and only needed when you want to scope, change defaults, or pick a model:
+A `.md` file is the minimum. Frontmatter is optional and only needed when you want to scope routing:
 
 ```markdown
 ---
@@ -177,15 +168,13 @@ description: C# style and team conventions
 applies_to:
   - "**/*.cs"
   - "**/*.csproj"
-model: claude-opus-4.8
-output_format: json
-skip_when_no_match: true
+inject_into: [security, quality]
 ---
 
 # C# Style Guide
 ...
 ```
 
-Recognized keys: `description`, `applies_to`, `model`, `output_format` (`json` | `markdown`), `skip_when_no_match`. For skills you additionally have `inject_into: [reviewer-name, ...]` to scope which reviewers receive the context.
+Recognized keys: `description`, `applies_to` (globs matched against in-scope changed files; empty = all), `inject_into` (reviewer short names; empty = all reviewers).
 
-Anything else in frontmatter (including the Copilot CLI `SKILL.md` spec's `name`, `allowed-tools`, etc.) is preserved but ignored — so a SKILL.md you already wrote for Copilot CLI works as a pr-review reviewer/skill without edits.
+Anything else in frontmatter (including the standard `SKILL.md` spec's `name`, `allowed-tools`, etc. — the convention shared by Copilot CLI and Claude Code) is preserved but ignored, so a SKILL.md you already wrote for either host works as a pr-review skill without edits. If the frontmatter YAML is malformed, a stderr warning names the file.

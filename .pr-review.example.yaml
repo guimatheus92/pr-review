@@ -1,16 +1,26 @@
 # .pr-review.yaml — per-repo config (committed; the team shares it)
 # Copy to .pr-review.yaml at the repo root. All keys are optional.
+# Precedence: CLI flags > env vars > this file > ~/.pr-review/config.yaml > defaults
+# (env vars override yaml).
+
+# Which agent CLI hosts the review session (also --runtime flag, PR_REVIEW_RUNTIME env var).
+#   auto    — probe PATH: copilot first, then claude; error if neither found (default)
+#   copilot — Copilot CLI
+#   claude  — Claude Code
+# runtime: auto
 
 # Default model for reviewers that don't specify their own.
+# The copilot-style default claude-opus-4.8 is mapped to `opus` for the claude
+# runtime; models you specify here pass through as-is.
 # default_model: claude-opus-4.8
 
+# Language for finding titles/bodies (also --lang flag, PR_REVIEW_LANG env var).
+# language: en
+# language: pt-BR
+
 # How many reviewers to run in parallel by default.
-# default_concurrency: 4
 
 # Override per-model parallelism. Helps respect rate limits when mixing models.
-# concurrency_by_model:
-#   claude-opus-4.8: 3
-#   claude-sonnet-4.6: 6
 #   gpt-5: 8
 #   gpt-5.4-mini: 10
 
@@ -18,6 +28,7 @@
 # autodiscover: false
 
 # Extra directories to load reviewers / skills from (paths relative to this file).
+# Note: standalone reviewers are not dispatched in single-session mode — only skills are injected.
 # extra_reviewers_dirs:
 #   - ./docs/code-review
 # extra_skills_dirs:
@@ -53,6 +64,12 @@
 # to be installed via `/plugin install pr-review-toolkit@claude-code-plugins`
 # inside a `copilot` session.
 # invoke_companions: false
+
+# Codex second-opinion reviewer. Runs automatically (as a sibling process, in
+# parallel with the review session) when the `codex` CLI is installed; silently
+# skipped otherwise. Set to false to opt out (also --no-codex flag,
+# PR_REVIEW_NO_CODEX=1 env var, or --skip codex).
+# invoke_codex: false
 
 # Extra patterns to exclude from the diff (in addition to defaults like lockfiles, vendor, etc.).
 # diff_excludes:

@@ -7,10 +7,12 @@ description: "pr-review configuration: 5-level config merge, YAML examples, envi
 ## Precedence (highest wins)
 
 1. **CLI flags** — per-invocation overrides
-2. **`<repo>/.pr-review.yaml`** — per-repo, committed (team shares)
-3. **`~/.pr-review/config.yaml`** — global / personal defaults
-4. **Environment variables** — `PR_REVIEW_DEFAULT_MODEL`, etc.
+2. **Environment variables** — `PR_REVIEW_DEFAULT_MODEL`, `PR_REVIEW_LANG`, etc.
+3. **`<repo>/.pr-review.yaml`** — per-repo, committed (team shares)
+4. **`~/.pr-review/config.yaml`** — global / personal defaults
 5. **Built-in defaults**
+
+Note: env vars override YAML config (this changed — previously env was the weakest layer above defaults).
 
 Use `pr-review config show` to see the effective merged config and where each setting came from.
 
@@ -26,21 +28,25 @@ pr-review init --with-config        # also writes .pr-review.yaml
 ## Global config (`~/.pr-review/config.yaml`)
 
 ```yaml
+runtime: auto                    # copilot | claude | auto — which agent CLI hosts the session
 default_model: claude-opus-4.8
+language: en                     # finding titles/bodies language (default en)
 extra_skills_dirs:
   - ~/work/team-conventions
-extra_reviewers_dirs:
-  - ~/work/my-personal-reviewers
 skip_reviewers: [verifier]
 invoke_companions: true
+invoke_codex: true               # Codex second-opinion reviewer (auto-skipped if codex not installed)
 companion_warn: true
 dedupe_mode: strict              # strict | loose | off
 ```
+
+Runtime `auto` (the default) probes PATH: copilot first, then claude; it errors if neither is found. Model note: the copilot-style default `claude-opus-4.8` is mapped to `opus` for the claude runtime; models you set explicitly pass through as-is.
 
 ## Repo config (`<repo>/.pr-review.yaml`)
 
 ```yaml
 default_model: claude-opus-4.8
+language: pt-BR
 extra_skills_dirs:
   - ./docs/conventions
 extra_skills:
@@ -56,8 +62,11 @@ diff_excludes:
 
 | Variable | Maps to |
 |---|---|
+| `PR_REVIEW_RUNTIME` | `runtime` (also `--runtime <copilot\|claude\|auto>`; default `auto`) |
 | `PR_REVIEW_DEFAULT_MODEL` | `default_model` |
+| `PR_REVIEW_LANG` | `language` (also settable via `--lang <code>`; default `en`) |
 | `PR_REVIEW_NO_COMPANION_WARN` | `companion_warn: false` |
+| `PR_REVIEW_NO_CODEX` | `invoke_codex: false` (also `--no-codex`) |
 | `GITHUB_TOKEN` / `GH_TOKEN` / `COPILOT_GITHUB_TOKEN` | GitHub auth |
 | `AZURE_DEVOPS_PAT` / `SYSTEM_ACCESSTOKEN` | ADO auth |
 

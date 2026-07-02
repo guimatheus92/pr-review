@@ -8,7 +8,6 @@ const GLOBAL_PATH = join(homedir(), '.pr-review', 'config.yaml');
 
 interface RawConfig {
   default_model?: string;
-  default_concurrency?: number;
   extra_reviewers_dirs?: string[];
   extra_skills_dirs?: string[];
   companion_warn?: boolean;
@@ -51,12 +50,6 @@ export async function runConfigureInteractive(): Promise<void> {
   };
   try {
     cfg.default_model = await ask('Default model', cfg.default_model ?? 'claude-opus-4.8');
-    const concurrencyStr = await ask(
-      'Default concurrency (parallel reviewers)',
-      String(cfg.default_concurrency ?? 4),
-    );
-    const concurrency = parseInt(concurrencyStr, 10);
-    if (!Number.isNaN(concurrency)) cfg.default_concurrency = concurrency;
     const extraRev = await ask(
       'Extra reviewers dirs (comma-separated)',
       (cfg.extra_reviewers_dirs ?? []).join(','),

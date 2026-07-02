@@ -1,4 +1,7 @@
 import { execFile } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { ReviewerDefinition } from '../types.js';
 
 interface CompanionInfo {
@@ -98,26 +101,64 @@ function runCopilot(args: string[], copilotBinary = 'copilot', timeoutMs = 30_00
   });
 }
 
-export async function detectCompanions(copilotBinary = 'copilot'): Promise<CompanionState> {
+/** Exported for tests — the `copilot plugin list` output format is not machine-readable and this regex is the only contract. */
+export function parsePluginListOutput(stdout: string): string[] {
   const installed: string[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    const m = line.match(/^[\s•\-*+]+([a-z][a-z0-9-]+)(?:@[a-z][a-z0-9-]+)?(?:\s|$|\()/i);
+    if (m) installed.push(m[1]!);
+  }
+  return installed;
+}
+
+/**
+ * Claude Code records installs in ~/.claude/plugins/installed_plugins.json,
+ * keyed "name@marketplace". Total function: malformed content yields [] —
+ * companion detection is best-effort and must never crash a review run.
+ */
+export function parseInstalledPluginsJson(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw) as { plugins?: Record<string, unknown> };
+    if (!parsed || typeof parsed !== 'object' || !parsed.plugins) return [];
+    return Object.keys(parsed.plugins).map((k) => k.split('@')[0]!);
+  } catch {
+    return [];
+  }
+}
+
+function detectClaudePlugins(): string[] {
+  try {
+    const raw = readFileSync(join(homedir(), '.claude', 'plugins', 'installed_plugins.json'), 'utf8');
+    return parseInstalledPluginsJson(raw);
+  } catch (err) {
+    process.stderr.write(
+      `[companions] could not read ~/.claude/plugins/installed_plugins.json (${(err as Error).message.split('\n')[0]}); treating as none installed\n`,
+    );
+    return [];
+  }
+}
+
+export async function detectCompanions(binary = 'copilot', runtime: 'copilot' | 'claude' = 'copilot'): Promise<CompanionState> {
+  let installed: string[] = [];
   const debug = process.env.PR_REVIEW_DEBUG === '1';
 
-  // Skip the --json probe in normal runs; it's not supported in Copilot CLI 1.0.52
-  // and just adds a spawn of overhead that has timed out on cold Windows starts.
-  const text = await runCopilot(['plugin', 'list'], copilotBinary);
-  if (debug) {
-    process.stderr.write(
-      `[companions:debug] code=${text.code} stdout=${JSON.stringify(text.stdout.slice(0, 500))}\n`,
-    );
-  }
-  if (text.code !== 0) {
-    process.stderr.write(
-      `[companions] warning: \`${copilotBinary} plugin list\` failed (exit ${text.code}); treating as none installed.${text.stderr ? ' ' + text.stderr.trim().slice(0, 200) : ''}\n`,
-    );
+  if (runtime === 'claude') {
+    installed = detectClaudePlugins();
   } else {
-    for (const line of text.stdout.split(/\r?\n/)) {
-      const m = line.match(/^[\s•\-*+]+([a-z][a-z0-9-]+)(?:@[a-z][a-z0-9-]+)?(?:\s|$|\()/i);
-      if (m) installed.push(m[1]!);
+    // Skip the --json probe in normal runs; it's not supported in Copilot CLI 1.0.52
+    // and just adds a spawn of overhead that has timed out on cold Windows starts.
+    const text = await runCopilot(['plugin', 'list'], binary);
+    if (debug) {
+      process.stderr.write(
+        `[companions:debug] code=${text.code} stdout=${JSON.stringify(text.stdout.slice(0, 500))}\n`,
+      );
+    }
+    if (text.code !== 0) {
+      process.stderr.write(
+        `[companions] warning: \`${binary} plugin list\` failed (exit ${text.code}); treating as none installed.${text.stderr ? ' ' + text.stderr.trim().slice(0, 200) : ''}\n`,
+      );
+    } else {
+      installed = parsePluginListOutput(text.stdout);
     }
   }
   const missing = KNOWN_COMPANIONS.filter((c) => !installed.includes(c.id));

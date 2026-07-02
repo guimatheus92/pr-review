@@ -3,7 +3,11 @@ import { execFileSync } from 'node:child_process';
 /** The agent CLI that hosts the orchestrator session. */
 export type Runtime = 'copilot' | 'claude';
 
+/** What users may ask for: a concrete runtime, or 'auto' = probe PATH. Single source for config/CLI/review. */
+export type RuntimeChoice = Runtime | 'auto';
+
 export const RUNTIMES: Runtime[] = ['copilot', 'claude'];
+export const RUNTIME_CHOICES: RuntimeChoice[] = ['copilot', 'claude', 'auto'];
 
 function binaryOnPath(name: string): boolean {
   const probe = process.platform === 'win32' ? 'where' : 'which';

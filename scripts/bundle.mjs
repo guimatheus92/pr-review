@@ -1,7 +1,8 @@
 import { build } from 'esbuild';
-import { chmodSync } from 'node:fs';
+import { chmodSync, readFileSync } from 'node:fs';
 
 const SHEBANG = '#!/usr/bin/env node\n';
+const { version } = JSON.parse(readFileSync('package.json', 'utf8'));
 
 await build({
   entryPoints: ['src/cli.ts'],
@@ -15,6 +16,8 @@ await build({
   legalComments: 'none',
   minify: true,
   logLevel: 'info',
+  // single version source: package.json (tsc rootDir blocks a direct import)
+  define: { __PR_REVIEW_VERSION__: JSON.stringify(version) },
 });
 
 try {

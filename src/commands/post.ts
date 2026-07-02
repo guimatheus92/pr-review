@@ -121,8 +121,10 @@ export async function runPost(opts: PostOptions): Promise<PostResult> {
         // GitHub's create-review call is atomic — a failed batch posted
         // nothing, so re-attempting every inline finding per-comment cannot
         // double-post. attempted is only counted in the per-comment loop.
+        // Log the FULL error: when the cause is systemic (auth scope, closed
+        // PR) the per-comment failures that follow would bury the root cause.
         process.stderr.write(
-          `[post] batch review failed (${(err as Error).message.split('\n')[0]}); falling back to per-comment posting\n`,
+          `[post] batch review failed; falling back to per-comment posting. Cause:\n${(err as Error).message}\n`,
         );
       }
     }

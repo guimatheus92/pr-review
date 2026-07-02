@@ -74,7 +74,8 @@ console.log(run('npm', ['run', 'build']).split('\n').slice(-2).join('\n'));
 
 run('git', ['add', '-A']);
 run('git', ['commit', '-m', `Release ${newVersion}`]);
-run('git', ['tag', `v${newVersion}`]);
+// annotated, so `git push --follow-tags` actually pushes it
+run('git', ['tag', '-a', `v${newVersion}`, '-m', `Release ${newVersion}`]);
 console.log(`\nreleased ${newVersion} locally. Next steps:`);
 console.log(`  git push --follow-tags`);
 console.log(`  gh release create v${newVersion} --title "v${newVersion}" --notes-from-tag`);

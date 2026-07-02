@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "pr-review",
+  "version": "0.1.0",
+  "description": "Generic, plugin-based PR review for GitHub and Azure DevOps via Copilot CLI (single-plugin marketplace)",
+  "owner": {
+    "name": "Gabriel Matheus",
+    "email": "guilherme_matheus12@hotmail.com"
+  },
+  "plugins": [
+    {
+      "name": "pr-review",
+      "description": "Generic, plugin-based PR review for GitHub and Azure DevOps. Orchestrates parallel Copilot CLI reviewers (Opus + GPT) with stack/business-rule plugins.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Gabriel Matheus",
+        "email": "guilherme_matheus12@hotmail.com"
+      },
+      "source": ".",
+      "category": "productivity"
+    }
+  ]
+}

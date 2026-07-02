@@ -1,0 +1,14 @@
+node_modules/
+out/
+*.log
+.DS_Store
+.env
+.env.local
+.vscode/
+.idea/
+
+# Ship only the bundled CLI — everything else in dist/ is intermediate output
+dist/*
+!dist/cli.cjs
+!dist/cli.cjs.map
+

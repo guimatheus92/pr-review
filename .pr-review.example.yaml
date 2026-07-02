@@ -1,0 +1,60 @@
+# .pr-review.yaml — per-repo config (committed; the team shares it)
+# Copy to .pr-review.yaml at the repo root. All keys are optional.
+
+# Default model for reviewers that don't specify their own.
+# default_model: claude-opus-4.8
+
+# How many reviewers to run in parallel by default.
+# default_concurrency: 4
+
+# Override per-model parallelism. Helps respect rate limits when mixing models.
+# concurrency_by_model:
+#   claude-opus-4.8: 3
+#   claude-sonnet-4.6: 6
+#   gpt-5: 8
+#   gpt-5.4-mini: 10
+
+# Disable auto-discovery of .pr-review/{reviewers,skills}/ for this repo.
+# autodiscover: false
+
+# Extra directories to load reviewers / skills from (paths relative to this file).
+# extra_reviewers_dirs:
+#   - ./docs/code-review
+# extra_skills_dirs:
+#   - ./docs/conventions
+
+# Single files to include.
+# extra_reviewers:
+#   - ./SECURITY-CHECKLIST.md
+# extra_skills:
+#   - ./ARCHITECTURE.md
+
+# Packaged plugins (have their own plugin.yaml).
+# plugins:
+#   - dir: ./.pr-review/plugins/csharp
+#   - name: "@myorg/pr-review-plugin-azure-best-practices"
+
+# Dedupe mode for findings vs existing comments.
+#   strict — drop more aggressively (default)
+#   loose  — drop only near-exact matches
+#   off    — keep everything
+# dedupe:
+#   mode: strict
+
+# Reviewer names to always skip in this repo.
+# skip_reviewers:
+#   - test-coverage
+
+# Suppress the companion-plugin warning in this repo.
+# companion_warn: false
+
+# Invoke installed companion plugins (pr-review-toolkit agents) as extra reviewers.
+# Roughly doubles cost on each run; off by default. Requires the companion plugin
+# to be installed via `/plugin install pr-review-toolkit@claude-code-plugins`
+# inside a `copilot` session.
+# invoke_companions: false
+
+# Extra patterns to exclude from the diff (in addition to defaults like lockfiles, vendor, etc.).
+# diff_excludes:
+#   - "**/*.snap"
+#   - "**/legacy/**"

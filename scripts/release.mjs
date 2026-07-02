@@ -9,7 +9,13 @@ import { readFileSync, writeFileSync } from 'node:fs';
 const VERSIONED_FILES = ['package.json', 'package-lock.json', 'plugin.json', '.claude-plugin/marketplace.json'];
 
 function run(cmd, args) {
-  return execFileSync(cmd, args, { encoding: 'utf8', shell: process.platform === 'win32' });
+  // npm is a .cmd shim on Windows and needs a shell — but shell:true with an
+  // args ARRAY concatenates unescaped (git commit -m "Release X" would split).
+  // git.exe is a real binary: run it without a shell so args stay intact.
+  if (cmd === 'npm' && process.platform === 'win32') {
+    return execFileSync(['npm', ...args].join(' '), { encoding: 'utf8', shell: true });
+  }
+  return execFileSync(cmd, args, { encoding: 'utf8' });
 }
 
 const arg = process.argv[2];

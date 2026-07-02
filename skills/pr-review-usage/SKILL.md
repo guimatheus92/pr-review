@@ -40,7 +40,7 @@ From inside a `copilot` or `claude` session in any repo:
 /pr-review https://dev.azure.com/<org>/<proj>/_git/<repo>/pullrequest/<id>
 ```
 
-Add `--dry-run` to see findings without posting; `--publish` to post line comments back to the PR.
+Posting line comments back to the PR is the default. Add `--dry-run` to preview findings without posting.
 
 ## What it does
 
@@ -50,7 +50,7 @@ Add `--dry-run` to see findings without posting; `--publish` to post line commen
 4. Prepares the run dir: `pr-context.md` plus one `skills-<reviewer>.md` per reviewer containing the skills routed to it (`inject_into` + `applies_to` matching)
 5. Spawns one agent session (Copilot CLI or Claude Code, per `--runtime`; default `auto` picks whichever is on PATH, copilot first) that dispatches all reviewers in parallel via `task()` / `Task()`; the verifier is dispatched only if Phase 1 produced a CRITICAL/HIGH finding. If the `codex` CLI is installed, a Codex second-opinion reviewer runs in parallel as a sibling process (opt out with `--no-codex`)
 6. De-duplicates findings against existing comments
-7. Posts line-snapped comments (with `--publish`; GitHub inline comments go as one batched review) or prints a summary
+7. Posts line-snapped comments (default; GitHub inline comments go as one batched review) — or just prints the summary with `--dry-run`
 
 Exit codes: `0` clean, `1` findings at/above the `--fail-on` threshold survived dedupe, `2` pipeline error (the orchestrator produced no parseable findings).
 
@@ -64,8 +64,8 @@ Full lifecycle (list, add, remove) in the `adding-your-own-md` skill. The seven 
 
 | Flag | Meaning |
 |---|---|
-| `--dry-run` | Don't post comments |
-| `--publish` | Post line comments back to the PR |
+| `--dry-run` | Preview findings without posting (posting is the default) |
+| `--publish` | Deprecated no-op — posting is already the default |
 | `--context-only` | Prepare `pr-context.md` + skills files and print the skill→reviewer routing table, without spawning the runtime |
 | `--runtime <name>` | `copilot`\|`claude`\|`auto` — which agent CLI hosts the session (default `auto`) |
 | `--no-codex` | Skip the Codex second-opinion reviewer |

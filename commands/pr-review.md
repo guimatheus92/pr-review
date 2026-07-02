@@ -1,6 +1,6 @@
 ---
 description: Review a GitHub or Azure DevOps pull request using parallel reviewer agents in a single agent session (Copilot CLI or Claude Code) with auto-discovered local skills.
-argument-hint: "<pr-url> [--dry-run | --publish | --context-only] [--skip <name,...>] [--fail-on <severity>] [--lang <code>] [--runtime <copilot|claude>] [--no-companions] [--no-codex] [--skill <file>] [--skills-dir <path>]"
+argument-hint: "<pr-url> [--dry-run | --context-only] [--skip <name,...>] [--fail-on <severity>] [--lang <code>] [--runtime <copilot|claude>] [--no-companions] [--no-codex] [--skill <file>] [--skills-dir <path>]"
 allowed-tools: ["Bash"]
 ---
 

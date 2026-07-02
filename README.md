@@ -4,7 +4,7 @@ A generic, plugin-based PR review tool for GitHub and Azure DevOps, packaged as 
 
 ```
 /pr-review https://github.com/org/repo/pull/123
-/pr-review https://dev.azure.com/org/proj/_git/repo/pullrequest/456 --publish
+/pr-review https://dev.azure.com/org/proj/_git/repo/pullrequest/456 --dry-run
 ```
 
 ## Why a CLI, not just a skill
@@ -49,10 +49,9 @@ npm install && npm run build
 ## Usage
 
 ```bash
-/pr-review <pr-url>                    # review with auto-discovered skills
-/pr-review <pr-url> --publish          # post line comments to the PR
+/pr-review <pr-url>                    # review with auto-discovered skills; posts line comments (default)
+/pr-review <pr-url> --dry-run          # preview findings without posting
 /pr-review <pr-url> --skip security    # skip specific reviewers
-/pr-review <pr-url> --dry-run          # preview without posting
 /pr-review <pr-url> --context-only     # prepare context + skill routing table, don't run reviewers
 /pr-review <pr-url> --lang pt-BR       # language for finding titles/bodies (default: en)
 /pr-review <pr-url> --fail-on high     # exit 1 if any high/critical finding survives dedupe

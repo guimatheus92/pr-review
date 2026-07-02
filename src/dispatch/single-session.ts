@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { assertSafeArg, spawnCli } from '../util/spawn.js';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { GatherOutput, ReviewerOutput, SkillDefinition } from '../types.js';
@@ -569,16 +569,6 @@ interface SpawnResult {
   exitCode: number;
 }
 
-// shell:true is required on win32 to launch the copilot.cmd/claude.cmd shims;
-// constrain the interpolated values so nothing shell-significant can ride along.
-const SAFE_ARG_RE = /^[\w.\-:+\\\/ ~()]+$/;
-
-function assertSafeArg(name: string, value: string): void {
-  if (!SAFE_ARG_RE.test(value)) {
-    throw new Error(`[single-session] refusing to spawn: ${name} contains unsupported characters: ${value}`);
-  }
-}
-
 function spawnRuntime(args: {
   runtime: Runtime;
   binary: string;
@@ -592,23 +582,7 @@ function spawnRuntime(args: {
   assertSafeArg('add-dir', args.addDir);
   return new Promise((resolve) => {
     const argv = runtimeSpawnArgs(args.runtime, args.model, args.addDir);
-    // DEP0190: passing an args ARRAY with shell:true is deprecated — Node
-    // concatenates the args unescaped. win32 still needs a shell for the
-    // claude.cmd/copilot.cmd shims, so build the command line ourselves from
-    // the SAFE_ARG_RE-validated parts, double-quoting each one (the regex
-    // forbids `"` and every cmd metacharacter, so quoting is sound). Other
-    // platforms spawn the binary directly — no shell at all.
-    const child =
-      process.platform === 'win32'
-        ? spawn([args.binary, ...argv].map((part) => `"${part}"`).join(' '), {
-            stdio: ['pipe', 'pipe', 'pipe'],
-            windowsHide: true,
-            shell: true,
-          })
-        : spawn(args.binary, argv, {
-            stdio: ['pipe', 'pipe', 'pipe'],
-            windowsHide: true,
-          });
+    const child = spawnCli(args.binary, argv, { stdio: ['pipe', 'pipe', 'pipe'] });
     child.stdin.write(args.promptBody);
     child.stdin.end();
 

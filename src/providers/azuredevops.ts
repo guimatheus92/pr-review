@@ -1,5 +1,5 @@
 import * as azdev from 'azure-devops-node-api';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import pLimit from 'p-limit';
 import type { GitPullRequest, GitPullRequestCommentThread, Comment } from 'azure-devops-node-api/interfaces/GitInterfaces.js';
 import type { ChangedFile, ExistingComment, Finding, PrMetadata, PrRef } from '../types.js';
@@ -25,14 +25,15 @@ function resolveCredential(): AdoCredential {
   const pat = process.env.AZURE_DEVOPS_PAT ?? process.env.SYSTEM_ACCESSTOKEN ?? process.env.AZURE_DEVOPS_EXT_PAT;
   if (pat) return { token: pat, kind: 'pat' };
   try {
-    const token = execFileSync(
-      'az',
-      ['account', 'get-access-token', '--resource', ADO_AZURE_AD_RESOURCE_ID, '--query', 'accessToken', '-o', 'tsv'],
-      {
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-        shell: process.platform === 'win32',
-      },
+    // az ships as az.cmd on Windows, which only a shell can launch — and
+    // shell+args-array trips DEP0190, so win32 gets a prebuilt command string
+    // (every part is a static literal, nothing user-controlled). Elsewhere,
+    // spawn the binary directly with no shell.
+    const argv = ['account', 'get-access-token', '--resource', ADO_AZURE_AD_RESOURCE_ID, '--query', 'accessToken', '-o', 'tsv'];
+    const token = (
+      process.platform === 'win32'
+        ? execSync(['az', ...argv].join(' '), { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+        : execFileSync('az', argv, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
     ).trim();
     if (token) {
       process.stderr.write(`[ado] using bearer token from \`az account get-access-token\`\n`);

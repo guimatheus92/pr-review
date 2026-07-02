@@ -5,7 +5,7 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 ## [Unreleased]
 
 ### Fixed
-- win32 orchestrator spawn no longer triggers Node DEP0190 (args array + `shell: true` concatenates unescaped): the command line is now built explicitly from SAFE_ARG_RE-validated, individually double-quoted parts; non-Windows platforms spawn the binary directly without a shell.
+- No spawn site triggers Node DEP0190 anymore (args array + `shell: true` concatenates unescaped). The orchestrator and codex spawns share a new `spawnCli` helper that, on win32 only, builds the command line from SAFE_ARG_RE-validated, individually double-quoted parts; other platforms spawn the binary directly without a shell. `doctor`'s gh probe drops `shell` entirely (gh ships as gh.exe), and the ADO `az` token fetch uses a prebuilt static command string on win32.
 
 ## [0.1.5] — 2026-07-02
 

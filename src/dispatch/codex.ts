@@ -1,4 +1,5 @@
-import { exec, spawn } from 'node:child_process';
+import { exec } from 'node:child_process';
+import { spawnCli } from '../util/spawn.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ReviewerOutput } from '../types.js';
@@ -83,11 +84,7 @@ export async function runCodexReviewer(opts: CodexReviewOptions): Promise<Review
   ];
 
   const result = await new Promise<{ exitCode: number; timedOut: boolean; stderr: string }>((res) => {
-    const child = spawn(opts.binary ?? 'codex', argv, {
-      stdio: ['pipe', 'ignore', 'pipe'],
-      windowsHide: true,
-      shell: process.platform === 'win32',
-    });
+    const child = spawnCli(opts.binary ?? 'codex', argv, { stdio: ['pipe', 'ignore', 'pipe'] });
     child.stdin.write(prompt);
     child.stdin.end();
     let stderr = '';

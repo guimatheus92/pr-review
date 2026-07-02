@@ -13,7 +13,9 @@ function bad(label: string, hint = ''): void {
 
 function ghAuthOk(): boolean {
   try {
-    execFileSync('gh', ['auth', 'status'], { stdio: ['ignore', 'pipe', 'pipe'], shell: process.platform === 'win32' });
+    // No shell: gh ships as gh.exe on Windows (not a .cmd shim), and
+    // shell+args-array trips DEP0190 — same shape as resolveToken in github.ts.
+    execFileSync('gh', ['auth', 'status'], { stdio: ['ignore', 'pipe', 'pipe'] });
     return true;
   } catch {
     return false;

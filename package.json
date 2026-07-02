@@ -1,7 +1,7 @@
 {
   "name": "pr-review",
   "version": "0.1.3",
-  "description": "Generic, plugin-based PR review for GitHub and Azure DevOps. Orchestrates parallel Copilot CLI reviewer agents with stack/business-rule skills.",
+  "description": "Generic, plugin-based PR review for GitHub and Azure DevOps. Orchestrates parallel reviewer agents in a single agent session (Copilot CLI or Claude Code) with stack/business-rule skills.",
   "private": true,
   "type": "module",
   "bin": {

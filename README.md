@@ -49,7 +49,7 @@ For local development:
 ```bash
 git clone https://github.com/gmatheus_microsoft/pr-review && cd pr-review
 npm install && npm run build
-# inside copilot:
+# inside copilot (or claude — same slash commands; claude also accepts `claude plugin marketplace add ./` from the shell):
 /plugin marketplace add .
 /plugin install pr-review@pr-review
 ```

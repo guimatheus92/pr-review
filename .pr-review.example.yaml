@@ -19,12 +19,8 @@
 # language: pt-BR
 
 # How many reviewers to run in parallel by default.
-# default_concurrency: 4
 
 # Override per-model parallelism. Helps respect rate limits when mixing models.
-# concurrency_by_model:
-#   claude-opus-4.8: 3
-#   claude-sonnet-4.6: 6
 #   gpt-5: 8
 #   gpt-5.4-mini: 10
 

@@ -16,13 +16,13 @@ function binaryOnPath(name: string): boolean {
 }
 
 /**
- * Resolve which runtime to use. Explicit choice wins; 'auto' probes PATH
- * (copilot first for backward compatibility, then claude).
+ * Resolve which runtime to use. Explicit --runtime wins; otherwise a --copilot
+ * binary override implies the copilot runtime (the flag predates dual-runtime
+ * and always meant "copilot binary path"); otherwise probe PATH, copilot first.
  */
 export function resolveRuntime(preferred: Runtime | 'auto' | undefined, binaryOverride?: string): Runtime {
   if (preferred && preferred !== 'auto') return preferred;
-  // A custom binary path without an explicit runtime keeps the copilot contract.
-  if (binaryOverride && binaryOverride !== 'copilot') return 'copilot';
+  if (binaryOverride) return 'copilot';
   if (binaryOnPath('copilot')) return 'copilot';
   if (binaryOnPath('claude')) return 'claude';
   throw new Error(

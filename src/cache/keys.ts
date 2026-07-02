@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { GatherOutput, PrRef } from '../types.js';
@@ -26,11 +25,3 @@ export function lastCommentIdFrom(gather: GatherOutput): string {
   return last.id;
 }
 
-export function responseCacheKey(reviewerName: string, promptBody: string): string {
-  const hash = createHash('sha256').update(promptBody).digest('hex').slice(0, 16);
-  return `${reviewerName}-${hash}`;
-}
-
-export function responseCachePath(reviewerName: string, promptBody: string): string {
-  return join(CACHE_ROOT, 'responses', `${responseCacheKey(reviewerName, promptBody)}.json`);
-}

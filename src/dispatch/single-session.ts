@@ -54,17 +54,24 @@ export interface SingleSessionOptions {
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 
-// Caps mirror the 320-char cap on existing-comment bodies: user skills are
-// injected verbatim into every matching reviewer's context, so an unbounded
-// skill body multiplies token cost across the whole fan-out.
+// Skills are injected verbatim into every matching reviewer's context, so an
+// unbounded body multiplies token cost across the whole fan-out. The caps are
+// a per-run token budget; truncation always warns on stderr.
 const SKILL_BODY_CAP = 16_000;
 const SKILLS_FILE_CAP = 64_000;
 
 // ponytail: docs-only heuristic — anything ambiguous dispatches everything.
 const DOCS_ONLY_GLOBS = ['**/*.md', '**/*.markdown', '**/*.txt', '**/*.rst', 'docs/**', 'LICENSE*', 'CHANGELOG*'];
 
-const OUTPUT_SHAPE =
+/** Single source of the reviewer output contract — the dispatch prompts and the Codex sibling all quote this. */
+export const OUTPUT_SHAPE =
   '[{"severity":"CRITICAL|HIGH|MEDIUM|LOW|NIT","title":"...","body":"...","file":"...","line":<int>}]';
+
+export function skillsRulesSentence(skillsPath: string | undefined): string {
+  return skillsPath
+    ? ` Also read the project-specific rules at \`${skillsPath}\` — they are authoritative and OVERRIDE generic judgement.`
+    : '';
+}
 
 export interface SkillRoute {
   skill: string;
@@ -213,11 +220,8 @@ function writeContextFile(opts: SingleSessionOptions): string {
 }
 
 function reviewerTaskPrompt(contextPath: string, skillsPath: string | undefined): string {
-  const readRules = skillsPath
-    ? ` Also read the project-specific rules at \`${skillsPath}\` — they are authoritative and OVERRIDE generic judgement.`
-    : '';
   return (
-    `Read the PR context at \`${contextPath}\`.${readRules} Apply your review criteria. ` +
+    `Read the PR context at \`${contextPath}\`.${skillsRulesSentence(skillsPath)} Apply your review criteria. ` +
     `Output ONLY a JSON array of findings using the shape: ${OUTPUT_SHAPE}. If you find nothing, output []. No prose. No fences.`
   );
 }
@@ -398,9 +402,7 @@ function buildOrchestratorPrompt(
 
   if (ctx.wantVerifier) {
     const verifierSkills = ctx.skillsFiles.get('verifier');
-    const verifierRules = verifierSkills
-      ? ` Also read the project-specific rules at \`${verifierSkills}\`.`
-      : '';
+    const verifierRules = skillsRulesSentence(verifierSkills);
     lines.push(
       ``,
       `## Phase 3 — Verifier (conditional)`,

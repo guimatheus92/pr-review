@@ -116,3 +116,10 @@ test('autodiscovery — untargeted skills from generic shared dirs are skipped; 
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('parseInstalledPluginsJson — malformed or shapeless JSON yields [] (never throws)', async () => {
+  const { parseInstalledPluginsJson } = await import('../src/plugins/companions.js');
+  assert.deepEqual(parseInstalledPluginsJson('not json at all'), []);
+  assert.deepEqual(parseInstalledPluginsJson('null'), []);
+  assert.deepEqual(parseInstalledPluginsJson('{"version":2}'), []);
+});

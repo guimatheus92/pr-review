@@ -6,7 +6,7 @@
 git clone <repo> && cd pr-review
 npm install
 npm run build          # tsc + esbuild → dist/cli.cjs
-npm run test           # node --test, globs tests/**/*.test.ts (77 tests)
+npm run test           # node scripts/test.mjs → node --test over tests/*.test.ts (110 tests)
 ```
 
 Iterative dev: `npm run build:watch` (tsc only; re-run `npm run bundle` for the esbuild output).

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ReviewerOutput } from '../types.js';
 import { parseReviewerOutput } from './parsers.js';
+import { OUTPUT_SHAPE, skillsRulesSentence } from './single-session.js';
 
 const CODEX_TIMEOUT_MS = 15 * 60 * 1000;
 
@@ -27,6 +28,39 @@ export interface CodexReviewOptions {
 }
 
 /**
+ * Pure post-spawn result mapping, exported for tests. Contract:
+ * - exit 0 → findings as parsed, no error.
+ * - nonzero exit (or timeout) with NO findings → errored run, empty findings.
+ * - nonzero exit (or timeout) WITH findings → findings are kept (partial output
+ *   is still useful) but `error` is set so the run is never reported as clean.
+ */
+export function mapCodexResult(args: {
+  exitCode: number;
+  timedOut: boolean;
+  raw: string;
+  durationMs: number;
+}): ReviewerOutput {
+  const findings = args.raw ? parseReviewerOutput(args.raw, 'json') : [];
+  const base: ReviewerOutput = {
+    reviewerName: 'codex',
+    model: 'codex',
+    findings,
+    rawOutput: args.raw,
+    durationMs: args.durationMs,
+    exitCode: args.exitCode,
+  };
+  if (args.exitCode === 0 && !args.timedOut) return base;
+  const cause = args.timedOut ? 'timed out' : `exited ${args.exitCode}`;
+  return {
+    ...base,
+    error:
+      findings.length > 0
+        ? `codex exec ${cause} — kept ${findings.length} finding(s), output may be incomplete`
+        : `codex exec ${cause}`,
+  };
+}
+
+/**
  * Second-opinion reviewer running on the Codex CLI, in parallel with the main
  * orchestrator session. A different model family catches what the primary one
  * misses. Read-only sandbox; output captured via --output-last-message.
@@ -34,13 +68,10 @@ export interface CodexReviewOptions {
 export async function runCodexReviewer(opts: CodexReviewOptions): Promise<ReviewerOutput> {
   const start = Date.now();
   const outFile = resolve(opts.outDir, 'codex-output.txt');
-  const rules = opts.skillsPath
-    ? ` Also read the project-specific rules at \`${opts.skillsPath}\` — they are authoritative and OVERRIDE generic judgement.`
-    : '';
   const prompt =
-    `You are an adversarial second-opinion code reviewer. Read the PR review context at \`${opts.contextPath}\` (metadata, existing comments, diff).${rules} ` +
+    `You are an adversarial second-opinion code reviewer. Read the PR review context at \`${opts.contextPath}\` (metadata, existing comments, diff).${skillsRulesSentence(opts.skillsPath)} ` +
     `Hunt for real bugs, security issues, and broken edge cases the diff introduces — assume other reviewers already caught the obvious; look for what they would miss. Do not restate existing comments. ` +
-    `Output ONLY a JSON array of findings using the shape: [{"severity":"CRITICAL|HIGH|MEDIUM|LOW|NIT","title":"...","body":"...","file":"...","line":<int>}]. If you find nothing, output []. No prose. No fences.`;
+    `Output ONLY a JSON array of findings using the shape: ${OUTPUT_SHAPE}. If you find nothing, output []. No prose. No fences.`;
 
   const argv = [
     'exec',
@@ -54,7 +85,7 @@ export async function runCodexReviewer(opts: CodexReviewOptions): Promise<Review
     '-',
   ];
 
-  const result = await new Promise<{ exitCode: number; stderr: string }>((res) => {
+  const result = await new Promise<{ exitCode: number; timedOut: boolean; stderr: string }>((res) => {
     const child = spawn(opts.binary ?? 'codex', argv, {
       stdio: ['pipe', 'ignore', 'pipe'],
       windowsHide: true,
@@ -77,11 +108,11 @@ export async function runCodexReviewer(opts: CodexReviewOptions): Promise<Review
     });
     child.on('error', (err) => {
       clearTimeout(timer);
-      res({ exitCode: -1, stderr: stderr + '\n' + err.message });
+      res({ exitCode: -1, timedOut, stderr: stderr + '\n' + err.message });
     });
     child.on('close', (code) => {
       clearTimeout(timer);
-      res({ exitCode: code ?? -1, stderr: stderr + (timedOut ? '\n[timed out]' : '') });
+      res({ exitCode: code ?? -1, timedOut, stderr });
     });
   });
 
@@ -89,28 +120,16 @@ export async function runCodexReviewer(opts: CodexReviewOptions): Promise<Review
   try {
     raw = readFileSync(outFile, 'utf8');
   } catch {
-    // no output file — treated as an errored run below
+    // no output file — mapCodexResult treats empty raw as an errored run
   }
-  const findings = raw ? parseReviewerOutput(raw, 'json') : [];
-  const durationMs = Date.now() - start;
-  if (result.exitCode !== 0 && findings.length === 0) {
-    process.stderr.write(`[codex] reviewer failed (exit ${result.exitCode}): ${result.stderr.trim().slice(0, 300)}\n`);
-    return {
-      reviewerName: 'codex',
-      model: 'codex',
-      findings: [],
-      rawOutput: raw,
-      durationMs,
-      exitCode: result.exitCode,
-      error: `codex exec failed (exit ${result.exitCode})`,
-    };
-  }
-  return {
-    reviewerName: 'codex',
-    model: 'codex',
-    findings,
-    rawOutput: raw,
-    durationMs,
+  const output = mapCodexResult({
     exitCode: result.exitCode,
-  };
+    timedOut: result.timedOut,
+    raw,
+    durationMs: Date.now() - start,
+  });
+  if (output.error) {
+    process.stderr.write(`[codex] ${output.error}: ${result.stderr.trim().slice(0, 300)}\n`);
+  }
+  return output;
 }

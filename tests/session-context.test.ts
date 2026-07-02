@@ -171,3 +171,27 @@ test('includeCodex — writes skills-codex.md and exposes it in skillsFiles', ()
     rmSync(outDir, { recursive: true, force: true });
   }
 });
+
+test('companions routing — untargeted skills reach skills-companions.md; inject_into-targeted skills never leak there', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const skills: SkillDefinition[] = [
+      { name: 'untargeted', source: 'u.md', body: 'untargeted body', appliesTo: [] },
+      { name: 'sec-only', source: 's.md', body: 'sec-only body', appliesTo: [], injectInto: ['security'] },
+    ];
+    const ctx = prepareSessionContext({
+      ...baseOpts(outDir, ['src/app.ts'], skills),
+      installedCompanions: ['pr-review-toolkit'],
+      invokeCompanions: true,
+    });
+    const companionsFile = readFileSync(ctx.skillsFiles['companions']!, 'utf8');
+    assert.ok(companionsFile.includes('untargeted body'));
+    assert.ok(!companionsFile.includes('sec-only body'), 'inject_into-targeted skill must not leak to companions');
+    const verifierFile = readFileSync(ctx.skillsFiles['verifier']!, 'utf8');
+    assert.ok(verifierFile.includes('untargeted body'), 'verifier union includes companion skills');
+    assert.ok(ctx.orchestratorPrompt.includes('pr-review-toolkit:code-reviewer'), 'companion agents dispatched');
+    assert.ok(ctx.orchestratorPrompt.includes('skills-companions.md'));
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});

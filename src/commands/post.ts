@@ -1,7 +1,7 @@
 import { detectProvider } from '../providers/index.js';
 import { buildValidLinesMap, snapLineToDiff } from '../dispatch/line-snap.js';
 import type { ChangedFile, Finding, GatherOutput, ReviewerOutput } from '../types.js';
-import type { BatchComment } from '../providers/types.js';
+import type { BatchComment, PrProvider } from '../providers/types.js';
 
 interface PostOptions {
   prUrl: string;
@@ -9,6 +9,8 @@ interface PostOptions {
   publish: boolean;
   /** When provided, enables line snapping (via changedFiles patches) and skips the head-SHA fetch. */
   gather?: GatherOutput;
+  /** Test seam — defaults to detectProvider(prUrl). */
+  provider?: PrProvider;
 }
 
 export interface PostResult {
@@ -67,7 +69,7 @@ export function snapFindingsToDiff(
 }
 
 export async function runPost(opts: PostOptions): Promise<PostResult> {
-  const provider = detectProvider(opts.prUrl);
+  const provider = opts.provider ?? detectProvider(opts.prUrl);
   const ref = provider.parseUrl(opts.prUrl);
   if (!ref) throw new Error(`Failed to parse PR URL: ${opts.prUrl}`);
 
@@ -116,6 +118,9 @@ export async function runPost(opts: PostOptions): Promise<PostResult> {
         remaining = findings.filter((f) => !(f.file && f.line));
         process.stderr.write(`[post] posted ${batch.posted} inline comment(s) as one review\n`);
       } catch (err) {
+        // GitHub's create-review call is atomic — a failed batch posted
+        // nothing, so re-attempting every inline finding per-comment cannot
+        // double-post. attempted is only counted in the per-comment loop.
         process.stderr.write(
           `[post] batch review failed (${(err as Error).message.split('\n')[0]}); falling back to per-comment posting\n`,
         );
@@ -130,7 +135,9 @@ export async function runPost(opts: PostOptions): Promise<PostResult> {
       if (out) {
         result.posted++;
       } else {
-        result.skipped++;
+        // `skipped` exists only for --dry-run: a finding the provider cannot
+        // place inline on a publish run is an error, never silently dropped.
+        result.errors.push({ finding: f, error: 'no diff-anchored location; could not post as an inline comment' });
       }
     } catch (err) {
       result.errors.push({ finding: f, error: (err as Error).message });

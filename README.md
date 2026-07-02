@@ -127,7 +127,7 @@ pr-review review <pr-url> [flags]            # full pipeline
 #   --runtime <name>        copilot|claude|auto — which agent CLI hosts the session
 #                           (yaml: runtime, env: PR_REVIEW_RUNTIME; default auto)
 #   --no-codex              skip the Codex second-opinion reviewer
-#   --copilot <path>        path to the runtime CLI binary (kept for back-compat)
+#   --copilot <path>        path to the copilot binary (implies --runtime copilot unless --runtime given)
 pr-review gather <pr-url> [--out <path>]     # fetch + cache metadata only
 pr-review post <pr-url> --findings <path>    # post pre-computed findings
 pr-review init [--with-config] [--force]     # scaffold .pr-review/skills/

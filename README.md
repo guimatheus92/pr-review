@@ -29,6 +29,21 @@ Or inside a `claude` (Claude Code) session:
 
 No `npm install` needed. The plugin ships a pre-bundled `dist/cli.cjs`; the slash command finds it via `$CLAUDE_PLUGIN_ROOT` under Claude Code (falling back to `~/.copilot/installed-plugins/`) and runs it with `node`. The plugin layout (`commands/`, `agents/`, `skills/` + `plugin.json`) loads in both hosts.
 
+**Command name per host:** Copilot CLI exposes the command as `/pr-review`. Claude Code namespaces plugin commands, so there it is `/pr-review:pr-review`. If you want a bare `/pr-review` in Claude Code too, drop a personal alias at `~/.claude/commands/pr-review.md` containing:
+
+```markdown
+---
+description: Alias for the pr-review plugin command.
+allowed-tools: ["Bash"]
+---
+Run the pr-review CLI (you are plumbing, not the reviewer):
+​```bash
+CLI=$(find ~/.claude/plugins/cache -name cli.cjs -path '*/pr-review/*/dist/*' -not -path '*/node_modules/*' 2>/dev/null | sort | tail -1)
+node "$CLI" review $ARGUMENTS
+​```
+Print the command's stdout verbatim.
+```
+
 For local development:
 
 ```bash

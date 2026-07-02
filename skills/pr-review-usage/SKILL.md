@@ -40,6 +40,8 @@ From inside a `copilot` or `claude` session in any repo:
 /pr-review https://dev.azure.com/<org>/<proj>/_git/<repo>/pullrequest/<id>
 ```
 
+Under Claude Code the plugin command is namespaced: `/pr-review:pr-review <url>`. For a bare `/pr-review` there too, add the personal alias described in the README install section.
+
 Posting line comments back to the PR is the default. Add `--dry-run` to preview findings without posting.
 
 ## What it does

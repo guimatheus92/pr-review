@@ -231,7 +231,12 @@ export class GitHubProvider implements PrProvider {
           // COMMENT is the only event acceptable on the author's own PR, and
           // posting findings must never approve/block on their behalf.
           event: 'COMMENT',
-          body: 'Automated review findings.',
+          // NO review body: a body renders as an extra "X left a comment" box
+          // in the PR timeline on top of the inline comments — pure noise.
+          // The API docs claim `body` is required for COMMENT, but that only
+          // holds for comment-less reviews; with a populated `comments[]`
+          // GitHub accepts the omission (the web UI submits body-less
+          // reviews the same way). Findings must only ever appear inline.
           comments: comments.map((c) => ({ path: c.path, line: c.line, side: 'RIGHT' as const, body: c.body })),
         }),
       isTransientGitHubError,

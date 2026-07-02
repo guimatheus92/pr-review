@@ -8,14 +8,18 @@ import { showCacheInfo, clearCacheCommand } from './commands/cache.js';
 import { pluginsList, pluginsDoctor } from './commands/plugins.js';
 import { showConfig } from './commands/config.js';
 import { readFileSync } from 'node:fs';
+import { RUNTIME_CHOICES, type RuntimeChoice } from './dispatch/runtime.js';
 import type { GatherOutput, ReviewerOutput, Severity } from './types.js';
+
+// Injected by scripts/bundle.mjs from package.json; dev runs via tsx see the fallback.
+declare const __PR_REVIEW_VERSION__: string | undefined;
 
 const program = new Command();
 
 program
   .name('pr-review')
   .description('Generic, plugin-based PR review for GitHub and Azure DevOps via Copilot CLI or Claude Code')
-  .version('0.1.3');
+  .version(typeof __PR_REVIEW_VERSION__ === 'string' ? __PR_REVIEW_VERSION__ : '0.0.0-dev');
 
 program
   .command('gather <pr-url>')
@@ -95,8 +99,8 @@ program
     ) => {
       try {
         const skip = opts.skip?.split(',').map((s) => s.trim()).filter(Boolean) ?? [];
-        if (opts.runtime && !['copilot', 'claude', 'auto'].includes(opts.runtime)) {
-          console.error(`--runtime must be one of: copilot, claude, auto`);
+        if (opts.runtime && !(RUNTIME_CHOICES as string[]).includes(opts.runtime)) {
+          console.error(`--runtime must be one of: ${RUNTIME_CHOICES.join(', ')}`);
           process.exit(2);
         }
         let failOn: Severity | undefined;
@@ -130,7 +134,7 @@ program
           contextOnly: opts.contextOnly,
           language: opts.lang,
           failOn,
-          runtime: opts.runtime as 'copilot' | 'claude' | 'auto' | undefined,
+          runtime: opts.runtime as RuntimeChoice | undefined,
           withCodex: opts.codex ? undefined : false,
         });
         process.stdout.write(summary + '\n');

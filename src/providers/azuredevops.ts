@@ -302,22 +302,32 @@ export class AzureDevOpsProvider implements PrProvider {
     sha: string,
   ): Promise<string | null> {
     try {
-      const item = await git.getItem(
-        repoId,
-        `/${path}`,
-        project,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        { version: sha, versionType: 2 },
-        true,
-        false,
+      const item = await withRetry(
+        () =>
+          git.getItem(
+            repoId,
+            `/${path}`,
+            project,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            { version: sha, versionType: 2 },
+            true,
+            false,
+          ),
+        isTransientAdoError,
+        `getItem ${path}@${sha.slice(0, 8)}`,
       );
       const content = (item as unknown as { content?: string }).content;
       return typeof content === 'string' ? content : null;
-    } catch {
+    } catch (err) {
+      // A null here makes synthesizePatch treat the file as added/deleted —
+      // a wrong diff on a transient failure would be silent, so say it loud.
+      process.stderr.write(
+        `[ado] could not fetch ${path} at ${sha.slice(0, 8)} (${(err as Error).message.split('\n')[0]}); diff for this file may be wrong\n`,
+      );
       return null;
     }
   }
@@ -339,7 +349,8 @@ export class AzureDevOpsProvider implements PrProvider {
         { targetVersion: sourceSha, targetVersionType: 2 },
       );
       return JSON.stringify(diffs.changes ?? [], null, 2);
-    } catch {
+    } catch (err) {
+      process.stderr.write(`[ado] getCommitDiffs failed (${(err as Error).message.split('\n')[0]}); full diff omitted from context\n`);
       return '';
     }
   }

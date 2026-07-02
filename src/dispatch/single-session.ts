@@ -6,7 +6,8 @@ import { matchesAny } from '../util/globs.js';
 import { parseReviewerOutput } from './parsers.js';
 import { normalizeModel, runtimeBinary, runtimeSpawnArgs, taskCall, taskToolName, type Runtime } from './runtime.js';
 
-const BUILTIN_AGENTS = [
+/** Exported so tests can lock the registry against the agents/*.md files. */
+export const BUILTIN_AGENTS = [
   'pr-review:security',
   'pr-review:quality',
   'pr-review:architecture',
@@ -62,6 +63,8 @@ const SKILLS_FILE_CAP = 64_000;
 
 // ponytail: docs-only heuristic — anything ambiguous dispatches everything.
 const DOCS_ONLY_GLOBS = ['**/*.md', '**/*.markdown', '**/*.txt', '**/*.rst', 'docs/**', 'LICENSE*', 'CHANGELOG*'];
+/** The reviewers that survive a docs-only PR. Must name entries of BUILTIN_AGENTS (locked by test). */
+const DOCS_ONLY_REVIEWERS = ['quality'];
 
 /** Single source of the reviewer output contract — the dispatch prompts and the Codex sibling all quote this. */
 export const OUTPUT_SHAPE =
@@ -148,9 +151,14 @@ function triageReviewers(shorts: string[], inScopePaths: string[]): { dispatch: 
   const docsOnly =
     inScopePaths.length > 0 && inScopePaths.every((p) => matchesAny(p, DOCS_ONLY_GLOBS));
   if (!docsOnly) return { dispatch: shorts, skipped: [] };
+  const surviving = shorts.filter((s) => DOCS_ONLY_REVIEWERS.includes(s));
+  if (surviving.length === 0) {
+    // e.g. the surviving reviewer was --skip'ed: never triage down to zero.
+    return { dispatch: shorts, skipped: [] };
+  }
   return {
-    dispatch: shorts.filter((s) => s === 'quality'),
-    skipped: shorts.filter((s) => s !== 'quality'),
+    dispatch: surviving,
+    skipped: shorts.filter((s) => !DOCS_ONLY_REVIEWERS.includes(s)),
   };
 }
 
@@ -469,9 +477,12 @@ function parseFindingsFile(path: string, model: string, durationMs: number, exit
   }));
 }
 
-export async function runSingleSession(opts: SingleSessionOptions): Promise<SingleSessionResult> {
+export async function runSingleSession(
+  opts: SingleSessionOptions,
+  prepared?: SessionContext,
+): Promise<SingleSessionResult> {
   const start = Date.now();
-  const ctx = prepareSessionContext(opts);
+  const ctx = prepared ?? prepareSessionContext(opts);
 
   for (const stale of [ctx.findingsPath, ctx.phase1Path]) {
     try {

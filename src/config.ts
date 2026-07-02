@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
+import { RUNTIME_CHOICES, type RuntimeChoice } from './dispatch/runtime.js';
 
 export interface Config {
   defaultModel: string;
@@ -18,8 +19,8 @@ export interface Config {
   companionWarn: boolean;
   invokeCompanions: boolean;
   language: string;
-  /** Agent CLI hosting the session: copilot | claude | auto (probe PATH). */
-  runtime: 'copilot' | 'claude' | 'auto';
+  /** Agent CLI hosting the session, or 'auto' to probe PATH. */
+  runtime: RuntimeChoice;
   /** Run the Codex second-opinion reviewer when the codex CLI is installed. */
   invokeCodex: boolean;
 }
@@ -57,7 +58,7 @@ interface RawConfig {
   companion_warn?: boolean;
   invoke_companions?: boolean;
   language?: string;
-  runtime?: 'copilot' | 'claude' | 'auto';
+  runtime?: RuntimeChoice;
   invoke_codex?: boolean;
 }
 
@@ -109,7 +110,7 @@ function applyEnv(target: Config): void {
   if (process.env.PR_REVIEW_NO_COMPANION_WARN) target.companionWarn = false;
   if (process.env.PR_REVIEW_LANG) target.language = process.env.PR_REVIEW_LANG;
   const envRuntime = process.env.PR_REVIEW_RUNTIME;
-  if (envRuntime === 'copilot' || envRuntime === 'claude' || envRuntime === 'auto') target.runtime = envRuntime;
+  if ((RUNTIME_CHOICES as string[]).includes(envRuntime ?? '')) target.runtime = envRuntime as RuntimeChoice;
   if (process.env.PR_REVIEW_NO_CODEX) target.invokeCodex = false;
 }
 
@@ -126,7 +127,7 @@ export interface ConfigOverrides {
   dedupeMode?: 'strict' | 'loose' | 'off';
   invokeCompanions?: boolean;
   language?: string;
-  runtime?: 'copilot' | 'claude' | 'auto';
+  runtime?: RuntimeChoice;
   invokeCodex?: boolean;
 }
 

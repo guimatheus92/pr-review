@@ -195,3 +195,40 @@ test('companions routing — untargeted skills reach skills-companions.md; injec
     rmSync(outDir, { recursive: true, force: true });
   }
 });
+
+test('BUILTIN_AGENTS registry stays in lockstep with agents/*.md files', async () => {
+  const { BUILTIN_AGENTS } = await import('../src/dispatch/single-session.js');
+  const { readdirSync } = await import('node:fs');
+  const files = readdirSync('agents').filter((f) => f.endsWith('.md')).map((f) => f.replace(/\.md$/, ''));
+  const registered = [...BUILTIN_AGENTS.map((a: string) => a.replace(/^pr-review:/, '')), 'verifier'];
+  assert.deepEqual(registered.sort(), files.sort(), 'agents/*.md and BUILTIN_AGENTS(+verifier) must match');
+});
+
+test('triage guard — docs-only PR with quality skipped never dispatches zero reviewers', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const ctx = prepareSessionContext({
+      ...baseOpts(outDir, ['README.md'], []),
+      skipReviewers: ['quality'],
+    });
+    assert.ok(ctx.dispatchedReviewers.length > 0, 'must not triage down to an empty dispatch');
+    assert.equal(ctx.triageSkipped.length, 0, 'triage backs off entirely when its survivor set is empty');
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('triage — never triages down to zero: docs-only PR with quality skipped dispatches everything', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const ctx = prepareSessionContext({
+      ...baseOpts(outDir, ['README.md', 'docs/guide.md'], []),
+      skipReviewers: ['quality'],
+    });
+    assert.ok(ctx.dispatchedReviewers.length > 0, 'dispatch list must never be empty');
+    assert.ok(ctx.dispatchedReviewers.includes('security'));
+    assert.equal(ctx.triageSkipped.length, 0);
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});

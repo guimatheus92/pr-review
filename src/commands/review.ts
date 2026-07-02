@@ -5,7 +5,7 @@ import { runPost } from './post.js';
 import { loadAll } from '../plugins/loader.js';
 import { loadConfig, type ConfigOverrides } from '../config.js';
 import { prepareSessionContext, runSingleSession } from '../dispatch/single-session.js';
-import { resolveRuntime } from '../dispatch/runtime.js';
+import { resolveRuntime, type Runtime, type RuntimeChoice } from '../dispatch/runtime.js';
 import { detectCodex, runCodexReviewer } from '../dispatch/codex.js';
 import { ensureRunDir } from '../util/tmp.js';
 import { detectProvider } from '../providers/index.js';
@@ -39,7 +39,7 @@ interface ReviewCmdOptions {
   contextOnly?: boolean;
   language?: string;
   failOn?: Severity;
-  runtime?: 'copilot' | 'claude' | 'auto';
+  runtime?: RuntimeChoice;
   withCodex?: boolean;
 }
 
@@ -168,10 +168,22 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
 
   const { config } = loadConfig({ cwd, cliOverrides });
 
-  const runtime = resolveRuntime(config.runtime, opts.copilotBinary);
+  // CLI --skip replaces the config list for the run (same rule the session uses).
+  const effectiveSkip = opts.skip?.length ? opts.skip : config.skipReviewers;
+
+  let runtime: Runtime;
+  try {
+    runtime = resolveRuntime(config.runtime, opts.copilotBinary);
+  } catch (err) {
+    if (!opts.contextOnly) throw err;
+    // --context-only never spawns the runtime; a machine with neither CLI can
+    // still preview the context and skill routing.
+    runtime = 'copilot';
+    process.stderr.write(`[review] ${(err as Error).message} — continuing with --context-only using copilot prompt vocabulary\n`);
+  }
   process.stderr.write(`[review] runtime: ${runtime}\n`);
 
-  const wantCodex = config.invokeCodex && !(opts.skip ?? []).includes('codex');
+  const wantCodex = config.invokeCodex && !effectiveSkip.includes('codex');
   let codexAvailable = false;
   const codexDetectPromise = wantCodex
     ? detectCodex().then((ok) => {
@@ -235,7 +247,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     gather,
     skills: loaded.skills,
     installedCompanions,
-    skipReviewers: opts.skip?.length ? opts.skip : config.skipReviewers,
+    skipReviewers: effectiveSkip,
     outDir,
     copilotBinary: opts.copilotBinary,
     defaultModel: config.defaultModel,
@@ -278,20 +290,23 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
       `${includeCodex ? ' + codex' : ''}\n`,
   );
 
+  // Context is prepared exactly once and shared by the session and the codex
+  // sibling — a second prepare would rewrite every context/skills file.
+  const sessionCtx = prepareSessionContext(sessionOpts);
+
   // Codex runs as a sibling process, in parallel with the orchestrator session.
   // runCodexReviewer resolves on every failure path (spawn error, timeout,
   // unreadable output) with `error` set — no catch wrapper needed.
   let codexPromise: Promise<ReviewerOutput> | null = null;
   if (includeCodex) {
-    const ctx = prepareSessionContext(sessionOpts);
     codexPromise = runCodexReviewer({
-      contextPath: ctx.contextPath,
-      skillsPath: ctx.skillsFiles['codex'],
+      contextPath: sessionCtx.contextPath,
+      skillsPath: sessionCtx.skillsFiles['codex'],
       outDir,
     });
   }
 
-  const session = await runSingleSession(sessionOpts);
+  const session = await runSingleSession(sessionOpts, sessionCtx);
 
   const outputs = session.outputs;
   if (codexPromise) {
@@ -306,8 +321,9 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
         JSON.stringify(out.findings, null, 2),
         'utf8',
       );
-    } catch {
-      // best-effort
+    } catch (err) {
+      // debug artifact only — but say which one failed and why
+      process.stderr.write(`[review] could not write raw-${out.reviewerName}.json: ${(err as Error).message}\n`);
     }
   }
 
@@ -359,8 +375,11 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
 
   const exitCode = decideExitCode(session.findingsUnavailable, finalFindings, opts.failOn);
   if (exitCode === 2) {
+    const codexNote = outputs.some((o) => o.reviewerName === 'codex' && o.findings.length > 0)
+      ? ' Codex second-opinion findings were still collected/posted, but a lone sibling pass is not a complete review.'
+      : '';
     process.stderr.write(
-      `[review] pipeline failure: the orchestrator produced no parseable findings (this is NOT a clean PR)\n`,
+      `[review] pipeline failure: the orchestrator produced no parseable findings (this is NOT a clean PR).${codexNote}\n`,
     );
   } else if (exitCode === 1) {
     process.stderr.write(`[review] --fail-on ${opts.failOn}: findings at/above threshold\n`);

@@ -152,7 +152,7 @@ Drop it in `.pr-review/skills/` (team) or `~/.pr-review/skills/` (personal). The
 
 ```bash
 pr-review plugins list                    # shows the resolved set with file paths
-pr-review review <pr-url> --context-only  # prints the skill→reviewer routing table (no copilot spawn)
+pr-review review <pr-url> --context-only  # prints the skill→reviewer routing table (no runtime spawn)
 pr-review config show                     # shows effective config + which file each setting came from
 ```
 
@@ -177,4 +177,4 @@ inject_into: [security, quality]
 
 Recognized keys: `description`, `applies_to` (globs matched against in-scope changed files; empty = all), `inject_into` (reviewer short names; empty = all reviewers).
 
-Anything else in frontmatter (including the Copilot CLI `SKILL.md` spec's `name`, `allowed-tools`, etc.) is preserved but ignored — so a SKILL.md you already wrote for Copilot CLI works as a pr-review skill without edits. If the frontmatter YAML is malformed, a stderr warning names the file.
+Anything else in frontmatter (including the standard `SKILL.md` spec's `name`, `allowed-tools`, etc. — the convention shared by Copilot CLI and Claude Code) is preserved but ignored, so a SKILL.md you already wrote for either host works as a pr-review skill without edits. If the frontmatter YAML is malformed, a stderr warning names the file.

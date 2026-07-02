@@ -4,7 +4,7 @@ description: "pr-review CI/CD integration: GitHub Actions and Azure DevOps Pipel
 
 # Running pr-review in CI/CD
 
-The tool runs in CI the same way it runs locally: install Copilot CLI + this plugin, then call `pr-review review <pr-url>` with auth env vars.
+The tool runs in CI the same way it runs locally: install an agent runtime (Copilot CLI or Claude Code — the examples below use Copilot; pass `--runtime claude` to host the session on Claude Code) + this plugin, then call `pr-review review <pr-url>` with auth env vars.
 
 ## Exit codes and gating
 

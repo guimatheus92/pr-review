@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
   "name": "pr-review",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Generic, plugin-based PR review for GitHub and Azure DevOps (single-plugin marketplace; works on Copilot CLI and Claude Code)",
   "owner": {
     "name": "Guilherme Matheus",
@@ -11,7 +11,7 @@
     {
       "name": "pr-review",
       "description": "Generic, plugin-based PR review for GitHub and Azure DevOps. Orchestrates parallel reviewer agents in a single session (Copilot CLI or Claude Code), with optional Codex second opinion and stack/business-rule skills.",
-      "version": "0.1.6",
+      "version": "0.1.7",
       "author": {
         "name": "Guilherme Matheus",
         "email": "guilherme_matheus12@hotmail.com"

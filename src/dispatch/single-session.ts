@@ -55,6 +55,23 @@ export interface SingleSessionOptions {
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 
+/**
+ * When the orchestrator dies before writing any findings, retry if its output
+ * looks like a transient API/network failure (rate limit, overload, or a dropped
+ * connection mid-response) rather than a deterministic error or a timeout — a
+ * single spawn otherwise loses the whole review to a momentary flake. Observed
+ * live: "API Error: Connection closed mid-response". One retry; each attempt
+ * keeps its own timeout (so a genuine 30-min hang is NOT retried).
+ */
+const TRANSIENT_ORCHESTRATOR_RE =
+  /rate.?limit|temporarily limiting|overloaded|too many requests|\b429\b|\b529\b|connection (?:closed|error|reset)|closed mid-response|socket hang ?up|econnreset|etimedout|network error|fetch failed/i;
+const ORCHESTRATOR_RETRY_BACKOFF_MS: readonly number[] = [15_000];
+
+/** True when orchestrator output carries a transient (retriable) API failure signature. */
+export function isTransientOrchestratorFailure(stdout: string, stderr = ''): boolean {
+  return TRANSIENT_ORCHESTRATOR_RE.test(stdout) || TRANSIENT_ORCHESTRATOR_RE.test(stderr);
+}
+
 // Skills are injected verbatim into every matching reviewer's context, so an
 // unbounded body multiplies token cost across the whole fan-out. The caps are
 // a per-run token budget; truncation always warns on stderr.
@@ -480,17 +497,10 @@ function parseFindingsFile(path: string, model: string, durationMs: number, exit
 export async function runSingleSession(
   opts: SingleSessionOptions,
   prepared?: SessionContext,
+  spawn: typeof spawnRuntime = spawnRuntime,
+  backoffMs: readonly number[] = ORCHESTRATOR_RETRY_BACKOFF_MS,
 ): Promise<SingleSessionResult> {
-  const start = Date.now();
   const ctx = prepared ?? prepareSessionContext(opts);
-
-  for (const stale of [ctx.findingsPath, ctx.phase1Path]) {
-    try {
-      if (existsSync(stale)) unlinkSync(stale);
-    } catch {
-      // ignore
-    }
-  }
 
   const runtime = opts.runtime ?? 'copilot';
   const model = normalizeModel(runtime, opts.defaultModel ?? 'claude-opus-4.8');
@@ -500,7 +510,43 @@ export async function runSingleSession(
       `, companions=${opts.invokeCompanions ? 'on' : 'off'}, model=${model})\n`,
   );
 
-  const childResult = await spawnRuntime({
+  let result = await attemptOrchestrator(ctx, opts, runtime, model, spawn);
+  for (
+    let i = 0;
+    result.findingsUnavailable &&
+    i < backoffMs.length &&
+    isTransientOrchestratorFailure(result.rawOrchestratorOutput, result.rawOrchestratorStderr);
+    i++
+  ) {
+    process.stderr.write(
+      `[single-session] transient orchestrator failure — retry ${i + 1}/${backoffMs.length} after ${backoffMs[i]}ms\n`,
+    );
+    await new Promise<void>((r) => setTimeout(r, backoffMs[i]));
+    result = await attemptOrchestrator(ctx, opts, runtime, model, spawn);
+  }
+  return result;
+}
+
+/** One orchestrator spawn + the salvage ladder. Clears stale findings first so a
+ *  retry never picks up the previous attempt's leftovers. */
+async function attemptOrchestrator(
+  ctx: SessionContext,
+  opts: SingleSessionOptions,
+  runtime: Runtime,
+  model: string,
+  spawn: typeof spawnRuntime,
+): Promise<SingleSessionResult> {
+  const start = Date.now();
+
+  for (const stale of [ctx.findingsPath, ctx.phase1Path]) {
+    try {
+      if (existsSync(stale)) unlinkSync(stale);
+    } catch {
+      // ignore
+    }
+  }
+
+  const childResult = await spawn({
     runtime,
     binary: runtimeBinary(runtime, opts.copilotBinary),
     model,

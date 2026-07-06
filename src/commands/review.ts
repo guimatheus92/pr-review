@@ -381,6 +381,19 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     process.stderr.write(
       `[review] pipeline failure: the orchestrator produced no parseable findings (this is NOT a clean PR).${codexNote}\n`,
     );
+    // The orchestrator's own stdout/stderr are otherwise console-only — persist a
+    // tail so this failure class (e.g. a transient rate limit) is diagnosable.
+    try {
+      const failLog = join(outDir, 'orchestrator-failure.log');
+      writeFileSync(
+        failLog,
+        `exitCode=${session.exitCode}\n\n=== stdout (tail) ===\n${session.rawOrchestratorOutput.slice(-8000)}\n\n=== stderr (tail) ===\n${session.rawOrchestratorStderr.slice(-8000)}\n`,
+        'utf8',
+      );
+      process.stderr.write(`[review] wrote orchestrator failure log to ${failLog}\n`);
+    } catch (err) {
+      process.stderr.write(`[review] could not write orchestrator-failure.log: ${(err as Error).message}\n`);
+    }
   } else if (exitCode === 1) {
     process.stderr.write(`[review] --fail-on ${opts.failOn}: findings at/above threshold\n`);
   }

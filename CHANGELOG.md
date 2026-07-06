@@ -4,6 +4,9 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+### Fixed
+- The orchestrator spawn now retries once when it dies before writing any findings and its output carries a transient signature — a rate limit / overload (429 / 529) or a dropped connection mid-response (observed live: `API Error: Connection closed mid-response`, `ECONNRESET`, `socket hang up`) — instead of losing the whole review to a momentary flake and falling back to a Codex-only exit 2. Deterministic errors and timeouts are not retried. On a pipeline failure, the orchestrator's stdout/stderr tail is persisted to `orchestrator-failure.log` in the run dir so the failure is diagnosable (previously it was console-only).
+
 ## [0.1.6] — 2026-07-02
 
 ### Fixed

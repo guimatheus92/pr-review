@@ -70,6 +70,10 @@ program
   .option('--fail-on <severity>', 'Exit 1 when any finding at/above this severity survives dedupe (critical|high|medium|low|nit)')
   .option('--runtime <name>', 'Agent CLI hosting the session: copilot | claude | auto (probe PATH)', undefined)
   .option('--no-codex', 'Never run the Codex second-opinion reviewer, even when the codex CLI is installed')
+  .option('--resume <run-id>', 'Resume a prior run: reuse its reviewer outputs on disk, skip dispatch, then dedupe + post')
+  .option('--detach', 'Start the review in the background, print a run-id, and return immediately (poll with `status <run-id>`)', false)
+  .option('--force-post', 'Re-post even if this run already recorded a successful post (bypasses the posted.marker idempotency guard)', false)
+  .option('--run-dir <path>', 'Internal: use this exact run dir (set by --detach)')
   .action(
     async (
       prUrl: string,
@@ -95,6 +99,10 @@ program
         failOn?: string;
         runtime?: string;
         codex: boolean;
+        resume?: string;
+        detach: boolean;
+        forcePost: boolean;
+        runDir?: string;
       },
     ) => {
       try {
@@ -112,6 +120,20 @@ program
             process.exit(2);
           }
           failOn = norm as Severity;
+        }
+        // Background mode: spawn a detached child that runs the review, and
+        // return a run-id the caller can poll. Resume/context-only are already
+        // fast/foreground, so --detach is a no-op for them.
+        if (opts.detach && !opts.resume && !opts.contextOnly) {
+          const { detachReview } = await import('./commands/detach.js');
+          const rest = process.argv.slice(2).filter((a) => a !== '--detach');
+          const { runId, outDir } = detachReview(prUrl, rest);
+          process.stdout.write(
+            `Review started in the background (this can take ~6–10 min).\n` +
+              `  run-id: ${runId}\n  dir:    ${outDir}\n\n` +
+              `Poll for progress and the final summary:\n  pr-review status ${runId}\n`,
+          );
+          return;
         }
         const { summary, exitCode } = await runReview({
           prUrl,
@@ -136,6 +158,9 @@ program
           failOn,
           runtime: opts.runtime as RuntimeChoice | undefined,
           withCodex: opts.codex ? undefined : false,
+          resumeRunId: opts.resume,
+          runDir: opts.runDir,
+          forcePost: opts.forcePost,
         });
         process.stdout.write(summary + '\n');
         if (exitCode !== 0) process.exitCode = exitCode;
@@ -197,6 +222,21 @@ program
         );
       }
       await runPost({ prUrl, outputs, publish: !opts.dryRun, gather });
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('status <run-id>')
+  .description('Show a background review’s live progress, or its summary once done (poll target for --detach). Exit: 0 done, 20 running, 21 interrupted (resume it), 1 missing.')
+  .action(async (runId: string) => {
+    try {
+      const { runStatus } = await import('./commands/status.js');
+      const r = runStatus(runId);
+      process.stdout.write(r.text + '\n');
+      process.exit(r.state === 'done' ? 0 : r.state === 'interrupted' ? 21 : r.state === 'missing' ? 1 : 20);
     } catch (err) {
       console.error((err as Error).message);
       process.exit(1);

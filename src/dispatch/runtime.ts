@@ -39,12 +39,23 @@ export function runtimeBinary(runtime: Runtime, binaryOverride?: string): string
   return binaryOverride ?? runtime;
 }
 
-/** Non-interactive spawn argv for the orchestrator session (prompt goes on stdin). */
-export function runtimeSpawnArgs(runtime: Runtime, model: string, addDir: string): string[] {
+/**
+ * Non-interactive spawn argv for the orchestrator session (prompt goes on stdin).
+ * With `stream` (claude only) the session emits `stream-json` so the outer CLI
+ * can render a live per-reviewer progress feed; findings still come from the
+ * file the orchestrator writes to disk, independent of the output format.
+ */
+export function runtimeSpawnArgs(runtime: Runtime, model: string, addDir: string, stream = false): string[] {
   if (runtime === 'claude') {
-    return ['-p', '--model', model, '--dangerously-skip-permissions', '--add-dir', addDir];
+    const base = ['-p', '--model', model, '--dangerously-skip-permissions', '--add-dir', addDir];
+    return stream ? [...base, '--output-format', 'stream-json', '--verbose'] : base;
   }
   return ['--model', model, '--allow-all-tools', '--no-ask-user', '--add-dir', addDir, '-s'];
+}
+
+/** Stream-json live feed is on for claude unless PR_REVIEW_STREAM=0 (kill-switch). */
+export function streamingEnabled(runtime: Runtime): boolean {
+  return runtime === 'claude' && process.env.PR_REVIEW_STREAM !== '0';
 }
 
 /** How the runtime spells its subagent-dispatch tool. */

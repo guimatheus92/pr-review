@@ -44,9 +44,11 @@ src/
 ├── dedupe.ts                # Jaccard token similarity, strict/loose/off modes
 ├── types.ts                 # shared types (Finding, ReviewerOutput, GatherOutput, etc.)
 ├── commands/
-│   ├── review.ts            # full pipeline orchestration; runReview returns the exit code (0/1/2)
+│   ├── review.ts            # full pipeline; runReview (+ --resume fast path, finalizeReview tail); exit code (0/1/2)
 │   ├── gather.ts            # fetch PR metadata + comments in parallel → cache → JSON
 │   ├── post.ts              # snapFindingsToDiff (snap + re-anchor: every finding lands inline) + batched posting with retry/backoff
+│   ├── status.ts            # `status <run-id>`: live progress snapshot / summary / resume hint (--detach poll target)
+│   ├── detach.ts            # `review --detach`: spawn a detached background run, return its run-id
 │   ├── init.ts              # scaffold .pr-review/skills/ in a repo
 │   ├── configure.ts         # write ~/.pr-review/config.yaml
 │   ├── plugins.ts           # `plugins list` / `plugins doctor`
@@ -58,8 +60,9 @@ src/
 │   ├── azuredevops.ts       # azure-devops-node-api, LCS diff synthesis (per-run PR/git API cache)
 │   └── index.ts             # detectProvider(url) switch
 ├── dispatch/
-│   ├── single-session.ts    # prepareSessionContext (pr-context.md + skills-<reviewer>.md), orchestrator prompt, runs the runtime
-│   ├── runtime.ts           # resolveRuntime, runtimeSpawnArgs, taskCall, normalizeModel (copilot | claude | auto)
+│   ├── single-session.ts    # prepareSessionContext (pr-context.md + skills-<reviewer>.md), orchestrator prompt, runs the runtime (parseFindingsFile is reused by --resume)
+│   ├── runtime.ts           # resolveRuntime, runtimeSpawnArgs, streamingEnabled, taskCall, normalizeModel (copilot | claude | auto)
+│   ├── stream-json.ts       # parse claude --output-format stream-json → per-reviewer progress ticks
 │   ├── codex.ts             # optional Codex second-opinion reviewer (sibling process, codex exec)
 │   ├── line-snap.ts         # buildValidLinesMap + snapLineToDiff (snap findings to valid diff lines)
 │   ├── parsers.ts           # JSON / bracketed-markdown / section-header parsers
@@ -75,19 +78,24 @@ src/
 └── util/
     ├── globs.ts             # minimatch wrapper
     ├── retry.ts             # retry/backoff helper (2s/5s/15s) for transient API errors
-    └── tmp.ts               # ensureRunDir() → ~/.pr-review/runs/<id>/
+    ├── progress.ts          # progress.ndjson feed: appendProgress / readProgress / renderProgressSnapshot
+    ├── posted-marker.ts     # posted.marker: idempotency guard for --resume re-posts
+    └── tmp.ts               # ensureRunDir() + RUNS_ROOT → ~/.pr-review/runs/<id>/
 ```
 
 ## Plugin manifest layout
 
 ```
-pr-review/                   # plugin root (loads in Copilot CLI and Claude Code)
-├── plugin.json              # name, commands, agents, skills paths
-├── commands/pr-review.md    # /pr-review slash command
-├── agents/*.md              # 7 built-in review agents (pr-review:<name>); no model: pin — they inherit the session model
-├── skills/*/SKILL.md        # documentation skills (loaded by both hosts)
-├── dist/cli.cjs             # esbuild single-file bundle
-└── src/                     # TypeScript source
+pr-review/                        # plugin root (loads in Copilot CLI and Claude Code)
+├── .claude-plugin/plugin.json    # Claude Code manifest (canonical location; enables the bare /pr-review)
+├── plugin.json                   # root manifest — Copilot CLI requires it here; kept in sync by scripts/release.mjs
+├── .claude-plugin/marketplace.json  # single-plugin marketplace entry
+├── commands/pr-review.md         # /pr-review slash command
+├── agents/*.md                   # 7 built-in review agents (pr-review:<name>); no model: pin — they inherit the session model
+├── skills/help/SKILL.md          # single documentation skill → one /pr-review:help palette entry
+│   └── reference/*.md            #   per-topic docs the help skill points to (not SKILL.md → not separate skills)
+├── dist/cli.cjs                  # esbuild single-file bundle
+└── src/                          # TypeScript source
 ```
 
 The slash command finds the bundle via `$CLAUDE_PLUGIN_ROOT/dist/cli.cjs` under Claude Code, falling back to `~/.copilot/installed-plugins/`.

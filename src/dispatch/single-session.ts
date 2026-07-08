@@ -4,7 +4,9 @@ import { dirname, join, resolve } from 'node:path';
 import type { GatherOutput, ReviewerOutput, SkillDefinition } from '../types.js';
 import { matchesAny } from '../util/globs.js';
 import { parseReviewerOutput } from './parsers.js';
-import { normalizeModel, runtimeBinary, runtimeSpawnArgs, taskCall, taskToolName, type Runtime } from './runtime.js';
+import { normalizeModel, runtimeBinary, runtimeSpawnArgs, streamingEnabled, taskCall, taskToolName, type Runtime } from './runtime.js';
+import { appendProgress } from '../util/progress.js';
+import { consumeStreamLine, newStreamState } from './stream-json.js';
 
 /** Exported so tests can lock the registry against the agents/*.md files. */
 export const BUILTIN_AGENTS = [
@@ -479,7 +481,7 @@ export interface SingleSessionResult {
   findingsUnavailable: boolean;
 }
 
-function parseFindingsFile(path: string, model: string, durationMs: number, exitCode: number): ReviewerOutput[] {
+export function parseFindingsFile(path: string, model: string, durationMs: number, exitCode: number): ReviewerOutput[] {
   const findingsRaw = readFileSync(path, 'utf8');
   const parsed = JSON.parse(findingsRaw) as {
     reviewers?: Array<{ name: string; findings: ReviewerOutput['findings'] }>;
@@ -627,7 +629,11 @@ function spawnRuntime(args: {
   assertSafeArg('model', args.model);
   assertSafeArg('add-dir', args.addDir);
   return new Promise((resolve) => {
-    const argv = runtimeSpawnArgs(args.runtime, args.model, args.addDir);
+    // claude stream-json lets us surface per-reviewer Task completions live;
+    // findings still come from the on-disk file, so the stream only feeds the
+    // progress display. Copilot (and PR_REVIEW_STREAM=0) keep the buffered path.
+    const stream = streamingEnabled(args.runtime);
+    const argv = runtimeSpawnArgs(args.runtime, args.model, args.addDir, stream);
     const child = spawnCli(args.binary, argv, { stdio: ['pipe', 'pipe', 'pipe'] });
     child.stdin.write(args.promptBody);
     child.stdin.end();
@@ -635,6 +641,21 @@ function spawnRuntime(args: {
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    const state = stream ? newStreamState() : null;
+    let lineBuf = '';
+    const drainTicks = () => {
+      if (!state) return;
+      while (state.ticks.length) {
+        const t = state.ticks.shift()!;
+        appendProgress(args.addDir, 'reviewer', `${t.name} ✓ (${Math.round(t.elapsedMs / 1000)}s)`);
+      }
+    };
+    const flushBuf = () => {
+      if (state && lineBuf.trim()) consumeStreamLine(lineBuf, state, Date.now());
+      lineBuf = '';
+      drainTicks();
+    };
+
     const timer = setTimeout(() => {
       timedOut = true;
       try {
@@ -648,9 +669,21 @@ function spawnRuntime(args: {
     const heartbeat = setInterval(() => {
       const elapsedS = Math.round((Date.now() - heartbeatStart) / 1000);
       process.stderr.write(`[single-session] orchestrator running… ${elapsedS}s elapsed\n`);
+      appendProgress(args.addDir, 'running', `orchestrator ${elapsedS}s`);
     }, 60_000);
     child.stdout.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString('utf8');
+      const text = chunk.toString('utf8');
+      if (state) {
+        lineBuf += text;
+        let nl: number;
+        while ((nl = lineBuf.indexOf('\n')) >= 0) {
+          consumeStreamLine(lineBuf.slice(0, nl), state, Date.now());
+          lineBuf = lineBuf.slice(nl + 1);
+        }
+        drainTicks();
+      } else {
+        stdout += text;
+      }
     });
     child.stderr.on('data', (chunk: Buffer) => {
       stderr += chunk.toString('utf8');
@@ -658,13 +691,15 @@ function spawnRuntime(args: {
     child.on('error', (err) => {
       clearTimeout(timer);
       clearInterval(heartbeat);
-      resolve({ stdout, stderr: stderr + '\n' + err.message, exitCode: -1 });
+      flushBuf();
+      resolve({ stdout: state ? state.resultText : stdout, stderr: stderr + '\n' + err.message, exitCode: -1 });
     });
     child.on('close', (code) => {
       clearTimeout(timer);
       clearInterval(heartbeat);
+      flushBuf();
       resolve({
-        stdout,
+        stdout: state ? state.resultText : stdout,
         stderr: stderr + (timedOut ? '\n[timed out]' : ''),
         exitCode: code ?? -1,
       });

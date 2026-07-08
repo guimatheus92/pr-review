@@ -4,6 +4,15 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+### Added
+- **Background reviews with a live progress feed.** The slash command now starts the review detached (`review --detach`) and polls a new `status <run-id>` subcommand, so a slow run (routinely 6–10 min) no longer dies on the host's ~10-min Bash timeout, and the user sees a moving snapshot instead of one silent call. On the claude runtime, per-reviewer completions stream live (parsed from `--output-format stream-json`; opt out with `PR_REVIEW_STREAM=0`); every runtime gets phase-level checkpoints written to `progress.ndjson` in the run dir.
+- **`review --resume <run-id>`.** Reuse a prior run's on-disk reviewer outputs (`single-session-findings.json` / `phase1-findings.json`) and jump straight to dedupe + post — turning a run killed after the expensive reviewer phase into a ~1-minute finish instead of a full re-spend.
+- **Idempotent posting.** A successful publish writes a `posted.marker`; `--resume` refuses to re-post while it exists (use `--force-post` to override), closing the duplicate-comment hazard on retry.
+
+### Changed
+- **Claude Code: the bare `/pr-review` now resolves** (previously only `/pr-review:pr-review`). The plugin manifest now also ships at `.claude-plugin/plugin.json` — Claude Code's canonical location, which registers the bare command alias — while the root `plugin.json` stays for Copilot CLI. `scripts/release.mjs` keeps both in sync.
+- **Documentation collapsed into one `help` skill.** The nine per-topic doc-skills (each a separate `/pr-review:*` palette entry) are now one `/pr-review:help` skill whose `SKILL.md` indexes `skills/help/reference/*.md`, decluttering the slash palette without losing model-invocable help.
+
 ## [0.1.7] — 2026-07-06
 
 ### Fixed

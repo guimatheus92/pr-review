@@ -9,7 +9,7 @@ A generic, plugin-based PR review tool for GitHub and Azure DevOps, packaged as 
 
 ## Why a CLI, not just a skill
 
-LLMs are unreliable at gathering metadata, deduplicating findings, and posting comments. A thin Node CLI handles those deterministic tasks; reviewer agents only do the actual reviewing. See [architecture](skills/architecture/SKILL.md) for the full execution model.
+LLMs are unreliable at gathering metadata, deduplicating findings, and posting comments. A thin Node CLI handles those deterministic tasks; reviewer agents only do the actual reviewing. See [architecture](skills/help/reference/architecture.md) for the full execution model.
 
 ## Install
 
@@ -27,9 +27,9 @@ Or inside a `claude` (Claude Code) session:
 /plugin install pr-review@pr-review
 ```
 
-No `npm install` needed. The plugin ships a pre-bundled `dist/cli.cjs`; the slash command finds it via `$CLAUDE_PLUGIN_ROOT` under Claude Code (falling back to `~/.copilot/installed-plugins/`) and runs it with `node`. The plugin layout (`commands/`, `agents/`, `skills/` + `plugin.json`) loads in both hosts.
+No `npm install` needed. The plugin ships a pre-bundled `dist/cli.cjs`; the slash command finds it via `$CLAUDE_PLUGIN_ROOT` under Claude Code (falling back to `~/.copilot/installed-plugins/`) and runs it with `node`. The plugin layout (`commands/`, `agents/`, `skills/`) loads in both hosts; the manifest lives in two places on purpose — `.claude-plugin/plugin.json` (Claude Code's canonical location) and a root `plugin.json` (which Copilot CLI requires).
 
-**Command name per host:** Copilot CLI exposes the command as `/pr-review`. Claude Code namespaces plugin commands, so there it is `/pr-review:pr-review`. If you want a bare `/pr-review` in Claude Code too, drop a personal alias at `~/.claude/commands/pr-review.md` containing:
+**Command name per host:** both hosts expose the bare `/pr-review`. Claude Code also namespaces it as `/pr-review:pr-review` (either works). If the bare form ever shows "Unknown command" on Claude Code, reinstall/update the plugin so the `.claude-plugin/plugin.json` manifest is picked up (`claude plugin update pr-review@pr-review`); as a last resort, drop a personal alias at `~/.claude/commands/pr-review.md`:
 
 ```markdown
 ---
@@ -98,7 +98,7 @@ your-repo/
 
 Optional frontmatter targets a skill: `applies_to` (globs — the skill is injected only when an in-scope changed file matches) and `inject_into` (reviewer names — omit to reach all reviewers). Preview the routing with `--context-only`, which prints a skill→reviewer table and exits without running reviewers.
 
-Skills from the shared dirs (`.claude/skills/`, `.copilot/skills/`, `.github/skills/`, `.agents/skills/`) are also picked up, but only when they declare review targeting (`applies_to` and/or `inject_into`) — those dirs hold general-purpose agent skills too, and untargeted ones would flood every reviewer's context. Anything in `.pr-review/skills/` is included unconditionally. See [reviewers vs skills](skills/reviewers-vs-skills/SKILL.md) for the full authoring guide.
+Skills from the shared dirs (`.claude/skills/`, `.copilot/skills/`, `.github/skills/`, `.agents/skills/`) are also picked up, but only when they declare review targeting (`applies_to` and/or `inject_into`) — those dirs hold general-purpose agent skills too, and untargeted ones would flood every reviewer's context. Anything in `.pr-review/skills/` is included unconditionally. See [reviewers vs skills](skills/help/reference/reviewers-vs-skills.md) for the full authoring guide.
 
 ## Built-in reviewers
 
@@ -141,19 +141,19 @@ pr-review cache info | clear                 # manage local cache
 
 ## Further reading
 
-All documentation lives as agent skills under `skills/` (loaded by Copilot CLI and Claude Code alike) — any agent can discover and use them via frontmatter.
+All documentation lives under the single `help` skill (`skills/help/`), loaded by Copilot CLI and Claude Code alike — one `/pr-review:help` palette entry whose `SKILL.md` indexes the per-topic reference files. Ask any pr-review question and the `help` skill surfaces the right one.
 
-| Topic | Skill |
+| Topic | Doc |
 |---|---|
-| Architecture & source map | [skills/architecture/SKILL.md](skills/architecture/SKILL.md) |
-| Configuration (5-level merge, YAML, env vars) | [skills/configuration/SKILL.md](skills/configuration/SKILL.md) |
-| Reviewers vs skills (authoring, overrides) | [skills/reviewers-vs-skills/SKILL.md](skills/reviewers-vs-skills/SKILL.md) |
-| Managing reviewers (add, remove, override) | [skills/adding-your-own-md/SKILL.md](skills/adding-your-own-md/SKILL.md) |
-| Companion plugins (pr-review-toolkit, code-review) | [skills/companion-plugins/SKILL.md](skills/companion-plugins/SKILL.md) |
-| CI/CD (GitHub Actions, ADO Pipelines) | [skills/ci-integration/SKILL.md](skills/ci-integration/SKILL.md) |
-| Caching | [skills/caching/SKILL.md](skills/caching/SKILL.md) |
-| Performance optimizations | [skills/performance/SKILL.md](skills/performance/SKILL.md) |
-| Quickstart | [skills/pr-review-usage/SKILL.md](skills/pr-review-usage/SKILL.md) |
+| Architecture & source map | [skills/help/reference/architecture.md](skills/help/reference/architecture.md) |
+| Configuration (5-level merge, YAML, env vars) | [skills/help/reference/configuration.md](skills/help/reference/configuration.md) |
+| Reviewers vs skills (authoring, overrides) | [skills/help/reference/reviewers-vs-skills.md](skills/help/reference/reviewers-vs-skills.md) |
+| Managing reviewers (add, remove, override) | [skills/help/reference/adding-your-own-md.md](skills/help/reference/adding-your-own-md.md) |
+| Companion plugins (pr-review-toolkit, code-review) | [skills/help/reference/companion-plugins.md](skills/help/reference/companion-plugins.md) |
+| CI/CD (GitHub Actions, ADO Pipelines) | [skills/help/reference/ci-integration.md](skills/help/reference/ci-integration.md) |
+| Caching | [skills/help/reference/caching.md](skills/help/reference/caching.md) |
+| Performance optimizations | [skills/help/reference/performance.md](skills/help/reference/performance.md) |
+| Quickstart | [skills/help/reference/pr-review-usage.md](skills/help/reference/pr-review-usage.md) |
 | Contributing & plugin authoring | [CONTRIBUTING.md](CONTRIBUTING.md) |
 
 ## License

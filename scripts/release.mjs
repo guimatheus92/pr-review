@@ -6,7 +6,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 
-const VERSIONED_FILES = ['package.json', 'package-lock.json', 'plugin.json', '.claude-plugin/marketplace.json'];
+const VERSIONED_FILES = ['package.json', 'package-lock.json', 'plugin.json', '.claude-plugin/plugin.json', '.claude-plugin/marketplace.json'];
 
 function run(cmd, args) {
   // npm is a .cmd shim on Windows and needs a shell — but shell:true with an
@@ -46,7 +46,7 @@ console.log(`bumping ${oldVersion} → ${newVersion}`);
 
 // npm version updates package.json + package-lock.json consistently
 run('npm', ['version', '--no-git-tag-version', newVersion]);
-for (const file of ['plugin.json', '.claude-plugin/marketplace.json']) {
+for (const file of ['plugin.json', '.claude-plugin/plugin.json', '.claude-plugin/marketplace.json']) {
   const next = readFileSync(file, 'utf8').replaceAll(`"version": "${oldVersion}"`, `"version": "${newVersion}"`);
   writeFileSync(file, next);
 }

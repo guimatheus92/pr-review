@@ -17,9 +17,12 @@ The bundle at `dist/cli.cjs` is the single-file distribution artifact. The slash
 **Two-layer model:** slash command → Node CLI → single agent session (Copilot CLI or Claude Code) dispatching reviewer agents via `task()` / `Task()`.
 
 - `src/cli.ts` — commander entry, subcommand routing
-- `src/commands/review.ts` — main pipeline: gather → early-exit → single-session dispatch → dedupe → post
-- `src/dispatch/single-session.ts` — writes PR context file + per-reviewer `skills-<reviewer>.md` files, builds orchestrator prompt (single source of the reviewer output contract), spawns one runtime process
-- `src/dispatch/runtime.ts` — runtime selection (resolveRuntime, runtimeSpawnArgs, taskCall, normalizeModel); `--runtime copilot|claude|auto` (default auto: probes PATH, copilot first)
+- `src/commands/review.ts` — main pipeline: gather → early-exit → single-session dispatch → dedupe → post. `--resume <id>` skips dispatch and replays the on-disk reviewer outputs through the shared `finalizeReview` tail; `finalizeReview` also writes the `posted.marker` idempotency guard
+- `src/commands/status.ts` / `src/commands/detach.ts` — `status <run-id>` (live progress / summary / resume hint) and `review --detach` (spawn a detached background run) — the slash command starts detached and polls `status` so a slow run survives the host's ~10-min Bash timeout
+- `src/dispatch/single-session.ts` — writes PR context file + per-reviewer `skills-<reviewer>.md` files, builds orchestrator prompt (single source of the reviewer output contract), spawns one runtime process. `parseFindingsFile` (reused by `--resume`) and the claude stream-json progress feed live here
+- `src/dispatch/runtime.ts` — runtime selection (resolveRuntime, runtimeSpawnArgs, streamingEnabled, taskCall, normalizeModel); `--runtime copilot|claude|auto` (default auto: probes PATH, copilot first)
+- `src/dispatch/stream-json.ts` — parses claude `--output-format stream-json` into per-reviewer progress ticks (`PR_REVIEW_STREAM=0` disables; copilot keeps the buffered path)
+- `src/util/progress.ts` / `src/util/posted-marker.ts` — the `progress.ndjson` live feed and the `posted.marker` re-post guard
 - `src/dispatch/codex.ts` — optional Codex second-opinion reviewer; runs as a sibling process in parallel with the orchestrator session when the `codex` CLI is installed (opt out: `--no-codex`)
 - `src/dispatch/line-snap.ts` — snaps finding line numbers to the nearest valid diff line before posting
 - `src/providers/github.ts` / `azuredevops.ts` — PR data fetchers + comment posters (GitHub inline comments go out as one review batch, with per-comment fallback)
@@ -56,5 +59,7 @@ Tests use `node:test` + `node:assert`. Run with `npm run test`. Tests are in `te
 - **Change runtime spawn args or model mapping:** Edit `src/dispatch/runtime.ts`.
 - **Change Codex reviewer behavior:** Edit `src/dispatch/codex.ts`.
 - **Preview reviewer context:** `pr-review review <url> --context-only` — writes pr-context.md + per-reviewer skills files, prints the skill→reviewer routing table, exits without spawning the runtime.
+- **Resume a killed run:** `pr-review review <url> --resume <run-id>` — replays the on-disk reviewer outputs through dedupe + post (skips the expensive dispatch). The `posted.marker` makes a repeat resume refuse to re-post (`--force-post` overrides).
+- **Run in the background / check a run:** `pr-review review <url> --detach` returns a run-id immediately; `pr-review status <run-id>` shows the live progress feed, or the summary once done. This is how the slash command avoids the host's ~10-min Bash timeout.
 - **Check the environment:** `pr-review doctor` — runtimes on PATH, resolved runtime/model, codex + companions, provider auth, config sources.
 - **Cut a release:** `node scripts/release.mjs <patch|minor|major|x.y.z>` — bumps every manifest, verifies no stale version string, rolls CHANGELOG, rebuilds, commits and tags (push left to you).

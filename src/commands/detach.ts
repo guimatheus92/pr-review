@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn } from 'node:child_process';
-import { openSync } from 'node:fs';
+import { closeSync, openSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { newRunDirForUrl } from '../providers/index.js';
 
@@ -37,5 +37,8 @@ export function detachReview(prUrl: string, argv: string[], spawnFn: typeof node
     process.stderr.write(`[detach] failed to start background review: ${err.message}\n`);
   });
   child.unref();
+  // The child inherited its own handle to the log via stdio; close the parent's
+  // copy so we don't leak the fd (and, on Windows, so it doesn't pin the dir).
+  closeSync(log);
   return { runId: basename(outDir), outDir };
 }

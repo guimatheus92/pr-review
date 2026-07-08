@@ -19,10 +19,9 @@ The bundle at `dist/cli.cjs` is the single-file distribution artifact. The slash
 - `src/cli.ts` — commander entry, subcommand routing
 - `src/commands/review.ts` — main pipeline: gather → early-exit → single-session dispatch → dedupe → post. `--resume <id>` skips dispatch and replays the on-disk reviewer outputs through the shared `finalizeReview` tail; `finalizeReview` also writes the `posted.marker` idempotency guard
 - `src/commands/status.ts` / `src/commands/detach.ts` — `status <run-id>` (live progress / summary / resume hint) and `review --detach` (spawn a detached background run) — the slash command starts detached and polls `status` so a slow run survives the host's ~10-min Bash timeout
-- `src/dispatch/single-session.ts` — writes PR context file + per-reviewer `skills-<reviewer>.md` files, builds orchestrator prompt (single source of the reviewer output contract), spawns one runtime process. `parseFindingsFile` (reused by `--resume`) and the claude stream-json progress feed live here
-- `src/dispatch/runtime.ts` — runtime selection (resolveRuntime, runtimeSpawnArgs, streamingEnabled, taskCall, normalizeModel); `--runtime copilot|claude|auto` (default auto: probes PATH, copilot first)
-- `src/dispatch/stream-json.ts` — parses claude `--output-format stream-json` into per-reviewer progress ticks (`PR_REVIEW_STREAM=0` disables; copilot keeps the buffered path)
-- `src/util/progress.ts` / `src/util/posted-marker.ts` — the `progress.ndjson` live feed and the `posted.marker` re-post guard
+- `src/dispatch/single-session.ts` — writes PR context file + per-reviewer `skills-<reviewer>.md` files, builds orchestrator prompt (single source of the reviewer output contract), spawns one runtime process. `parseFindingsFile` + `REVIEWER_OUTPUT_FILES` (reused by `--resume`) and the 60s heartbeat that feeds `progress.ndjson` live here
+- `src/dispatch/runtime.ts` — runtime selection (resolveRuntime, runtimeSpawnArgs, taskCall, normalizeModel); `--runtime copilot|claude|auto` (default auto: probes PATH, copilot first)
+- `src/util/progress.ts` / `src/util/posted-marker.ts` — the `progress.ndjson` phase/heartbeat live feed and the `posted.marker` re-post guard (refuses re-post only on a fully-completed prior post; fail-closed on a corrupt marker)
 - `src/dispatch/codex.ts` — optional Codex second-opinion reviewer; runs as a sibling process in parallel with the orchestrator session when the `codex` CLI is installed (opt out: `--no-codex`)
 - `src/dispatch/line-snap.ts` — snaps finding line numbers to the nearest valid diff line before posting
 - `src/providers/github.ts` / `azuredevops.ts` — PR data fetchers + comment posters (GitHub inline comments go out as one review batch, with per-comment fallback)

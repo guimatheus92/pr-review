@@ -41,6 +41,7 @@ React to the exit code:
 - **0** — done: `status` printed the final summary. Print that summary verbatim and stop.
 - **20** — still running: show the snapshot, then poll again.
 - **21** — reviewers finished but posting was interrupted. Finish it (fast, no re-review): `node "$CLI" review <pr-url> --resume <run-id>`, then print its summary verbatim.
+- **22** — the run stopped before producing findings. Report it and point at `~/.pr-review/runs/<run-id>/detached.log`; stop.
 - **1** — run not found: report the error and stop.
 
 Print the review summary verbatim — do not editorialize, summarize, or skip sections. `review --fail-on` exiting 1 means findings at/above that severity were reported, not a tool failure; exit 2 is a pipeline error. All run artifacts (gather data, prompts, raw outputs, findings JSON, the `progress.ndjson` feed, summary) live under `~/.pr-review/runs/<run-id>/`.

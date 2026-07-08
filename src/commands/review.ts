@@ -4,12 +4,12 @@ import { runGather } from './gather.js';
 import { runPost } from './post.js';
 import { loadAll } from '../plugins/loader.js';
 import { loadConfig, type ConfigOverrides } from '../config.js';
-import { parseFindingsFile, prepareSessionContext, runSingleSession } from '../dispatch/single-session.js';
+import { parseFindingsFile, prepareSessionContext, REVIEWER_OUTPUT_FILES, runSingleSession } from '../dispatch/single-session.js';
 import { resolveRuntime, type Runtime, type RuntimeChoice } from '../dispatch/runtime.js';
 import { detectCodex, runCodexReviewer } from '../dispatch/codex.js';
 import { ensureRunDir, RUNS_ROOT } from '../util/tmp.js';
 import { appendProgress } from '../util/progress.js';
-import { findingKey, readPostedMarker, writePostedMarker } from '../util/posted-marker.js';
+import { readPostedMarker, writePostedMarker } from '../util/posted-marker.js';
 import { detectProvider } from '../providers/index.js';
 import { dedupeAgainstExisting, dedupeWithinBatch } from '../dedupe.js';
 import { detectCompanions, formatWarning } from '../plugins/companions.js';
@@ -50,7 +50,7 @@ interface ReviewCmdOptions {
   resumeRunId?: string;
   /** Re-post even if this run already has a posted.marker. */
   forcePost?: boolean;
-  /** Test seam — defaults to detectProvider(prUrl) inside runPost. */
+  /** Test seam — when omitted, resolved via detectProvider(prUrl): in runReview for a fresh run, in runPost on --resume. */
   provider?: PrProvider;
 }
 
@@ -217,12 +217,23 @@ async function finalizeReview(a: {
   let postResult: Awaited<ReturnType<typeof runPost>> | undefined;
   if (a.publish) {
     const marker = readPostedMarker(a.outDir);
-    if (marker && !a.forcePost) {
-      process.stderr.write(
-        `[review] posted.marker present — this run already posted ${marker.posted} comment(s); skipping post to avoid duplicates (use --force-post to override)\n`,
-      );
-      appendProgress(a.outDir, 'post', `skipped — already posted ${marker.posted}`);
+    // Refuse re-posting only when we KNOW the prior post fully succeeded, or when
+    // the marker is corrupt (fail closed — we can't rule out a completed post).
+    // A partial prior post falls through so resume can recover the un-posted rest.
+    const fullyPosted = marker !== null && marker !== 'corrupt' && marker.attempted > 0 && marker.posted >= marker.attempted;
+    if (!a.forcePost && (marker === 'corrupt' || fullyPosted)) {
+      const why =
+        marker === 'corrupt'
+          ? 'posted.marker is unreadable — refusing to re-post to avoid duplicates'
+          : `this run already posted ${(marker as { posted: number }).posted} comment(s)`;
+      process.stderr.write(`[review] ${why}; skipping post (use --force-post to override)\n`);
+      appendProgress(a.outDir, 'post', 'skipped — already posted');
     } else {
+      if (marker && marker !== 'corrupt' && marker.posted < marker.attempted) {
+        process.stderr.write(
+          `[review] prior post was partial (${marker.posted}/${marker.attempted}) — re-posting to recover the rest (duplicates possible)\n`,
+        );
+      }
       process.stderr.write(`[review] posting comments…\n`);
       appendProgress(a.outDir, 'post', 'start');
       const wrapper: ReviewerOutput[] = [
@@ -237,11 +248,7 @@ async function finalizeReview(a: {
       ];
       postResult = await runPost({ prUrl: a.prUrl, outputs: wrapper, publish: true, gather: a.gather, provider: a.provider });
       if (postResult.posted > 0) {
-        writePostedMarker(a.outDir, {
-          posted: postResult.posted,
-          attempted: postResult.attempted,
-          findingKeys: finalFindings.map(findingKey),
-        });
+        writePostedMarker(a.outDir, { posted: postResult.posted, attempted: postResult.attempted });
       }
       appendProgress(a.outDir, 'post', `${postResult.posted} posted`);
     }
@@ -291,7 +298,7 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   const gather = JSON.parse(readFileSync(gatherPath, 'utf8')) as GatherOutput;
 
   let outputs: ReviewerOutput[] | null = null;
-  for (const f of ['single-session-findings.json', 'phase1-findings.json']) {
+  for (const f of REVIEWER_OUTPUT_FILES) {
     const p = join(outDir, f);
     if (!existsSync(p)) continue;
     try {
@@ -337,6 +344,13 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   const outDir = opts.runDir ?? ensureRunDir(ref ?? undefined);
   if (opts.runDir) mkdirSync(opts.runDir, { recursive: true });
   process.stderr.write(`[review] run artifacts → ${outDir}\n`);
+  // Liveness beacon: `status` checks this pid to tell a slow-but-healthy run
+  // from a dead one, so an intermediate artifact never reads as "interrupted".
+  try {
+    writeFileSync(join(outDir, 'run.pid'), String(process.pid), 'utf8');
+  } catch {
+    // best-effort — status falls back to artifact heuristics without it
+  }
 
   const { config } = loadConfig({ cwd, cliOverrides: toConfigOverrides(opts) });
 

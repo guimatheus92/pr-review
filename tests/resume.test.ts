@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runReview } from '../src/commands/review.js';
+import { writePostedMarker } from '../src/util/posted-marker.js';
 import type { Finding, PrRef } from '../src/types.js';
 import type { BatchComment, PrProvider } from '../src/providers/types.js';
 
@@ -82,6 +83,46 @@ test('resume — a second resume refuses to re-post while the marker exists; --f
     const third = fakeProvider();
     await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, forcePost: true, provider: third.provider });
     assert.equal(third.calls.batches.length, 1, '--force-post overrides the marker');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resume — falls back to phase1-findings.json when the final consolidation file is absent', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-resume-'));
+  try {
+    writeFileSync(join(dir, 'pr-review-gather.json'), JSON.stringify(gatherFixture()), 'utf8');
+    writeFileSync(join(dir, 'phase1-findings.json'), JSON.stringify({ reviewers: ONE }), 'utf8');
+    const { provider, calls } = fakeProvider();
+    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider });
+    assert.equal(calls.batches.length, 1, 'salvaged findings from phase1 and posted');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resume — a corrupt posted.marker fails closed (no re-post) unless --force-post', async () => {
+  const dir = seedRun(ONE);
+  try {
+    writeFileSync(join(dir, 'posted.marker'), '{ corrupt not json', 'utf8');
+    const a = fakeProvider();
+    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider: a.provider });
+    assert.equal(a.calls.batches.length, 0, 'corrupt marker → refuse (fail closed)');
+    const b = fakeProvider();
+    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, forcePost: true, provider: b.provider });
+    assert.equal(b.calls.batches.length, 1, '--force-post overrides');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resume — a partial prior post (posted < attempted) is retried, not skipped', async () => {
+  const dir = seedRun(ONE);
+  try {
+    writePostedMarker(dir, { posted: 1, attempted: 3 }); // a partial post left findings unposted
+    const a = fakeProvider();
+    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider: a.provider });
+    assert.equal(a.calls.batches.length, 1, 'partial marker must not strand the un-posted findings');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -4,9 +4,8 @@ import { dirname, join, resolve } from 'node:path';
 import type { GatherOutput, ReviewerOutput, SkillDefinition } from '../types.js';
 import { matchesAny } from '../util/globs.js';
 import { parseReviewerOutput } from './parsers.js';
-import { normalizeModel, runtimeBinary, runtimeSpawnArgs, streamingEnabled, taskCall, taskToolName, type Runtime } from './runtime.js';
+import { normalizeModel, runtimeBinary, runtimeSpawnArgs, taskCall, taskToolName, type Runtime } from './runtime.js';
 import { appendProgress } from '../util/progress.js';
-import { consumeStreamLine, newStreamState } from './stream-json.js';
 
 /** Exported so tests can lock the registry against the agents/*.md files. */
 export const BUILTIN_AGENTS = [
@@ -481,6 +480,9 @@ export interface SingleSessionResult {
   findingsUnavailable: boolean;
 }
 
+/** Reviewer-output artifacts a run writes, in resume-preference order (final consolidation, then salvageable phase-1). */
+export const REVIEWER_OUTPUT_FILES = ['single-session-findings.json', 'phase1-findings.json'] as const;
+
 export function parseFindingsFile(path: string, model: string, durationMs: number, exitCode: number): ReviewerOutput[] {
   const findingsRaw = readFileSync(path, 'utf8');
   const parsed = JSON.parse(findingsRaw) as {
@@ -629,11 +631,7 @@ function spawnRuntime(args: {
   assertSafeArg('model', args.model);
   assertSafeArg('add-dir', args.addDir);
   return new Promise((resolve) => {
-    // claude stream-json lets us surface per-reviewer Task completions live;
-    // findings still come from the on-disk file, so the stream only feeds the
-    // progress display. Copilot (and PR_REVIEW_STREAM=0) keep the buffered path.
-    const stream = streamingEnabled(args.runtime);
-    const argv = runtimeSpawnArgs(args.runtime, args.model, args.addDir, stream);
+    const argv = runtimeSpawnArgs(args.runtime, args.model, args.addDir);
     const child = spawnCli(args.binary, argv, { stdio: ['pipe', 'pipe', 'pipe'] });
     child.stdin.write(args.promptBody);
     child.stdin.end();
@@ -641,21 +639,6 @@ function spawnRuntime(args: {
     let stdout = '';
     let stderr = '';
     let timedOut = false;
-    const state = stream ? newStreamState() : null;
-    let lineBuf = '';
-    const drainTicks = () => {
-      if (!state) return;
-      while (state.ticks.length) {
-        const t = state.ticks.shift()!;
-        appendProgress(args.addDir, 'reviewer', `${t.name} ✓ (${Math.round(t.elapsedMs / 1000)}s)`);
-      }
-    };
-    const flushBuf = () => {
-      if (state && lineBuf.trim()) consumeStreamLine(lineBuf, state, Date.now());
-      lineBuf = '';
-      drainTicks();
-    };
-
     const timer = setTimeout(() => {
       timedOut = true;
       try {
@@ -665,6 +648,9 @@ function spawnRuntime(args: {
       }
     }, args.timeoutMs);
 
+    // The orchestrator's own tool activity isn't observable from here (a plain
+    // `-p` run buffers its output), so the live feed is phase-level: a heartbeat
+    // proves the run is alive and advances the elapsed clock the poller shows.
     const heartbeatStart = Date.now();
     const heartbeat = setInterval(() => {
       const elapsedS = Math.round((Date.now() - heartbeatStart) / 1000);
@@ -672,18 +658,7 @@ function spawnRuntime(args: {
       appendProgress(args.addDir, 'running', `orchestrator ${elapsedS}s`);
     }, 60_000);
     child.stdout.on('data', (chunk: Buffer) => {
-      const text = chunk.toString('utf8');
-      if (state) {
-        lineBuf += text;
-        let nl: number;
-        while ((nl = lineBuf.indexOf('\n')) >= 0) {
-          consumeStreamLine(lineBuf.slice(0, nl), state, Date.now());
-          lineBuf = lineBuf.slice(nl + 1);
-        }
-        drainTicks();
-      } else {
-        stdout += text;
-      }
+      stdout += chunk.toString('utf8');
     });
     child.stderr.on('data', (chunk: Buffer) => {
       stderr += chunk.toString('utf8');
@@ -691,15 +666,13 @@ function spawnRuntime(args: {
     child.on('error', (err) => {
       clearTimeout(timer);
       clearInterval(heartbeat);
-      flushBuf();
-      resolve({ stdout: state ? state.resultText : stdout, stderr: stderr + '\n' + err.message, exitCode: -1 });
+      resolve({ stdout, stderr: stderr + '\n' + err.message, exitCode: -1 });
     });
     child.on('close', (code) => {
       clearTimeout(timer);
       clearInterval(heartbeat);
-      flushBuf();
       resolve({
-        stdout: state ? state.resultText : stdout,
+        stdout,
         stderr: stderr + (timedOut ? '\n[timed out]' : ''),
         exitCode: code ?? -1,
       });

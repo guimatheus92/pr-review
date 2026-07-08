@@ -61,8 +61,7 @@ src/
 │   └── index.ts             # detectProvider(url) switch
 ├── dispatch/
 │   ├── single-session.ts    # prepareSessionContext (pr-context.md + skills-<reviewer>.md), orchestrator prompt, runs the runtime (parseFindingsFile is reused by --resume)
-│   ├── runtime.ts           # resolveRuntime, runtimeSpawnArgs, streamingEnabled, taskCall, normalizeModel (copilot | claude | auto)
-│   ├── stream-json.ts       # parse claude --output-format stream-json → per-reviewer progress ticks
+│   ├── runtime.ts           # resolveRuntime, runtimeSpawnArgs, taskCall, normalizeModel (copilot | claude | auto)
 │   ├── codex.ts             # optional Codex second-opinion reviewer (sibling process, codex exec)
 │   ├── line-snap.ts         # buildValidLinesMap + snapLineToDiff (snap findings to valid diff lines)
 │   ├── parsers.ts           # JSON / bracketed-markdown / section-header parsers

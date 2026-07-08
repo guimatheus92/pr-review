@@ -126,8 +126,7 @@ program
         // fast/foreground, so --detach is a no-op for them.
         if (opts.detach && !opts.resume && !opts.contextOnly) {
           const { detachReview } = await import('./commands/detach.js');
-          const rest = process.argv.slice(2).filter((a) => a !== '--detach');
-          const { runId, outDir } = detachReview(prUrl, rest);
+          const { runId, outDir } = detachReview(prUrl, process.argv.slice(2));
           process.stdout.write(
             `Review started in the background (this can take ~6–10 min).\n` +
               `  run-id: ${runId}\n  dir:    ${outDir}\n\n` +
@@ -230,13 +229,13 @@ program
 
 program
   .command('status <run-id>')
-  .description('Show a background review’s live progress, or its summary once done (poll target for --detach). Exit: 0 done, 20 running, 21 interrupted (resume it), 1 missing.')
+  .description('Show a background review’s live progress, or its summary once done (poll target for --detach). Exit: 0 done, 20 running, 21 interrupted (resume it), 22 failed, 1 missing.')
   .action(async (runId: string) => {
     try {
-      const { runStatus } = await import('./commands/status.js');
+      const { runStatus, statusExitCode } = await import('./commands/status.js');
       const r = runStatus(runId);
       process.stdout.write(r.text + '\n');
-      process.exit(r.state === 'done' ? 0 : r.state === 'interrupted' ? 21 : r.state === 'missing' ? 1 : 20);
+      process.exit(statusExitCode(r.state));
     } catch (err) {
       console.error((err as Error).message);
       process.exit(1);

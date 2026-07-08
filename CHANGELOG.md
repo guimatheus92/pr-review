@@ -4,6 +4,8 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+## [0.1.8] — 2026-07-08
+
 ### Added
 - **Background reviews with a live progress feed.** The slash command now starts the review detached (`review --detach`) and polls a new `status <run-id>` subcommand, so a slow run (routinely 6–10 min, sometimes 20+) no longer dies on the host's ~10-min Bash timeout, and the user sees a moving snapshot (current phase + a heartbeat elapsed clock, written to `progress.ndjson`) instead of one silent call. `status` uses a `run.pid` liveness check to tell a slow-but-healthy run from a dead one, so an intermediate artifact never reads as "interrupted".
 - **`review --resume <run-id>`.** Reuse a prior run's on-disk reviewer outputs (`single-session-findings.json` / `phase1-findings.json`) and jump straight to dedupe + post — turning a run killed after the expensive reviewer phase into a ~1-minute finish instead of a full re-spend.

@@ -20,7 +20,7 @@ node ./dist/cli.js review <pr-url> --dry-run
 
 ## Architecture
 
-See [skills/architecture/SKILL.md](skills/architecture/SKILL.md) for the full source map and execution model.
+See [skills/help/reference/architecture.md](skills/help/reference/architecture.md) for the full source map and execution model.
 
 The two-layer pattern: slash command (`commands/pr-review.md`) → Node CLI (`src/`) → single agent session (Copilot CLI or Claude Code, per `--runtime`) dispatching reviewer agents via `task()` / `Task()`.
 
@@ -32,7 +32,7 @@ Built-in reviewers are `.md` files at `agents/<name>.md`, registered in `BUILTIN
 2. Keep it **stack-agnostic**. Framework-specific content belongs in user skills. Do not add an "Output format" block — the dispatch prompt in [src/dispatch/single-session.ts](src/dispatch/single-session.ts) is the single source of the output contract.
 3. Add the agent name to `BUILTIN_AGENTS` in [src/dispatch/single-session.ts](src/dispatch/single-session.ts).
 4. Rebuild: `npm run build`. Verify: `node ./dist/cli.js plugins list`.
-5. Update [README.md](README.md) and [skills/reviewers-vs-skills/SKILL.md](skills/reviewers-vs-skills/SKILL.md).
+5. Update [README.md](README.md) and [skills/help/reference/reviewers-vs-skills.md](skills/help/reference/reviewers-vs-skills.md).
 
 ## Authoring a plugin (for distribution)
 
@@ -85,9 +85,8 @@ CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs build, tests, and
 
 ## Release
 
-1. Bump version in `package.json` and `plugin.json`.
-2. `npm run build && npm run test`.
-3. `git tag v0.X.Y && git push --tags`.
-4. Users update via `/plugin install pr-review@pr-review` (inside `copilot` or `claude`).
+1. `node scripts/release.mjs <patch|minor|major|x.y.z>` — bumps the version in every manifest (`package.json`, `package-lock.json`, `plugin.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`), verifies no stale version string survives, rolls the CHANGELOG, rebuilds the bundle, commits, and tags.
+2. `git push --follow-tags`.
+3. Users update via `/plugin install pr-review@pr-review` (inside `copilot` or `claude`).
 
 No npm publish — distribution is via the Copilot CLI / Claude Code plugin marketplaces only.

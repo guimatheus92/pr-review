@@ -5,6 +5,7 @@ import type { GatherOutput, ReviewerOutput, SkillDefinition } from '../types.js'
 import { matchesAny } from '../util/globs.js';
 import { parseReviewerOutput } from './parsers.js';
 import { normalizeModel, runtimeBinary, runtimeSpawnArgs, taskCall, taskToolName, type Runtime } from './runtime.js';
+import { appendProgress } from '../util/progress.js';
 
 /** Exported so tests can lock the registry against the agents/*.md files. */
 export const BUILTIN_AGENTS = [
@@ -479,7 +480,10 @@ export interface SingleSessionResult {
   findingsUnavailable: boolean;
 }
 
-function parseFindingsFile(path: string, model: string, durationMs: number, exitCode: number): ReviewerOutput[] {
+/** Reviewer-output artifacts a run writes, in resume-preference order (final consolidation, then salvageable phase-1). */
+export const REVIEWER_OUTPUT_FILES = ['single-session-findings.json', 'phase1-findings.json'] as const;
+
+export function parseFindingsFile(path: string, model: string, durationMs: number, exitCode: number): ReviewerOutput[] {
   const findingsRaw = readFileSync(path, 'utf8');
   const parsed = JSON.parse(findingsRaw) as {
     reviewers?: Array<{ name: string; findings: ReviewerOutput['findings'] }>;
@@ -644,10 +648,14 @@ function spawnRuntime(args: {
       }
     }, args.timeoutMs);
 
+    // The orchestrator's own tool activity isn't observable from here (a plain
+    // `-p` run buffers its output), so the live feed is phase-level: a heartbeat
+    // proves the run is alive and advances the elapsed clock the poller shows.
     const heartbeatStart = Date.now();
     const heartbeat = setInterval(() => {
       const elapsedS = Math.round((Date.now() - heartbeatStart) / 1000);
       process.stderr.write(`[single-session] orchestrator running… ${elapsedS}s elapsed\n`);
+      appendProgress(args.addDir, 'running', `orchestrator ${elapsedS}s`);
     }, 60_000);
     child.stdout.on('data', (chunk: Buffer) => {
       stdout += chunk.toString('utf8');

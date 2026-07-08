@@ -4,6 +4,9 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+### Fixed
+- **Corrected the 0.1.8 bare-command claim.** 0.1.8 said moving the manifest to `.claude-plugin/plugin.json` made the bare `/pr-review` resolve under Claude Code — that was wrong. Empirically, Claude Code does **not** mint a bare `/<plugin>` alias for a plugin that also ships agents (verified: the agent-shipping `pr-review` and `pr-review-toolkit` both lack the bare form; the commands-only `code-review` has it). It is not configurable in the plugin. Use `/pr-review:pr-review`, or add a personal `~/.claude/commands/pr-review.md` for a bare `/pr-review` (see README → "Command name per host"). The `.claude-plugin/plugin.json` relocation is harmless and kept (canonical location, dual-synced with the root `plugin.json` Copilot needs).
+
 ## [0.1.8] — 2026-07-08
 
 ### Added
@@ -12,7 +15,7 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 - **Idempotent posting.** A publish writes a `posted.marker`; `--resume` refuses to re-post only when the marker shows a *fully-completed* prior post (and fails closed on a corrupt marker), so a duplicate-comment hazard is avoided without stranding the un-posted findings of a partial post. `--force-post` overrides.
 
 ### Changed
-- **Claude Code: the bare `/pr-review` now resolves** (previously only `/pr-review:pr-review`). The plugin manifest now also ships at `.claude-plugin/plugin.json` — Claude Code's canonical location, which registers the bare command alias — while the root `plugin.json` stays for Copilot CLI. `scripts/release.mjs` keeps both in sync.
+- **Plugin manifest also ships at `.claude-plugin/plugin.json`** (Claude Code's canonical location) alongside the root `plugin.json` (which Copilot CLI requires); `scripts/release.mjs` keeps both in sync. _(0.1.8 claimed this made the bare `/pr-review` resolve under Claude Code — it does not; see the Unreleased "Fixed" note.)_
 - **Documentation collapsed into one `help` skill.** The nine per-topic doc-skills (each a separate `/pr-review:*` palette entry) are now one `/pr-review:help` skill whose `SKILL.md` indexes `skills/help/reference/*.md`, decluttering the slash palette without losing model-invocable help.
 
 ## [0.1.7] — 2026-07-06

@@ -86,7 +86,7 @@ src/
 
 ```
 pr-review/                        # plugin root (loads in Copilot CLI and Claude Code)
-├── .claude-plugin/plugin.json    # Claude Code manifest (canonical location; enables the bare /pr-review)
+├── .claude-plugin/plugin.json    # Claude Code manifest (its canonical location). NOTE: Claude Code does not mint a bare /pr-review alias for a plugin that ships agents — use /pr-review:pr-review or a personal ~/.claude/commands/pr-review.md
 ├── plugin.json                   # root manifest — Copilot CLI requires it here; kept in sync by scripts/release.mjs
 ├── .claude-plugin/marketplace.json  # single-plugin marketplace entry
 ├── commands/pr-review.md         # /pr-review slash command

@@ -29,19 +29,20 @@ Or inside a `claude` (Claude Code) session:
 
 No `npm install` needed. The plugin ships a pre-bundled `dist/cli.cjs`; the slash command finds it via `$CLAUDE_PLUGIN_ROOT` under Claude Code (falling back to `~/.copilot/installed-plugins/`) and runs it with `node`. The plugin layout (`commands/`, `agents/`, `skills/`) loads in both hosts; the manifest lives in two places on purpose — `.claude-plugin/plugin.json` (Claude Code's canonical location) and a root `plugin.json` (which Copilot CLI requires).
 
-**Command name per host:** both hosts expose the bare `/pr-review`. Claude Code also namespaces it as `/pr-review:pr-review` (either works). If the bare form ever shows "Unknown command" on Claude Code, reinstall/update the plugin so the `.claude-plugin/plugin.json` manifest is picked up (`claude plugin update pr-review@pr-review`); as a last resort, drop a personal alias at `~/.claude/commands/pr-review.md`:
+**Command name per host:** Copilot CLI exposes the command as `/pr-review`. Claude Code namespaces plugin commands as `/pr-review:pr-review` — and because this plugin also ships reviewer **agents**, Claude Code does **not** register a bare `/pr-review` alias for it (empirically: plugins that ship agents don't get the bare form; it's a host behavior, not configurable in the plugin). To get a bare `/pr-review` under Claude Code, drop a personal command at `~/.claude/commands/pr-review.md` (personal commands have no namespace, so `/pr-review` resolves):
 
 ```markdown
 ---
-description: Alias for the pr-review plugin command.
+description: Bare alias for the pr-review plugin command.
+argument-hint: "<pr-url> [flags]"
 allowed-tools: ["Bash"]
 ---
-Run the pr-review CLI (you are plumbing, not the reviewer):
+Run the pr-review CLI in the background and poll it (you are plumbing, not the reviewer):
 ​```bash
 CLI=$(find ~/.claude/plugins/cache -name cli.cjs -path '*/pr-review/*/dist/*' -not -path '*/node_modules/*' 2>/dev/null | sort | tail -1)
-node "$CLI" review $ARGUMENTS
+node "$CLI" review $ARGUMENTS --detach
 ​```
-Print the command's stdout verbatim.
+If the output has a `run-id:`, poll `node "$CLI" status <run-id>` (~25s apart) until it prints the summary; otherwise print the output verbatim.
 ```
 
 For local development:

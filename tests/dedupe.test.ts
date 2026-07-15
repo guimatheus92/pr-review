@@ -110,3 +110,45 @@ test('dedupeWithinBatch — keeps same title on different lines', () => {
   const result = dedupeWithinBatch([a, b]);
   assert.equal(result.kept.length, 2);
 });
+
+test('dedupeWithinBatch — off mode keeps everything', () => {
+  const a = mkFinding({ title: 'duplicate finding title here', file: 'a.ts', line: 1 });
+  const b = mkFinding({ title: 'duplicate finding title here', file: 'a.ts', line: 1 });
+  const result = dedupeWithinBatch([a, b], 'off');
+  assert.equal(result.kept.length, 2);
+  assert.equal(result.dropped.length, 0);
+});
+
+test('dedupeWithinBatch — strict folds a same-file near-line duplicate that lacks a line on one side', () => {
+  // one reviewer omitted the line; the other pinned it — same file, strongly
+  // overlapping title → the same issue, folded.
+  const a = mkFinding({
+    title: 'hidden foreign key column exposed on the fact table',
+    body: 'the surrogate key column is visible and defaults summarizeBy to count',
+    file: 'model/Fact.tmdl',
+    line: 80,
+  });
+  const b = mkFinding({
+    title: 'hidden foreign key column exposed on the fact table',
+    body: 'the surrogate key column is visible and defaults summarizeBy to count',
+    file: 'model/Fact.tmdl',
+  });
+  const result = dedupeWithinBatch([a, b], 'strict');
+  assert.equal(result.kept.length, 1);
+  assert.equal(result.dropped.length, 1);
+});
+
+test('dedupeWithinBatch — loose folds a same-file duplicate reported at different lines; strict keeps both', () => {
+  const mk = (line: number) =>
+    mkFinding({
+      title: 'string join relationship uses mismatched column names',
+      body: 'the relationship joins Offering to OfferingName by string and was auto-detected instead of using a surrogate key',
+      file: 'model/relationships.tmdl',
+      line,
+    });
+  // Same finding surfaced by two reviewers at nearby-but-not-equal lines.
+  assert.equal(dedupeWithinBatch([mk(192), mk(196)], 'strict').kept.length, 2);
+  const loose = dedupeWithinBatch([mk(192), mk(196)], 'loose');
+  assert.equal(loose.kept.length, 1);
+  assert.equal(loose.dropped.length, 1);
+});

@@ -81,16 +81,30 @@ export function dedupeAgainstExisting(
   return { kept, dropped };
 }
 
-export function dedupeWithinBatch(findings: Finding[]): DedupeResult {
+export function dedupeWithinBatch(findings: Finding[], mode: DedupeMode = 'strict'): DedupeResult {
+  if (mode === 'off') return { kept: findings.slice(), dropped: [] };
+  // strict keeps two same-title findings on genuinely different lines (they are
+  // usually the same rule flagged at two real locations, both worth posting).
+  // loose folds those together too — the reconciliation a skipped verifier pass
+  // would otherwise have done — via a wider line window and a cross-line merge
+  // gated on strong title AND body agreement.
+  const lineWindow = mode === 'loose' ? 10 : 3;
+  const titleThreshold = mode === 'loose' ? 0.4 : 0.5;
+  const bodyThreshold = mode === 'loose' ? 0.6 : 0.75;
   const kept: Finding[] = [];
   const dropped: DedupeResult['dropped'] = [];
   for (const f of findings) {
-    const dup = kept.find(
-      (k) =>
-        k.file === f.file &&
-        k.line === f.line &&
-        jaccard(tokenize(k.title), tokenize(f.title)) >= 0.5,
-    );
+    const dup = kept.find((k) => {
+      if (k.file !== f.file) return false;
+      const titleSim = jaccard(tokenize(k.title), tokenize(f.title));
+      const bodySim = jaccard(tokenize(k.body), tokenize(f.body));
+      // Missing line numbers on either side can't distinguish location, so
+      // treat them as co-located.
+      const nearLine = k.line == null || f.line == null || Math.abs(k.line - f.line) <= lineWindow;
+      if (nearLine && (titleSim >= titleThreshold || bodySim >= bodyThreshold)) return true;
+      if (mode === 'loose' && titleSim >= 0.6 && bodySim >= bodyThreshold) return true;
+      return false;
+    });
     if (dup) {
       dropped.push({ finding: f, reason: `intra-batch duplicate of "${dup.title}"` });
     } else {

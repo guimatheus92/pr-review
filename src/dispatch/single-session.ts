@@ -421,9 +421,15 @@ function buildOrchestratorPrompt(
 
   lines.push(
     ``,
-    `## Phase 2 — Write the Phase 1 findings file`,
+    `## Phase 2 — Write the findings files (do this the moment Phase 1 returns)`,
     ``,
-    `Once ALL Phase 1 subagents return, write their collected arrays to \`${ctx.phase1Path}\` using the exact JSON shape from Phase 4 below (a \`reviewers\` array; one entry per dispatched reviewer, empty arrays included).`,
+    `Once ALL Phase 1 subagents return, assemble their collected arrays into the exact JSON shape shown in Phase 4 below (a \`reviewers\` array; one entry per dispatched reviewer, empty arrays included).`,
+    ``,
+    `Write that SAME JSON to BOTH of these files immediately — before you even consider the verifier:`,
+    `1. \`${ctx.phase1Path}\``,
+    `2. \`${ctx.findingsPath}\` (the file the CLI consumes)`,
+    ``,
+    `Writing \`${ctx.findingsPath}\` here — not "later" — is the single most important step of this run. Do NOT defer it on the assumption that you will write it after the verifier: if your turn ends early, that file MUST already exist, or the whole review is lost.`,
   );
 
   if (ctx.wantVerifier) {
@@ -433,7 +439,7 @@ function buildOrchestratorPrompt(
       ``,
       `## Phase 3 — Verifier (conditional)`,
       ``,
-      `Dispatch the verifier ONLY if at least one Phase 1 finding has severity CRITICAL or HIGH. Otherwise skip it and record reviewer \`verifier\` with an empty findings array.`,
+      `Dispatch the verifier ONLY if at least one Phase 1 finding has severity CRITICAL or HIGH. Otherwise skip it — the files you wrote in Phase 2 are already final (they record reviewer \`verifier\` with an empty findings array).`,
       ``,
       `- ${taskCall(runtime, VERIFIER_AGENT, `Read the PR context at \`${ctx.contextPath}\` and the Phase 1 findings at \`${ctx.phase1Path}\`.${verifierRules} Output ONLY a JSON array of cross-cutting issues, contradictions, or gaps that the other reviewers missed. Use shape ${OUTPUT_SHAPE}. If nothing to add, output [].`)} — record as reviewer name \`verifier\``,
     );
@@ -441,9 +447,12 @@ function buildOrchestratorPrompt(
 
   lines.push(
     ``,
-    `## Phase 4 — Write the consolidated output file`,
+    `## Phase 4 — Consolidated output file`,
     ``,
-    `Write the final result to: \`${ctx.findingsPath}\``,
+    `The consolidated output file is \`${ctx.findingsPath}\` — you already wrote it in Phase 2.`,
+    ctx.wantVerifier
+      ? `If — and ONLY if — you dispatched the verifier in Phase 3 and it returned findings, REWRITE \`${ctx.findingsPath}\` so its \`verifier\` entry carries them alongside the Phase 1 reviewers. Otherwise leave the Phase 2 file untouched.`
+      : `Leave the Phase 2 file untouched.`,
     ``,
     `Exact JSON shape (use Write or apply_patch tool — no shell redirection):`,
     ``,
@@ -460,11 +469,11 @@ function buildOrchestratorPrompt(
     `}`,
     '```',
     ``,
-    `Critical rules for Phase 4:`,
+    `Critical rules:`,
     `- Do NOT modify, re-rank, or summarize findings. Copy them verbatim from each subagent's output into the array under its reviewer name.`,
     `- If a subagent returned non-JSON, store its raw output as a single finding with severity "LOW", title "Unparseable output from <name>", and body = the raw output.`,
     `- Include EVERY reviewer that was dispatched, even ones with empty arrays.`,
-    `- After writing the file, reply with the single word \`DONE\`. Nothing else.`,
+    `- Once \`${ctx.findingsPath}\` reflects all dispatched reviewers, reply with the single word \`DONE\`. Nothing else.`,
   );
 
   return lines.join('\n');
@@ -496,6 +505,27 @@ export function parseFindingsFile(path: string, model: string, durationMs: numbe
     durationMs,
     exitCode,
   }));
+}
+
+/**
+ * The verifier is a conditional pass (only on CRITICAL/HIGH), so its absence is
+ * normal. But when severe findings ARE present and no verifier entry made it
+ * into the salvaged output, the orchestrator ended its turn before reconciling
+ * — say so, because cross-reviewer duplicates/contradictions it would have
+ * merged can survive into the posted review.
+ */
+function warnIfVerifierMissing(outputs: ReviewerOutput[]): void {
+  const hasVerifier = outputs.some((o) => o.reviewerName === 'verifier');
+  if (hasVerifier) return;
+  const hasSevere = outputs.some((o) =>
+    o.findings.some((f) => f.severity === 'CRITICAL' || f.severity === 'HIGH'),
+  );
+  if (hasSevere) {
+    process.stderr.write(
+      `[single-session] warning: CRITICAL/HIGH findings present but no verifier reconciliation ran — ` +
+        `cross-reviewer duplicates may survive (re-run, or loosen --dedupe-mode, to reconcile)\n`,
+    );
+  }
 }
 
 export async function runSingleSession(
@@ -563,17 +593,33 @@ async function attemptOrchestrator(
 
   let outputs: ReviewerOutput[] = [];
   let findingsUnavailable = false;
+  const finalExists = existsSync(ctx.findingsPath);
   try {
+    // Phase 2 of the prompt writes the consolidated file up front, so it is
+    // normally present. Treat a simply-absent file as the "turn ended early"
+    // case (calm salvage below) and reserve the loud parse-error log for a
+    // file that EXISTS but is corrupt.
+    if (!finalExists) throw new Error('consolidated findings file was not written');
     outputs = parseFindingsFile(ctx.findingsPath, model, durationMs, childResult.exitCode);
+    warnIfVerifierMissing(outputs);
   } catch (err) {
-    process.stderr.write(
-      `[single-session] failed to parse ${ctx.findingsPath}: ${(err as Error).message}\n`,
-    );
-    // Salvage 1: the phase-1 file has the same shape and may have been written
-    // even when the final consolidation step failed.
+    if (finalExists) {
+      process.stderr.write(
+        `[single-session] failed to parse ${ctx.findingsPath}: ${(err as Error).message}\n`,
+      );
+    }
+    // Salvage 1: the phase-1 file has the same shape and — because Phase 2
+    // writes it alongside the consolidated file — is the most complete record
+    // left when the final write is missing. Only a conditional verifier pass
+    // can be absent from it.
     try {
       outputs = parseFindingsFile(ctx.phase1Path, model, durationMs, childResult.exitCode);
-      process.stderr.write(`[single-session] salvaged findings from ${ctx.phase1Path}\n`);
+      process.stderr.write(
+        finalExists
+          ? `[single-session] salvaged findings from ${ctx.phase1Path}\n`
+          : `[single-session] consolidated file absent — using phase-1 findings from ${ctx.phase1Path}\n`,
+      );
+      warnIfVerifierMissing(outputs);
     } catch {
       // Salvage 2: the orchestrator sometimes prints the JSON instead of writing it.
       const salvaged = parseReviewerOutput(childResult.stdout, 'json');

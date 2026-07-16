@@ -4,6 +4,8 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+## [0.1.9] — 2026-07-16
+
 ### Changed
 - **Intra-batch dedupe is now dedupe-mode-aware.** `dedupeWithinBatch` folds same-file near-line duplicates and treats a missing line on either side as co-located (a common cause of the same issue surviving twice); `loose` additionally merges the same finding reported at different lines when its title AND body agree strongly. `strict` still keeps two same-title findings on genuinely different lines (usually one rule flagged at two real locations).
 

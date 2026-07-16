@@ -16,6 +16,20 @@ const ADO_AZURE_AD_RESOURCE_ID = '499b84ac-1321-427f-aa17-267ca6975798';
 // Concurrent per-file content fetches during diff synthesis.
 const FILE_FETCH_CONCURRENCY = 5;
 
+// azure-devops-node-api VersionControlChangeType bit flags. changeType is a
+// bitmask, not a single value — an edit arrives OR'd with rename/encoding/etc.
+// (e.g. edit|rename = 10) — so mask each bit; equality checks miss combinations.
+const VC_ADD = 1;
+const VC_RENAME = 8;
+const VC_DELETE = 16;
+
+// Cap the LCS DP matrix. The diff is O(m·n) in space over the changed core, so a
+// large renamed or rewritten file whose core shares no prefix/suffix can try to
+// allocate a multi-GB matrix and crash the process (observed: a renamed PBIR
+// file OOMing gather). Above this cell count, fall back to a coarse whole-region
+// replace. ~10M cells is tens of MB — safe even with concurrent file fetches.
+const MAX_LCS_CELLS = 10_000_000;
+
 interface AdoCredential {
   token: string;
   kind: 'pat' | 'bearer';
@@ -112,6 +126,18 @@ export function lcsLineDiff(a: string[], b: string[]): string {
 
   const m = coreA.length;
   const n = coreB.length;
+  // Guard the O(m·n) matrix: a large renamed/rewritten core would allocate
+  // multiple GB and OOM. Emit a coarse replace (whole core removed then added)
+  // — a valid diff whose NEW-side line numbers stay exact for line-snapping.
+  if (m * n > MAX_LCS_CELLS) {
+    const out: string[] = [
+      ...a.slice(0, prefix).map((l) => ` ${l}`),
+      ...coreA.map((l) => `-${l}`),
+      ...coreB.map((l) => `+${l}`),
+      ...a.slice(a.length - suffix).map((l) => ` ${l}`),
+    ];
+    return out.join('\n');
+  }
   const dp: number[][] = Array(m + 1)
     .fill(null)
     .map(() => Array(n + 1).fill(0));
@@ -151,6 +177,27 @@ export function lcsLineDiff(a: string[], b: string[]): string {
     ...a.slice(a.length - suffix).map((l) => ` ${l}`),
   ];
   return out.join('\n');
+}
+
+/**
+ * Map an ADO change entry to its review status and the path its BASE content
+ * lives at. `changeType` is a VersionControlChangeType bitmask (edits arrive
+ * OR'd with rename/encoding/…), and on a rename the base content is at the OLD
+ * path (`sourceServerItem`) — fetching the base at the new path returns a null
+ * item and the file wrongly synthesizes as fully-added. Exported so the bitmask
+ * + rename handling is unit-testable without the ADO API.
+ */
+export function classifyChange(
+  changeType: number | undefined,
+  newPath: string,
+  sourceServerItem: string | undefined,
+): { status: ChangedFile['status']; basePath: string } {
+  const ct = changeType ?? 0;
+  const status: ChangedFile['status'] =
+    (ct & VC_DELETE) !== 0 ? 'deleted' : (ct & VC_ADD) !== 0 ? 'added' : 'modified';
+  const basePath =
+    (ct & VC_RENAME) !== 0 ? sourceServerItem?.replace(/^\//, '') || newPath : newPath;
+  return { status, basePath };
 }
 
 export class AzureDevOpsProvider implements PrProvider {
@@ -264,19 +311,18 @@ export class AzureDevOpsProvider implements PrProvider {
         limit(async (): Promise<ChangedFile | null> => {
           const path = change.item?.path?.replace(/^\//, '') ?? '';
           if (!path) return null;
-          const status: ChangedFile['status'] =
-            change.changeType === 1
-              ? 'added'
-              : change.changeType === 2
-                ? 'modified'
-                : change.changeType === 16
-                  ? 'deleted'
-                  : 'modified';
+          const { status, basePath } = classifyChange(
+            change.changeType,
+            path,
+            (change as { sourceServerItem?: string }).sourceServerItem,
+          );
           let patch: string | undefined;
           if (status !== 'deleted' && headSha) {
             const [headContent, baseContent] = await Promise.all([
               this.fetchFileText(git, repoId, ref.project!, path, headSha),
-              baseSha && status !== 'added' ? this.fetchFileText(git, repoId, ref.project!, path, baseSha) : Promise.resolve(null),
+              baseSha && status !== 'added'
+                ? this.fetchFileText(git, repoId, ref.project!, basePath, baseSha)
+                : Promise.resolve(null),
             ]);
             patch = synthesizePatch(path, baseContent, headContent, baseSha ?? '', headSha);
           }
@@ -321,6 +367,10 @@ export class AzureDevOpsProvider implements PrProvider {
         isTransientAdoError,
         `getItem ${path}@${sha.slice(0, 8)}`,
       );
+      // getItem yields a null item for a path absent at this version instead of
+      // throwing; reading `.content` off null would throw a misleading
+      // "Cannot read properties of null" that surfaces as a bogus fetch failure.
+      if (item == null) return null;
       const content = (item as unknown as { content?: string }).content;
       return typeof content === 'string' ? content : null;
     } catch (err) {

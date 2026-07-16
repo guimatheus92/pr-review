@@ -203,7 +203,7 @@ async function finalizeReview(a: {
   }
 
   const rawFindings = a.outputs.flatMap((o) => o.findings);
-  const intraBatch = dedupeWithinBatch(rawFindings);
+  const intraBatch = dedupeWithinBatch(rawFindings, a.dedupeMode);
   const dedupedAgainstExisting = dedupeAgainstExisting(intraBatch.kept, a.gather.existingComments, a.dedupeMode);
   const finalFindings = dedupedAgainstExisting.kept;
   const droppedCount = intraBatch.dropped.length + dedupedAgainstExisting.dropped.length;

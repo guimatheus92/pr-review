@@ -58,3 +58,17 @@ test('classifyChange — rename OR-ed with edit (10) is still a rename, not a pl
 test('classifyChange — rename bit with a missing sourceServerItem falls back to the new path', () => {
   assert.deepEqual(classifyChange(8, 'a.ts', undefined), { status: 'modified', basePath: 'a.ts' });
 });
+
+test('lcsLineDiff — caps the DP matrix on huge inputs (coarse replace, no OOM, new-side lines intact)', () => {
+  // No shared prefix/suffix → the full core would be a ~3.6×10^7-cell matrix,
+  // over the cap; it must fall back to a coarse replace without allocating it.
+  const a = Array.from({ length: 6000 }, (_, i) => `a-line-${i}`);
+  const b = Array.from({ length: 6000 }, (_, i) => `b-line-${i}`);
+  const diff = lcsLineDiff(a, b).split('\n');
+  assert.equal(diff.filter((l) => l.startsWith('-')).length, 6000);
+  assert.equal(diff.filter((l) => l.startsWith('+')).length, 6000);
+  assert.ok(!diff.some((l) => l.startsWith(' ')), 'no shared context when prefix/suffix are empty');
+  // NEW-side line numbers must remain fully addressable for line-snapping.
+  const patch = synthesizePatch('big.tmdl', a.join('\n'), b.join('\n'), 'base', 'head');
+  assert.equal(validLinesFromPatch(patch).size, 6000);
+});

@@ -23,6 +23,13 @@ const VC_ADD = 1;
 const VC_RENAME = 8;
 const VC_DELETE = 16;
 
+// Cap the LCS DP matrix. The diff is O(m·n) in space over the changed core, so a
+// large renamed or rewritten file whose core shares no prefix/suffix can try to
+// allocate a multi-GB matrix and crash the process (observed: a renamed PBIR
+// file OOMing gather). Above this cell count, fall back to a coarse whole-region
+// replace. ~10M cells is tens of MB — safe even with concurrent file fetches.
+const MAX_LCS_CELLS = 10_000_000;
+
 interface AdoCredential {
   token: string;
   kind: 'pat' | 'bearer';
@@ -119,6 +126,18 @@ export function lcsLineDiff(a: string[], b: string[]): string {
 
   const m = coreA.length;
   const n = coreB.length;
+  // Guard the O(m·n) matrix: a large renamed/rewritten core would allocate
+  // multiple GB and OOM. Emit a coarse replace (whole core removed then added)
+  // — a valid diff whose NEW-side line numbers stay exact for line-snapping.
+  if (m * n > MAX_LCS_CELLS) {
+    const out: string[] = [
+      ...a.slice(0, prefix).map((l) => ` ${l}`),
+      ...coreA.map((l) => `-${l}`),
+      ...coreB.map((l) => `+${l}`),
+      ...a.slice(a.length - suffix).map((l) => ` ${l}`),
+    ];
+    return out.join('\n');
+  }
   const dp: number[][] = Array(m + 1)
     .fill(null)
     .map(() => Array(n + 1).fill(0));

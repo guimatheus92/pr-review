@@ -118,3 +118,46 @@ test('skills smoke — a stack-agnostic business rule flows disk → discovery �
     rmSync(outDir, { recursive: true, force: true });
   }
 });
+
+test('catalog smoke — an untargeted .claude/skills skill flows disk → catalog → pr-context.md, never into skills files', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'pr-review-smoke-'));
+  const home = mkdtempSync(join(tmpdir(), 'pr-review-smoke-home-'));
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-smoke-out-'));
+  try {
+    const claudeDir = join(cwd, '.claude', 'skills');
+    mkdirSync(claudeDir, { recursive: true });
+    // Untargeted (no applies_to/inject_into) → catalog, not injection. The body carries
+    // a distinctive marker that must never reach any injected context file.
+    writeFileSync(
+      join(claudeDir, 'pp-planos.md'),
+      '---\ndescription: plan and limit rules for stores\n---\nCATALOG_ONLY_MARKER — read on demand.\n',
+    );
+
+    const { config } = loadConfig({ cwd, homeOverride: home });
+    const { skills, catalog } = loadAll({ cwd, config, skillsOnly: true, home });
+    assert.ok(!skills.some((s) => s.name === 'pp-planos'), 'untargeted repo skill is not injected');
+    assert.deepEqual(catalog.map((s) => s.name), ['pp-planos'], 'it lands in the catalog');
+
+    const ctx = prepareSessionContext({
+      prUrl: 'https://github.com/o/r/pull/1',
+      gather: fixtureGather(['src/orders/service.ts']),
+      skills,
+      catalog,
+      installedCompanions: [],
+      skipReviewers: [],
+      outDir,
+      invokeCompanions: false,
+    });
+
+    const contextBody = readFileSync(ctx.contextPath, 'utf8');
+    assert.ok(contextBody.includes('## Workspace Skills Catalog'), 'catalog section rendered');
+    assert.ok(contextBody.includes('**pp-planos**'), 'catalog entry listed');
+    assert.ok(contextBody.includes('plan and limit rules for stores'), 'description listed');
+    assert.ok(!contextBody.includes('CATALOG_ONLY_MARKER'), 'catalog body not injected into pr-context.md');
+    assert.ok(!existsSync(join(outDir, 'skills-quality.md')) || !readFileSync(join(outDir, 'skills-quality.md'), 'utf8').includes('CATALOG_ONLY_MARKER'));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});

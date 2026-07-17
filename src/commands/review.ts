@@ -109,7 +109,7 @@ function earlyExitGate(gather: GatherOutput): string | null {
   return null;
 }
 
-function renderSummary(
+export function renderSummary(
   prUrl: string,
   outputs: ReviewerOutput[],
   finalFindings: Finding[],
@@ -302,7 +302,7 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     const p = join(outDir, f);
     if (!existsSync(p)) continue;
     try {
-      outputs = parseFindingsFile(p, '(resumed)', 0, 0);
+      outputs = parseFindingsFile(p, '(resumed)', 0);
       process.stderr.write(`[review] resume: loaded reviewer outputs from ${f}\n`);
       break;
     } catch (err) {
@@ -428,12 +428,14 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   // Single-session mode dispatches runtime-registered agents only; user-authored
   // context goes in skills, so reviewer .md loading is skipped entirely.
   const loaded = loadAll({ cwd, config, skillsOnly: true });
-  process.stderr.write(`[review] loaded ${loaded.skills.length} skill(s)\n`);
+  const catalogNote = loaded.catalog.length > 0 ? `, ${loaded.catalog.length} catalog entr${loaded.catalog.length === 1 ? 'y' : 'ies'}` : '';
+  process.stderr.write(`[review] loaded ${loaded.skills.length} skill(s)${catalogNote}\n`);
 
   const sessionOpts = {
     prUrl: opts.prUrl,
     gather,
     skills: loaded.skills,
+    catalog: loaded.catalog,
     installedCompanions,
     skipReviewers: effectiveSkip,
     outDir,

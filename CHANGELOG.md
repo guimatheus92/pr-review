@@ -4,6 +4,8 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-17
+
 ### Added
 - **Untargeted repo skills are now surfaced as an on-demand catalog instead of being dropped.** A skill in a shared dir (`.claude/`, `.copilot/`, `.github/`, `.agents/`) without `applies_to`/`inject_into` used to be skipped entirely — a workspace full of them reviewed blind (`loaded 0 skill(s)`). Such **repo** skills are now listed in a `## Workspace Skills Catalog` section of `pr-context.md` (name + description + path); every reviewer sees the list and reads the entries relevant to the changed files on demand, treating them as advisory background (they do not override reviewer criteria or injected rules). Injected skills (`.pr-review/skills/` and targeted shared-dir skills) are unchanged and stay authoritative. Untargeted **home** skills (`~/.claude/skills/` etc.) stay skipped as personal noise. The catalog has its own 24 KB budget in `pr-context.md` (one line per skill, description capped at 200 chars), so it never competes with the injected-skill caps; `--context-only` shows catalog entries as `(catalog — on-demand)`.
 

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { prepareSessionContext } from '../src/dispatch/single-session.js';
@@ -228,6 +228,73 @@ test('triage — never triages down to zero: docs-only PR with quality skipped d
     assert.ok(ctx.dispatchedReviewers.length > 0, 'dispatch list must never be empty');
     assert.ok(ctx.dispatchedReviewers.includes('security'));
     assert.equal(ctx.triageSkipped.length, 0);
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('catalog — renders name/description/path in pr-context.md; body never injected; absent when empty', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const catalog: SkillDefinition[] = [
+      { name: 'pp-planos', source: '/abs/.claude/skills/pp-planos/SKILL.md', body: 'CATALOG_BODY_MARKER should never be injected', appliesTo: [], description: 'plan and limit rules' },
+    ];
+    const ctx = prepareSessionContext({ ...baseOpts(outDir, ['src/app.ts'], []), catalog });
+    const contextBody = readFileSync(ctx.contextPath, 'utf8');
+    assert.ok(contextBody.includes('## Workspace Skills Catalog'), 'catalog header present');
+    assert.ok(contextBody.includes('**pp-planos**'), 'catalog entry name present');
+    assert.ok(contextBody.includes('plan and limit rules'), 'catalog description present');
+    assert.ok(contextBody.includes('/abs/.claude/skills/pp-planos/SKILL.md'), 'catalog path present');
+    assert.ok(!contextBody.includes('CATALOG_BODY_MARKER'), 'catalog body is not injected into pr-context.md');
+    for (const f of readdirSync(outDir).filter((n) => n.startsWith('skills-') && n.endsWith('.md'))) {
+      assert.ok(!readFileSync(join(outDir, f), 'utf8').includes('CATALOG_BODY_MARKER'), `catalog body must not leak into ${f}`);
+    }
+
+    // Control: no catalog → no header.
+    const outDir2 = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+    try {
+      const ctx2 = prepareSessionContext(baseOpts(outDir2, ['src/app.ts'], []));
+      assert.ok(!readFileSync(ctx2.contextPath, 'utf8').includes('## Workspace Skills Catalog'));
+    } finally {
+      rmSync(outDir2, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('catalog — routing table rows carry the (catalog — on-demand) target', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const catalog: SkillDefinition[] = [
+      { name: 'pp-billing', source: '/abs/.claude/skills/pp-billing.md', body: 'b', appliesTo: [], description: 'billing' },
+    ];
+    const ctx = prepareSessionContext({ ...baseOpts(outDir, ['src/app.ts'], []), catalog });
+    const row = ctx.skillRouting.find((r) => r.skill === 'pp-billing')!;
+    assert.deepEqual(row.targets, ['(catalog — on-demand)']);
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('catalog caps — description truncates at 200 chars and the section stops with an omitted note', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const longDesc = 'D'.repeat(1000);
+    const catalog: SkillDefinition[] = Array.from({ length: 300 }, (_, i) => ({
+      name: `skill-${i}`,
+      source: `/abs/.claude/skills/skill-${i}.md`,
+      body: 'b',
+      appliesTo: [],
+      description: longDesc,
+    }));
+    const ctx = prepareSessionContext({ ...baseOpts(outDir, ['src/app.ts'], []), catalog });
+    const contextBody = readFileSync(ctx.contextPath, 'utf8');
+    // First entry's description is capped to 200 D's (201 would exceed the cap).
+    assert.ok(contextBody.includes(`**skill-0** — ${'D'.repeat(200)} `), 'description truncated at 200 chars');
+    assert.ok(!contextBody.includes('D'.repeat(201)), 'no description exceeds 200 chars');
+    assert.ok(/\(\+\d+ more skills omitted\)/.test(contextBody), 'overflow note present');
+    assert.ok(!contextBody.includes('skill-299'), 'later skills omitted by the section cap');
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }

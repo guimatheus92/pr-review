@@ -99,7 +99,7 @@ your-repo/
 
 Optional frontmatter targets a skill: `applies_to` (globs — the skill is injected only when an in-scope changed file matches) and `inject_into` (reviewer names — omit to reach all reviewers). Preview the routing with `--context-only`, which prints a skill→reviewer table and exits without running reviewers.
 
-Skills from the shared dirs (`.claude/skills/`, `.copilot/skills/`, `.github/skills/`, `.agents/skills/`) are also picked up, but only when they declare review targeting (`applies_to` and/or `inject_into`) — those dirs hold general-purpose agent skills too, and untargeted ones would flood every reviewer's context. Anything in `.pr-review/skills/` is included unconditionally. See [reviewers vs skills](skills/help/reference/reviewers-vs-skills.md) for the full authoring guide.
+Skills from the shared dirs (`.claude/skills/`, `.copilot/skills/`, `.github/skills/`, `.agents/skills/`) are also picked up. A skill that declares review targeting (`applies_to` and/or `inject_into`) is **injected** as a rule, same as a `.pr-review/skills/` skill. An **untargeted repo** skill is instead listed in an on-demand **catalog** (name + description + path) in the review context — reviewers read the ones relevant to the changed files, treating them as advisory background rather than authoritative rules. Untargeted **home** skills (`~/.claude/skills/` etc.) stay skipped, since those are personal general-purpose helpers. Anything in `.pr-review/skills/` is injected unconditionally. Preview it all with `--context-only` (catalog entries show as `(catalog — on-demand)`). See [reviewers vs skills](skills/help/reference/reviewers-vs-skills.md) for the full authoring guide.
 
 ## Built-in reviewers
 

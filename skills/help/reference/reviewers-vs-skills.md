@@ -57,8 +57,9 @@ Special cases:
 - The **verifier** receives the union of all injected skills (including skills routed to `codex`).
 - **Companion agents** receive only skills WITHOUT `inject_into`.
 - **codex** is a routing target like any reviewer: `inject_into: [codex]` works, and its skills are written to `skills-codex.md` in the run dir.
+- **Catalog (untargeted repo shared-dir skills):** a skill in `.claude/`, `.copilot/`, `.github/`, or `.agents/` with no `applies_to`/`inject_into` is not injected — it is listed in a **catalog** section of `pr-context.md` (name + description + path). Every reviewer sees the catalog and reads the entries relevant to the changed files on demand, treating them as **advisory** background (they do not override reviewer criteria or injected rules). In `--context-only`, catalog entries show up as `(catalog — on-demand)`. Untargeted skills in a **home** dir stay skipped.
 
-Limits: skill bodies are capped at 16 KB each, and each `skills-<reviewer>.md` file at 64 KB; truncation warns on stderr. Malformed frontmatter YAML warns on stderr naming the file.
+Limits: injected skill bodies are capped at 16 KB each, and each `skills-<reviewer>.md` file at 64 KB; the catalog section has its own 24 KB budget in `pr-context.md` (one line per skill, description capped at 200 chars). Truncation warns on stderr. Malformed frontmatter YAML warns on stderr naming the file.
 
 ## Previewing routing
 

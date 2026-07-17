@@ -6,25 +6,24 @@ description: How to add a new built-in reviewer agent to pr-review. Use when cre
 
 ## Steps
 
-1. **Create the agent file** at `agents/<name>.md` with frontmatter:
+1. **Create the agent file** at `agents/<name>.md` with frontmatter — **only** `name` and `description`:
    ```yaml
    ---
    name: <name>
    description: One-line description of what this reviewer checks.
-   model: claude-opus-4.8
    ---
    ```
-   Body: review instructions only — the JSON output contract lives in the dispatch prompt, so don't duplicate it in the agent file. Mirror an existing agent (e.g. `agents/security.md`).
+   Do **not** add a `model:` field — built-in agents inherit the session model, which is required for cross-runtime operation (see `AGENTS.md`). Keep the shared skeleton the other agents use: `## What to look for`, `## What NOT to flag`, `## Severity guidelines` (CRITICAL → NIT), and the closing finding-format line. Body is review instructions only — the JSON output contract lives in the dispatch prompt, so don't duplicate it. Mirror an existing agent (e.g. `agents/security.md`).
 
-2. **Register in dispatch** — add `'pr-review:<name>'` to the `BUILTIN_AGENTS` array in `src/dispatch/single-session.ts`.
+2. **Register in dispatch** — add `'pr-review:<name>'` to the `BUILTIN_AGENTS` array in `src/dispatch/single-session.ts`. The `agents-registry` test enforces that `agents/*.md` and `BUILTIN_AGENTS` (+ `verifier`) stay in lockstep, so a missing registration fails `npm run test`.
 
 3. **Build and verify:**
    ```bash
    npm run build
-   node ./dist/cli.js plugins list   # should show the new agent
+   node dist/cli.cjs plugins list   # should show the new agent
    ```
 
-4. **Update docs** — add a row to the built-in reviewers table in `README.md` and `docs/reviewers-and-skills.md`.
+4. **Update docs** — add a row to the built-in reviewers table in `README.md` and to `skills/help/reference/reviewers-vs-skills.md`.
 
 ## Rules
 

@@ -162,10 +162,11 @@ function hasReviewTargeting(s: SkillDefinition): boolean {
   return s.appliesTo.length > 0 || (s.injectInto !== undefined && s.injectInto.length > 0);
 }
 
-export function loadAll(opts: LoadAllOptions): LoadedSet {
+export function loadAll(opts: LoadAllOptions): LoadedSet & { catalog: SkillDefinition[] } {
   const { cwd, config, includeBuiltIn = true, skillsOnly = false } = opts;
   const reviewers: ReviewerDefinition[] = [];
   const skills: SkillDefinition[] = [];
+  const catalog: SkillDefinition[] = [];
 
   if (includeBuiltIn && !skillsOnly) {
     reviewers.push(...loadBuiltInReviewers());
@@ -177,23 +178,39 @@ export function loadAll(opts: LoadAllOptions): LoadedSet {
       const r = loadFromPaths([...paths.repoReviewers, ...paths.personalReviewers], 'reviewer') as ReviewerDefinition[];
       reviewers.push(...r);
     }
-    const allDirs = [...paths.repoSkills, ...paths.personalSkills];
-    const prDirs = allDirs.filter(isPrReviewDir);
-    const genericDirs = allDirs.filter((p) => !isPrReviewDir(p));
-    // .pr-review/skills is review-intent by location — everything loads.
+    // .pr-review/skills is review-intent by location — everything loads (both buckets).
+    const prDirs = [...paths.repoSkills, ...paths.personalSkills].filter(isPrReviewDir);
     skills.push(...(loadFromPaths(prDirs, 'skill') as SkillDefinition[]));
-    // Generic agent-skill dirs (.claude, .copilot, .github, .agents) hold
-    // unrelated skills too; only skills that declare applies_to/inject_into
-    // are review rules — the rest would flood every reviewer's context.
-    const generic = loadFromPaths(genericDirs, 'skill') as SkillDefinition[];
-    const targeted = generic.filter(hasReviewTargeting);
-    const skipped = generic.length - targeted.length;
-    if (skipped > 0) {
+
+    // Generic agent-skill dirs (.claude, .copilot, .github, .agents) also hold
+    // unrelated skills. Targeted ones (applies_to/inject_into) inject as rules.
+    // Untargeted REPO skills are surfaced as an on-demand catalog — reviewers read
+    // the relevant ones themselves — instead of being dropped blind. Untargeted
+    // HOME skills are personal noise (video/design helpers) and stay skipped.
+    const repoGeneric = loadFromPaths(
+      paths.repoSkills.filter((p) => !isPrReviewDir(p)),
+      'skill',
+    ) as SkillDefinition[];
+    skills.push(...repoGeneric.filter(hasReviewTargeting));
+    const repoUntargeted = repoGeneric.filter((s) => !hasReviewTargeting(s));
+    catalog.push(...repoUntargeted);
+    if (repoUntargeted.length > 0) {
       process.stderr.write(
-        `[skills] skipped ${skipped} untargeted skill(s) from shared dirs (.claude/.copilot/.github/.agents) — add applies_to/inject_into frontmatter or move them to .pr-review/skills/ to include them in reviews\n`,
+        `[skills] catalog: ${repoUntargeted.length} untargeted skill(s) from repo shared dirs (.claude/.copilot/.github/.agents) listed for on-demand reading — add applies_to/inject_into or move to .pr-review/skills/ to inject them fully\n`,
       );
     }
-    skills.push(...targeted);
+
+    const personalGeneric = loadFromPaths(
+      paths.personalSkills.filter((p) => !isPrReviewDir(p)),
+      'skill',
+    ) as SkillDefinition[];
+    skills.push(...personalGeneric.filter(hasReviewTargeting));
+    const personalSkipped = personalGeneric.filter((s) => !hasReviewTargeting(s)).length;
+    if (personalSkipped > 0) {
+      process.stderr.write(
+        `[skills] skipped ${personalSkipped} untargeted skill(s) from home shared dirs (~/.claude etc.) — add applies_to/inject_into frontmatter or move them to .pr-review/skills/ to include them in reviews\n`,
+      );
+    }
   }
 
   if (!skillsOnly) {
@@ -224,7 +241,16 @@ export function loadAll(opts: LoadAllOptions): LoadedSet {
     skills.push(...set.skills);
   }
 
-  return dedupeByName({ reviewers, skills });
+  const deduped = dedupeByName({ reviewers, skills });
+  // An injected skill (from .pr-review or a targeted twin) wins over its catalog
+  // entry — the skill is already fully present, so drop the duplicate listing.
+  const injectedNames = new Set(deduped.skills.map((s) => s.name));
+  const catalogMap = new Map<string, SkillDefinition>();
+  for (const s of catalog) {
+    if (injectedNames.has(s.name)) continue;
+    catalogMap.set(s.name, s); // later wins, mirrors skill dedupe
+  }
+  return { ...deduped, catalog: Array.from(catalogMap.values()) };
 }
 
 function dedupeByName(set: LoadedSet): LoadedSet {

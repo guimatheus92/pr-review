@@ -52,6 +52,8 @@ export interface SingleSessionOptions {
   runtime?: Runtime;
   /** When the Codex sibling reviewer will run, route skills to it too. */
   includeCodex?: boolean;
+  /** Untargeted repo shared-dir skills, listed for on-demand reading (not injected). */
+  catalog?: SkillDefinition[];
 }
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
@@ -78,6 +80,12 @@ export function isTransientOrchestratorFailure(stdout: string, stderr = ''): boo
 // a per-run token budget; truncation always warns on stderr.
 const SKILL_BODY_CAP = 16_000;
 const SKILLS_FILE_CAP = 64_000;
+
+// The catalog lists untargeted skills (name + description + path) for on-demand
+// reading; it lives in pr-context.md so it never competes with the injected-skill
+// budget above. One line per skill; the section is capped separately.
+const CATALOG_DESC_CAP = 200;
+const CATALOG_CAP = 24_000;
 
 // ponytail: docs-only heuristic — anything ambiguous dispatches everything.
 const DOCS_ONLY_GLOBS = ['**/*.md', '**/*.markdown', '**/*.txt', '**/*.rst', 'docs/**', 'LICENSE*', 'CHANGELOG*'];
@@ -233,6 +241,33 @@ function writeContextFile(opts: SingleSessionOptions): string {
     metaLines.push(`- ${f.path} (${f.status}, +${f.additions} -${f.deletions})`);
   }
 
+  const catalog = opts.catalog ?? [];
+  if (catalog.length > 0) {
+    metaLines.push(
+      '',
+      `## Workspace Skills Catalog (on-demand)`,
+      '',
+      `These workspace skills were NOT injected. Before reviewing, scan this list; if a`,
+      `skill's description is relevant to the files you are reviewing, read its file with`,
+      `your Read tool. Treat catalog skills as advisory background — they do not override`,
+      `your criteria or the injected project rules.`,
+      '',
+    );
+    let used = 0;
+    let shown = 0;
+    for (const s of catalog) {
+      const desc = (s.description ?? '').replace(/\s+/g, ' ').trim().slice(0, CATALOG_DESC_CAP);
+      const line = desc ? `- **${s.name}** — ${desc} (\`${s.source}\`)` : `- **${s.name}** (\`${s.source}\`)`;
+      if (used + line.length > CATALOG_CAP) {
+        metaLines.push(`_(+${catalog.length - shown} more skills omitted)_`);
+        break;
+      }
+      metaLines.push(line);
+      used += line.length + 1;
+      shown++;
+    }
+  }
+
   metaLines.push('', `## Diff`);
   for (const f of inScope) {
     if (!f.patch) continue;
@@ -325,11 +360,18 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
     if (path) skillsFiles.set('verifier', path);
   }
 
-  const skillRouting: SkillRoute[] = opts.skills.map((s) => ({
-    skill: s.name,
-    source: s.source,
-    targets: [...(routing.get(s.name) ?? [])],
-  }));
+  const skillRouting: SkillRoute[] = [
+    ...opts.skills.map((s) => ({
+      skill: s.name,
+      source: s.source,
+      targets: [...(routing.get(s.name) ?? [])],
+    })),
+    ...(opts.catalog ?? []).map((s) => ({
+      skill: s.name,
+      source: s.source,
+      targets: ['(catalog — on-demand)'],
+    })),
+  ];
 
   const orchestratorPrompt = buildOrchestratorPrompt(opts, {
     contextPath,
@@ -492,7 +534,7 @@ export interface SingleSessionResult {
 /** Reviewer-output artifacts a run writes, in resume-preference order (final consolidation, then salvageable phase-1). */
 export const REVIEWER_OUTPUT_FILES = ['single-session-findings.json', 'phase1-findings.json'] as const;
 
-export function parseFindingsFile(path: string, model: string, durationMs: number, exitCode: number): ReviewerOutput[] {
+export function parseFindingsFile(path: string, model: string, durationMs: number): ReviewerOutput[] {
   const findingsRaw = readFileSync(path, 'utf8');
   const parsed = JSON.parse(findingsRaw) as {
     reviewers?: Array<{ name: string; findings: ReviewerOutput['findings'] }>;
@@ -503,7 +545,10 @@ export function parseFindingsFile(path: string, model: string, durationMs: numbe
     findings: r.findings ?? [],
     rawOutput: '',
     durationMs,
-    exitCode,
+    // A reviewer present in the structured output delivered its payload, so it
+    // succeeded — single-session has no per-reviewer process code to read, and
+    // the orchestrator's own code is signal-killed to -1 after a clean write.
+    exitCode: 0,
   }));
 }
 
@@ -600,7 +645,7 @@ async function attemptOrchestrator(
     // case (calm salvage below) and reserve the loud parse-error log for a
     // file that EXISTS but is corrupt.
     if (!finalExists) throw new Error('consolidated findings file was not written');
-    outputs = parseFindingsFile(ctx.findingsPath, model, durationMs, childResult.exitCode);
+    outputs = parseFindingsFile(ctx.findingsPath, model, durationMs);
     warnIfVerifierMissing(outputs);
   } catch (err) {
     if (finalExists) {
@@ -613,7 +658,7 @@ async function attemptOrchestrator(
     // left when the final write is missing. Only a conditional verifier pass
     // can be absent from it.
     try {
-      outputs = parseFindingsFile(ctx.phase1Path, model, durationMs, childResult.exitCode);
+      outputs = parseFindingsFile(ctx.phase1Path, model, durationMs);
       process.stderr.write(
         finalExists
           ? `[single-session] salvaged findings from ${ctx.phase1Path}\n`
@@ -631,7 +676,8 @@ async function attemptOrchestrator(
             findings: salvaged,
             rawOutput: '',
             durationMs,
-            exitCode: childResult.exitCode,
+            // Findings were recovered; the stderr salvage note is the signal, not a ✗.
+            exitCode: 0,
           },
         ];
         process.stderr.write(`[single-session] salvaged ${salvaged.length} finding(s) from orchestrator stdout\n`);

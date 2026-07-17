@@ -62,3 +62,11 @@ Tests use `node:test` + `node:assert`. Run with `npm run test`. Tests are in `te
 - **Run in the background / check a run:** `pr-review review <url> --detach` returns a run-id immediately; `pr-review status <run-id>` shows the live progress feed, or the summary once done. This is how the slash command avoids the host's ~10-min Bash timeout.
 - **Check the environment:** `pr-review doctor` — runtimes on PATH, resolved runtime/model, codex + companions, provider auth, config sources.
 - **Cut a release:** `node scripts/release.mjs <patch|minor|major|x.y.z>` — bumps every manifest, verifies no stale version string, rolls CHANGELOG, rebuilds, commits and tags (push left to you).
+
+## Maintaining the built-in reviewers
+
+The 7 `agents/*.md` are the generic review criteria shared by every project. Keeping them healthy over time:
+
+- **Project- or stack-specific rules never go in `agents/`.** They belong in a skill (`.pr-review/skills/` or a targeted skill in a shared dir). The built-ins stay stack-agnostic *by construction* — the standalone-reviewer load path is disabled on the review path, so the only way project context enters a review is via skills. A framework name hardcoded into an agent would still slip through, though: **nothing greps for it yet** (see issue #5), so it's on human review.
+- **When you do edit an agent, preserve the shared skeleton:** `## What to look for`, `## What NOT to flag`, `## Severity guidelines` (CRITICAL → HIGH → MEDIUM → LOW → NIT), and the closing "state the rule and the concrete fix" line. The files have drifted (`quality.md` uses "What to flag"; `security.md` has no finding-format trailer) — don't add new drift.
+- **There is no freshness/versioning mechanism.** Agents carry only `name` + `description` (no `model:`, no `version`, no `last-updated`), and `scripts/release.mjs` never touches `agents/`. Freshness is git history + review discipline. If a real production review *misses* something a built-in should have caught, note it; when misses accumulate, distill them into an eval fixture rather than blindly expanding a prompt. The eval harness + content-structure tests + stack-agnostic grep are deferred work tracked in issue #5.

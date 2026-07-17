@@ -93,7 +93,7 @@ test('parseInstalledPluginsJson — claude runtime plugin detection', async () =
   assert.deepEqual(names.sort(), ['code-review', 'codex', 'pr-review-toolkit']);
 });
 
-test('autodiscovery — untargeted skills from generic shared dirs are skipped; .pr-review/skills loads everything', () => {
+test('autodiscovery — untargeted repo shared-dir skills go to catalog; .pr-review and targeted skills still inject', () => {
   const cwd = mkdtempSync(join(tmpdir(), 'pr-review-loader-'));
   const home = mkdtempSync(join(tmpdir(), 'pr-review-loader-home-'));
   try {
@@ -108,9 +108,47 @@ test('autodiscovery — untargeted skills from generic shared dirs are skipped; 
       '---\ndescription: api rules\napplies_to: ["**/*.ts"]\n---\nA real review rule.\n',
     );
     const { config } = loadConfig({ cwd, homeOverride: home });
-    const { skills } = loadAll({ cwd, config, skillsOnly: true, home });
-    const names = skills.map((s) => s.name).sort();
-    assert.deepEqual(names, ['targeted-rule', 'untargeted-pr']);
+    const { skills, catalog } = loadAll({ cwd, config, skillsOnly: true, home });
+    assert.deepEqual(skills.map((s) => s.name).sort(), ['targeted-rule', 'untargeted-pr']);
+    assert.deepEqual(catalog.map((s) => s.name), ['generic-agent-skill']);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('autodiscovery — untargeted HOME shared-dir skills are skipped, not cataloged', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'pr-review-loader-'));
+  const home = mkdtempSync(join(tmpdir(), 'pr-review-loader-home-'));
+  try {
+    const homeClaude = join(home, '.claude', 'skills');
+    mkdirSync(homeClaude, { recursive: true });
+    writeFileSync(join(homeClaude, 'personal-helper.md'), '---\ndescription: personal design helper\n---\nNot a review rule.\n');
+    const { config } = loadConfig({ cwd, homeOverride: home });
+    const { skills, catalog } = loadAll({ cwd, config, skillsOnly: true, home });
+    assert.ok(!skills.some((s) => s.name === 'personal-helper'), 'home untargeted not injected');
+    assert.ok(!catalog.some((s) => s.name === 'personal-helper'), 'home untargeted not cataloged');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('catalog — a name that also exists as an injected skill is dropped from the catalog', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'pr-review-loader-'));
+  const home = mkdtempSync(join(tmpdir(), 'pr-review-loader-home-'));
+  try {
+    const prDir = join(cwd, '.pr-review', 'skills');
+    const claudeDir = join(cwd, '.claude', 'skills');
+    mkdirSync(prDir, { recursive: true });
+    mkdirSync(claudeDir, { recursive: true });
+    // Same name in both: injected via .pr-review (by location), untargeted in .claude.
+    writeFileSync(join(prDir, 'shared-name.md'), 'Injected rule body.\n');
+    writeFileSync(join(claudeDir, 'shared-name.md'), '---\ndescription: dup\n---\nCatalog body.\n');
+    const { config } = loadConfig({ cwd, homeOverride: home });
+    const { skills, catalog } = loadAll({ cwd, config, skillsOnly: true, home });
+    assert.equal(skills.filter((s) => s.name === 'shared-name').length, 1, 'injected once');
+    assert.ok(!catalog.some((s) => s.name === 'shared-name'), 'injected wins; not duplicated in catalog');
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });

@@ -29,14 +29,20 @@ Skills are standard `SKILL.md` reference docs, so they load from every conventio
 | `<repo>/.agents/skills/*.md` | Skills | Per-repo (AGENTS.md universal convention) |
 | `~/.pr-review/skills/*.md`, `~/.claude/skills/*.md`, `~/.copilot/skills/*.md`, `~/.agents/skills/*.md` | Skills | Personal, cross-repo |
 
-**Skills in `.pr-review/skills/` (repo or home) are always included** — the location itself declares review intent. Skills in the shared dirs (`.claude/`, `.copilot/`, `.github/`, `.agents/`) are included **only when they declare review targeting** (`applies_to` and/or `inject_into` frontmatter): those dirs hold general-purpose agent skills too, and pr-review skips untargeted ones (with a stderr note) so they don't flood every reviewer's context. The standard `SKILL.md` frontmatter is what we read:
+**Skills in `.pr-review/skills/` (repo or home) are always injected** — the location itself declares review intent. Skills in the shared dirs (`.claude/`, `.copilot/`, `.github/`, `.agents/`) are handled by where they live and whether they carry targeting:
+
+- **Targeted** (`applies_to` and/or `inject_into`) → injected as a rule, same as a `.pr-review/skills/` skill.
+- **Untargeted, in a repo dir** → listed in an on-demand **catalog** (name + description + path) in the review context. Reviewers read the entries relevant to the changed files themselves; catalog skills are advisory background, not authoritative rules. This means a repo full of general-purpose agent skills is surfaced, not injected wholesale — so it never floods every reviewer's context.
+- **Untargeted, in a home dir** (`~/.claude/skills/` etc.) → skipped (with a stderr note); these are personal general-purpose helpers.
+
+The standard `SKILL.md` frontmatter is what we read:
 
 - `applies_to` (globs) → which in-scope changed files trigger the skill (default: all files)
 - `inject_into` (reviewer short names: `security`, `quality`, `architecture`, `performance`, `test-coverage`, `silent-failure`, `verifier`) → which reviewers see the context (default: all reviewers). Companion agents receive only skills WITHOUT `inject_into`; the verifier receives the union of all injected skills.
 - Any other field (`name`, `allowed-tools`, etc.) is preserved but ignored
 - Malformed frontmatter YAML prints a stderr warning naming the file
 
-Routed skills are written per reviewer to `skills-<reviewer>.md` in the run dir (`~/.pr-review/runs/<id>/`). Skill bodies are capped at 16 KB each and each per-reviewer file at 64 KB — truncation warns on stderr.
+Routed skills are written per reviewer to `skills-<reviewer>.md` in the run dir (`~/.pr-review/runs/<id>/`). Skill bodies are capped at 16 KB each and each per-reviewer file at 64 KB — truncation warns on stderr. The catalog lives in `pr-context.md` under a separate 24 KB budget (one line per skill, description capped at 200 chars), so it never competes with the injected-skill caps.
 
 Use `.pr-review/skills/` when the content is review-specific (it loads unconditionally and stays out of regular agent sessions); add `applies_to`/`inject_into` to a skill in a shared dir when you want one file to serve both your normal agent sessions and pr-review.
 

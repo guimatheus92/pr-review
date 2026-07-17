@@ -4,6 +4,15 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+### Added
+- **Untargeted repo skills are now surfaced as an on-demand catalog instead of being dropped.** A skill in a shared dir (`.claude/`, `.copilot/`, `.github/`, `.agents/`) without `applies_to`/`inject_into` used to be skipped entirely — a workspace full of them reviewed blind (`loaded 0 skill(s)`). Such **repo** skills are now listed in a `## Workspace Skills Catalog` section of `pr-context.md` (name + description + path); every reviewer sees the list and reads the entries relevant to the changed files on demand, treating them as advisory background (they do not override reviewer criteria or injected rules). Injected skills (`.pr-review/skills/` and targeted shared-dir skills) are unchanged and stay authoritative. Untargeted **home** skills (`~/.claude/skills/` etc.) stay skipped as personal noise. The catalog has its own 24 KB budget in `pr-context.md` (one line per skill, description capped at 200 chars), so it never competes with the injected-skill caps; `--context-only` shows catalog entries as `(catalog — on-demand)`.
+
+### Fixed
+- **Single-session summary no longer marks successful reviewers as `✗ exit -1`.** In single-session mode every reviewer inherited the orchestrator's one process exit code, which is `-1` when the CLI is signal-killed after already writing its findings — so a fully-successful run (findings posted, exit 0) rendered all session reviewers `✗ exit -1` while only the sibling `codex` showed `✓`. A reviewer present in the structured output has, by definition, delivered its payload, so `parseFindingsFile` now stamps `exitCode: 0` on parsed reviewers and no longer propagates the orchestrator's process code. `codex` keeps its own real per-process exit code (it can genuinely fail independently).
+
+### Changed
+- **Docs: added a "Maintaining the built-in reviewers" guide** (`AGENTS.md`) and corrected drift in the `add-reviewer` skill (removed a bogus `model:` frontmatter field and a reference to a nonexistent doc). Deferred guardrails (content-structure tests, stack-agnostic grep, eval harness) are tracked in issue #5.
+
 ## [0.1.9] — 2026-07-16
 
 ### Changed

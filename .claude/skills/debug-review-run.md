@@ -19,8 +19,9 @@ Every `pr-review review` writes artifacts to `~/.pr-review/runs/<provider>__<own
 | `phase1-findings.json` | Phase 1 findings; the verifier reads this when it's dispatched (only on CRITICAL/HIGH) |
 | `single-session-findings.json` | Raw consolidated findings from the orchestrator |
 | `raw-<reviewer>.json` | Per-reviewer parsed findings |
+| `skill-routing.json` | The skill→reviewer routing (injected skills + catalog), persisted at dispatch so `--resume` can still render the summary's Skills section |
 | `pr-review-findings.json` | Final findings after dedupe |
-| `pr-review-summary.md` | The rendered summary |
+| `pr-review-summary.md` | The rendered summary — reviewer table, a `## Skills` section (injected skills + catalog count), and the findings |
 
 ## Common issues
 
@@ -55,6 +56,7 @@ Every `pr-review review` writes artifacts to `~/.pr-review/runs/<provider>__<own
 **Skills not reaching a reviewer:**
 1. Run `pr-review review <url> --context-only` — prints the skill→reviewer routing table without spawning the runtime (the reviewers line shows "+ codex (sibling process)" when codex would run).
 2. Check `skills-<reviewer>.md` in the run dir; watch stderr for truncation warnings (16 KB per skill body, 64 KB per file) or malformed-frontmatter warnings naming the file.
+3. A live run also reports this without `--context-only`: a `## Skills` block on stderr at dispatch (also in `detached.log`) and the `## Skills` section of `pr-review-summary.md` / `skill-routing.json`. An untargeted repo skill shows up under "Catalog (on-demand)" (not injected) — add `applies_to`/`inject_into` to inject it.
 
 **Cache serving stale data:**
 1. `pr-review cache info` shows what's cached.

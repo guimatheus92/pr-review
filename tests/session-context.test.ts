@@ -263,6 +263,23 @@ test('catalog — renders name/description/path in pr-context.md; body never inj
   }
 });
 
+test('skill-routing.json — persisted at dispatch time, equal to ctx.skillRouting (for --resume)', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const skills: SkillDefinition[] = [
+      { name: 'sec-rules', source: 's1.md', body: 'b', appliesTo: ['**/*.ts'], injectInto: ['security'] },
+    ];
+    const catalog: SkillDefinition[] = [
+      { name: 'pp-billing', source: '/abs/pp-billing.md', body: 'b', appliesTo: [], description: 'billing' },
+    ];
+    const ctx = prepareSessionContext({ ...baseOpts(outDir, ['src/app.ts'], skills), catalog });
+    const persisted = JSON.parse(readFileSync(join(outDir, 'skill-routing.json'), 'utf8'));
+    assert.deepEqual(persisted, ctx.skillRouting);
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
 test('catalog — routing table rows carry the (catalog — on-demand) target', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {

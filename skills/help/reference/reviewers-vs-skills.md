@@ -69,6 +69,12 @@ pr-review review <pr-url> --context-only
 
 Prepares `pr-context.md` + the per-reviewer skills files and prints a skill→reviewer routing table — without spawning the runtime. The reviewers line shows "+ codex (sibling process)" when the Codex reviewer would run. This is the recommended way to test a skill.
 
+## Skills in the run summary
+
+A live run reports which skills it used, so you don't have to preview separately:
+- **At the start** (dispatch) it prints a `## Skills` block to stderr (foreground console / `detached.log`) and folds a count into the progress feed (`N skill(s) → M reviewer(s) · K catalog`), which `pr-review status` surfaces.
+- **At the end** the `pr-review-summary.md` carries the same `## Skills` section: a totals line (`Injected: N (into M reviewers) · Catalog (on-demand): K`) plus a table of the injected skills and which reviewers each reached (`verifier` omitted — it always gets the union). Catalog skills are counted, not listed by name. A `--resume` reproduces the section from the `skill-routing.json` the live run persisted (absent → section omitted).
+
 ## Common confusion to avoid
 
 - **"My docs are skills, not reviewers"** — yes, that's the default. Drop them in `.pr-review/skills/` and they'll be injected automatically.

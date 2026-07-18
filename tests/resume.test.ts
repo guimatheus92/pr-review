@@ -128,6 +128,30 @@ test('resume — a partial prior post (posted < attempted) is retried, not skipp
   }
 });
 
+test('resume — Skills section: omitted when skill-routing.json is absent, rendered when present', async () => {
+  const noRouting = seedRun(ONE);
+  try {
+    const r = await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: noRouting, publish: false, dryRun: true, provider: fakeProvider().provider });
+    assert.ok(!r.summary.includes('## Skills'), 'no routing artifact → Skills section omitted (degrades)');
+  } finally {
+    rmSync(noRouting, { recursive: true, force: true });
+  }
+
+  const withRouting = seedRun(ONE);
+  try {
+    writeFileSync(
+      join(withRouting, 'skill-routing.json'),
+      JSON.stringify([{ skill: 'sec-rules', source: 's', targets: ['security', 'verifier'] }]),
+      'utf8',
+    );
+    const r = await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: withRouting, publish: false, dryRun: true, provider: fakeProvider().provider });
+    assert.ok(r.summary.includes('## Skills'), 'routing artifact present → Skills section rendered');
+    assert.ok(r.summary.includes('| sec-rules | security |'), 'injected skill row present on resume');
+  } finally {
+    rmSync(withRouting, { recursive: true, force: true });
+  }
+});
+
 test('resume — missing gather and missing reviewer output each error clearly', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pr-resume-'));
   try {

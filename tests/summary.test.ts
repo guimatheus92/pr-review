@@ -50,6 +50,20 @@ test('summarizeSkills: an injected skill matching no files/reviewers shows the p
   assert.ok(section.join('\n').includes('| tsx-only | — (no matching files) |'));
 });
 
+test('summarizeSkills: transparency note makes clear catalog ≠ ignored', () => {
+  // with injected + catalog
+  const mixed = summarizeSkills(ROUTING).section.join('\n');
+  assert.ok(/available on-demand/.test(mixed) && /not ignored/i.test(mixed), mixed);
+
+  // injected 0 but catalog present — the alarming case
+  const onlyCatalog = summarizeSkills([{ skill: 'pp-x', source: 's', targets: [CATALOG_TARGET] }]).section.join('\n');
+  assert.ok(/Injected:\*\* 0/.test(onlyCatalog));
+  assert.ok(/available on-demand/.test(onlyCatalog) && /Not ignored/i.test(onlyCatalog), onlyCatalog);
+
+  // no skills at all → no note sentence (the "Catalog (on-demand)" label alone doesn't count)
+  assert.ok(!/available on-demand/.test(summarizeSkills([]).section.join('\n')));
+});
+
 test('renderSummary: includes the Skills section when routing is passed, omits it otherwise', () => {
   const withSkills = renderSummary('u', [output({ reviewerName: 'security' })], [], 0, 1000, undefined, ROUTING);
   assert.ok(withSkills.includes('## Skills'), 'Skills section present');

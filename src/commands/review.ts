@@ -136,6 +136,15 @@ export function summarizeSkills(skillRouting: SkillRoute[]): { section: string[]
       section.push(`| ${r.skill} | ${label} |`);
     }
   }
+  if (catalog.length > 0) {
+    // Make clear that catalog ≠ ignored — "Injected: 0" must not read as "skills unused".
+    section.push(
+      ``,
+      injected.length > 0
+        ? `_Injected skills matched the changed files. The other ${catalog.length} are available on-demand — reviewers open the relevant ones as needed; not ignored._`
+        : `_${catalog.length} skill(s) available on-demand — reviewers open the relevant ones as needed (none matched the changed files strongly enough to force-inject). Not ignored._`,
+    );
+  }
   section.push('');
   return { section, brief };
 }
@@ -474,8 +483,11 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   // Single-session mode dispatches runtime-registered agents only; user-authored
   // context goes in skills, so reviewer .md loading is skipped entirely.
   const loaded = loadAll({ cwd, config, skillsOnly: true });
-  const catalogNote = loaded.catalog.length > 0 ? `, ${loaded.catalog.length} catalog entr${loaded.catalog.length === 1 ? 'y' : 'ies'}` : '';
-  process.stderr.write(`[review] loaded ${loaded.skills.length} skill(s)${catalogNote}\n`);
+  // Discovery count only — the relevant ones are injected per-change by the heuristic in
+  // prepareSessionContext, and the accurate injected/catalog split is reported in the
+  // `## Skills` summary block. (Don't print an "injected" number here — it would read 0.)
+  const discovered = loaded.skills.length + loaded.catalog.length;
+  process.stderr.write(`[review] discovered ${discovered} project skill(s) — relevant ones injected per change (see the Skills summary)\n`);
 
   const sessionOpts = {
     prUrl: opts.prUrl,

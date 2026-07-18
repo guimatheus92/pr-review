@@ -36,7 +36,7 @@ Built-in reviewers are `.md` files at `agents/<name>.md`, registered in `BUILTIN
 
 ## Authoring a plugin (for distribution)
 
-Most users just drop `.md` files in `.pr-review/skills/`. Only package as a plugin when distributing to other teams.
+Most users just drop `.md` files in a standard tool skill dir (`.claude/skills/`, `.copilot/skills/`, `.github/skills/`, `.agents/skills/`). Only package as a plugin when distributing to other teams.
 
 ```
 my-shared-pack/

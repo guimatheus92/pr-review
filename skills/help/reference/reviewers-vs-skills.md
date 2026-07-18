@@ -20,7 +20,7 @@ Passive reference material. The tool injects matching skills into other reviewer
 
 Example: `our-auth-conventions.md` skill with `applies_to: ["**/*Controller.cs"]` — when the built-in `security` reviewer runs against a PR touching `*Controller.cs`, this skill's content is **written into the security reviewer's skills file** (`skills-security.md` in the run dir) and injected as context. The security reviewer evaluates the diff against BOTH generic security criteria AND your team's auth rules, producing one integrated set of findings.
 
-Authored as: a `.md` file in `.pr-review/skills/` (per-repo) or `~/.pr-review/skills/` (personal, cross-repo).
+Authored as: a `.md` file in a standard skill dir — `.claude/skills/`, `.copilot/skills/`, `.github/skills/`, or `.agents/skills/` (per-repo), or the same under `~/` (personal, cross-repo).
 
 ## Which type to author
 
@@ -46,18 +46,20 @@ Valid `inject_into` names are the reviewer short names: `security`, `quality`, `
 
 ## The injection rule
 
-`prepareSessionContext` (in `src/dispatch/single-session.ts`) routes each skill. A skill reaches a reviewer only if:
+`prepareSessionContext` (in `src/dispatch/single-session.ts`) routes each repo skill one of two ways:
 
-1. `inject_into` is empty, or contains the reviewer's short name, AND
-2. `applies_to` globs are empty, or match at least one in-scope changed file.
+- **Explicitly targeted** — the skill declares `applies_to` and/or `inject_into`. It is **injected** authoritatively, bypassing the relevance heuristic: it reaches a reviewer when `inject_into` is empty or names that reviewer, AND `applies_to` is empty or matches at least one in-scope changed file.
+- **Untargeted** — no `applies_to`/`inject_into`. The tool runs a relevance heuristic, matching the skill's `name` + `description` against the changed file paths and the diff (accent-insensitive, stem/prefix matching, so Portuguese "planos/créditos" matches English `plans`/`Credits`). A **match** injects the full body into every reviewer; **no match** lists the skill in the on-demand **catalog** instead. Either way the skill is used — injected when relevant, catalogued otherwise.
 
-Matching skills are written to one `skills-<reviewer>.md` file per reviewer in the run dir (`~/.pr-review/runs/<id>/`) — the shared `pr-context.md` no longer embeds skills. The reviewer evaluates the diff against its own criteria PLUS the injected skill content.
+Injected skills are written to one `skills-<reviewer>.md` file per reviewer in the run dir (`~/.pr-review/runs/<id>/`) — the shared `pr-context.md` no longer embeds skills. The reviewer evaluates the diff against its own criteria PLUS the injected skill content.
 
 Special cases:
 - The **verifier** receives the union of all injected skills (including skills routed to `codex`).
 - **Companion agents** receive only skills WITHOUT `inject_into`.
 - **codex** is a routing target like any reviewer: `inject_into: [codex]` works, and its skills are written to `skills-codex.md` in the run dir.
-- **Catalog (untargeted repo shared-dir skills):** a skill in `.claude/`, `.copilot/`, `.github/`, or `.agents/` with no `applies_to`/`inject_into` is not injected — it is listed in a **catalog** section of `pr-context.md` (name + description + path). Every reviewer sees the catalog and reads the entries relevant to the changed files on demand, treating them as **advisory** background (they do not override reviewer criteria or injected rules). In `--context-only`, catalog entries show up as `(catalog — on-demand)`. Untargeted skills in a **home** dir stay skipped.
+- **Catalog:** a section of `pr-context.md` (name + description + path) holding every untargeted skill that didn't match the relevance heuristic. Every reviewer sees the catalog and reads the entries relevant to the changed files on demand, treating them as **advisory** background (they do not override reviewer criteria or injected rules). In `--context-only`, catalog entries show up as `(catalog — on-demand)`.
+- **Untargeted home skills** (`~/.claude/skills/` etc.) are skipped entirely (with a stderr note) — personal general-purpose helpers, not review content.
+- **Force a whole dir:** `extra_skills_dirs`, `--skills-dir`, or `PR_REVIEW_SKILLS_DIR` inject every skill in a directory unconditionally, bypassing the heuristic.
 
 Limits: injected skill bodies are capped at 16 KB each, and each `skills-<reviewer>.md` file at 64 KB; the catalog section has its own 24 KB budget in `pr-context.md` (one line per skill, description capped at 200 chars). Truncation warns on stderr. Malformed frontmatter YAML warns on stderr naming the file.
 
@@ -77,6 +79,6 @@ A live run reports which skills it used, so you don't have to preview separately
 
 ## Common confusion to avoid
 
-- **"My docs are skills, not reviewers"** — yes, that's the default. Drop them in `.pr-review/skills/` and they'll be injected automatically.
+- **"My docs are skills, not reviewers"** — yes, that's the default. Drop them in a skill dir (`.claude/skills/` etc.); the ones relevant to a PR are injected automatically, the rest are catalogued.
 - **"Will the built-in `performance` reviewer see my team's performance rules?"** — yes, if you put them in a skill whose `applies_to` globs match at least one in-scope changed file (and whose `inject_into`, if set, includes `performance`). Verify with `--context-only`.
 - **"Do I need a `plugin.yaml`?"** — no. That's only for packaging a reviewer/skill pack to distribute to other teams.

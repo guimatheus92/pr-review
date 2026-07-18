@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadAll } from '../src/plugins/loader.js';
@@ -10,7 +10,7 @@ import { loadConfig } from '../src/config.js';
 function tmpRepoWithSkills(): { cwd: string; home: string } {
   const cwd = mkdtempSync(join(tmpdir(), 'pr-review-loader-'));
   const home = mkdtempSync(join(tmpdir(), 'pr-review-loader-home-'));
-  const skillsDir = join(cwd, '.pr-review', 'skills');
+  const skillsDir = join(cwd, 'team-skills');
   mkdirSync(skillsDir, { recursive: true });
   writeFileSync(
     join(skillsDir, 'team-rules.md'),
@@ -31,7 +31,7 @@ test('loadAll — discovers flat .md and SKILL.md dirs, parses targeting frontma
     const { config } = loadConfig({
       cwd,
       homeOverride: home,
-      cliOverrides: { autodiscover: false, skillsDirs: [join(cwd, '.pr-review', 'skills')] },
+      cliOverrides: { autodiscover: false, skillsDirs: [join(cwd, 'team-skills')] },
     });
     const { skills } = loadAll({ cwd, config, skillsOnly: true });
     const names = skills.map((s) => s.name).sort();
@@ -55,7 +55,7 @@ test('loadAll — skill name collision: later wins', () => {
     const { config } = loadConfig({
       cwd,
       homeOverride: home,
-      cliOverrides: { autodiscover: false, skillsDirs: [join(cwd, '.pr-review', 'skills'), extraDir] },
+      cliOverrides: { autodiscover: false, skillsDirs: [join(cwd, 'team-skills'), extraDir] },
     });
     const { skills } = loadAll({ cwd, config, skillsOnly: true });
     const team = skills.filter((s) => s.name === 'team-rules');
@@ -93,15 +93,12 @@ test('parseInstalledPluginsJson — claude runtime plugin detection', async () =
   assert.deepEqual(names.sort(), ['code-review', 'codex', 'pr-review-toolkit']);
 });
 
-test('autodiscovery — untargeted repo shared-dir skills go to catalog; .pr-review and targeted skills still inject', () => {
+test('autodiscovery — untargeted repo skills go to catalog; targeted skills inject; no .pr-review concept', () => {
   const cwd = mkdtempSync(join(tmpdir(), 'pr-review-loader-'));
   const home = mkdtempSync(join(tmpdir(), 'pr-review-loader-home-'));
   try {
-    const prDir = join(cwd, '.pr-review', 'skills');
     const claudeDir = join(cwd, '.claude', 'skills');
-    mkdirSync(prDir, { recursive: true });
     mkdirSync(claudeDir, { recursive: true });
-    writeFileSync(join(prDir, 'untargeted-pr.md'), 'Review rule with no frontmatter.\n');
     writeFileSync(join(claudeDir, 'generic-agent-skill.md'), '---\ndescription: video editing helper\n---\nNot a review rule.\n');
     writeFileSync(
       join(claudeDir, 'targeted-rule.md'),
@@ -109,8 +106,8 @@ test('autodiscovery — untargeted repo shared-dir skills go to catalog; .pr-rev
     );
     const { config } = loadConfig({ cwd, homeOverride: home });
     const { skills, catalog } = loadAll({ cwd, config, skillsOnly: true, home });
-    assert.deepEqual(skills.map((s) => s.name).sort(), ['targeted-rule', 'untargeted-pr']);
-    assert.deepEqual(catalog.map((s) => s.name), ['generic-agent-skill']);
+    assert.deepEqual(skills.map((s) => s.name).sort(), ['targeted-rule'], 'only the targeted skill injects');
+    assert.deepEqual(catalog.map((s) => s.name), ['generic-agent-skill'], 'untargeted repo skill → catalog');
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
@@ -134,21 +131,57 @@ test('autodiscovery — untargeted HOME shared-dir skills are skipped, not catal
   }
 });
 
-test('catalog — a name that also exists as an injected skill is dropped from the catalog', () => {
+test('catalog — a name that also exists as a targeted (injected) skill is dropped from the catalog', () => {
   const cwd = mkdtempSync(join(tmpdir(), 'pr-review-loader-'));
   const home = mkdtempSync(join(tmpdir(), 'pr-review-loader-home-'));
   try {
-    const prDir = join(cwd, '.pr-review', 'skills');
+    const copilotDir = join(cwd, '.copilot', 'skills');
     const claudeDir = join(cwd, '.claude', 'skills');
-    mkdirSync(prDir, { recursive: true });
+    mkdirSync(copilotDir, { recursive: true });
     mkdirSync(claudeDir, { recursive: true });
-    // Same name in both: injected via .pr-review (by location), untargeted in .claude.
-    writeFileSync(join(prDir, 'shared-name.md'), 'Injected rule body.\n');
+    // Same name: targeted (frontmatter → injected) in one dir, untargeted in another.
+    writeFileSync(join(copilotDir, 'shared-name.md'), '---\ndescription: t\ninject_into: [security]\n---\nInjected rule body.\n');
     writeFileSync(join(claudeDir, 'shared-name.md'), '---\ndescription: dup\n---\nCatalog body.\n');
     const { config } = loadConfig({ cwd, homeOverride: home });
     const { skills, catalog } = loadAll({ cwd, config, skillsOnly: true, home });
     assert.equal(skills.filter((s) => s.name === 'shared-name').length, 1, 'injected once');
     assert.ok(!catalog.some((s) => s.name === 'shared-name'), 'injected wins; not duplicated in catalog');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('discovery — a symlinked mirror dir does not double-count skills (realpath dedupe)', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'pr-review-loader-'));
+  const home = mkdtempSync(join(tmpdir(), 'pr-review-loader-home-'));
+  try {
+    const claudeDir = join(cwd, '.claude', 'skills');
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(join(claudeDir, 'alpha.md'), '---\ndescription: a\n---\nA\n');
+    writeFileSync(join(claudeDir, 'beta.md'), '---\ndescription: b\n---\nB\n');
+    mkdirSync(join(cwd, '.agents'), { recursive: true });
+    // .agents/skills → symlink/junction to .claude/skills (the real double-count trigger).
+    try {
+      symlinkSync(claudeDir, join(cwd, '.agents', 'skills'), 'junction');
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'EPERM' || code === 'EACCES' || code === 'ENOSYS') return; // no symlink perms → skip
+      throw err;
+    }
+    const captured: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as unknown as { write: (s: string) => boolean }).write = (s: string) => (captured.push(String(s)), true);
+    let catalog;
+    try {
+      const { config } = loadConfig({ cwd, homeOverride: home });
+      catalog = loadAll({ cwd, config, skillsOnly: true, home }).catalog;
+    } finally {
+      process.stderr.write = orig;
+    }
+    assert.deepEqual(catalog.map((s) => s.name).sort(), ['alpha', 'beta'], 'each skill appears once');
+    const note = captured.find((l) => l.includes('project skill(s)'));
+    assert.ok(note && /\b2 project skill/.test(note), `count should be 2 (not 4), got: ${note}`);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });

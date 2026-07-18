@@ -21,7 +21,7 @@ Use `pr-review config show` to see the effective merged config and where each se
 ```bash
 pr-review configure ~/my-reviews    # quick: sets primary path in ~/.pr-review/config.yaml
 pr-review configure                 # interactive: prompts for model, paths, etc.
-pr-review init                      # scaffold .pr-review/skills/ in current repo
+pr-review init                      # scaffold a starter team-rules skill in current repo
 pr-review init --with-config        # also writes .pr-review.yaml
 ```
 
@@ -65,6 +65,7 @@ diff_excludes:
 | `PR_REVIEW_RUNTIME` | `runtime` (also `--runtime <copilot\|claude\|auto>`; default `auto`) |
 | `PR_REVIEW_DEFAULT_MODEL` | `default_model` |
 | `PR_REVIEW_LANG` | `language` (also settable via `--lang <code>`; default `en`) |
+| `PR_REVIEW_SKILLS_DIR` | extra skills dir, injected unconditionally (also `--skills-dir`, yaml `extra_skills_dirs`) |
 | `PR_REVIEW_NO_COMPANION_WARN` | `companion_warn: false` |
 | `PR_REVIEW_NO_CODEX` | `invoke_codex: false` (also `--no-codex`) |
 | `GITHUB_TOKEN` / `GH_TOKEN` / `COPILOT_GITHUB_TOKEN` | GitHub auth |
@@ -76,11 +77,10 @@ Skills are auto-discovered from standard locations — no config needed:
 
 | Path | Scope |
 |---|---|
-| `<repo>/.pr-review/skills/*.md` | Per-repo |
 | `<repo>/.claude/skills/*.md` | Claude Code convention |
 | `<repo>/.copilot/skills/*.md` | Copilot CLI convention |
 | `<repo>/.github/skills/*.md` | GitHub convention |
 | `<repo>/.agents/skills/*.md` | AGENTS.md convention |
-| `~/.pr-review/skills/`, `~/.claude/skills/`, `~/.copilot/skills/`, `~/.agents/skills/` | Personal |
+| `~/.claude/skills/`, `~/.copilot/skills/`, `~/.agents/skills/` | Personal |
 
-Existing skills from Claude Code or Copilot CLI work as-is — no copying needed.
+Existing skills from Claude Code or Copilot CLI work as-is — no copying needed. Per PR, repo skills relevant to the changed files are injected and the rest are catalogued (on-demand). To force every skill in a directory injected unconditionally, point `extra_skills_dirs` (or `--skills-dir` / `PR_REVIEW_SKILLS_DIR`) at it — e.g. `extra_skills_dirs: [.claude/skills]`. Untargeted skills in a home dir are skipped unless pulled in this way.

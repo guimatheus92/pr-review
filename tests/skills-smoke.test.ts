@@ -9,7 +9,7 @@ import { prepareSessionContext } from '../src/dispatch/single-session.js';
 import type { GatherOutput } from '../src/types.js';
 
 // End-to-end smoke test for the "skills as context" core value: a project-specific
-// business rule — deliberately UNRELATED to any stack — authored in .pr-review/skills/
+// business rule — deliberately UNRELATED to any stack — authored in .claude/skills/
 // must be discovered from disk, routed by its frontmatter, and injected verbatim into
 // exactly the targeted reviewers' context files. This chains loadAll (discovery) →
 // prepareSessionContext (routing/injection), the two halves the other tests cover only
@@ -67,17 +67,17 @@ test('skills smoke — a stack-agnostic business rule flows disk → discovery �
   const home = mkdtempSync(join(tmpdir(), 'pr-review-smoke-home-')); // empty → no global skills leak
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-smoke-out-'));
   try {
-    const skillsDir = join(cwd, '.pr-review', 'skills');
+    const skillsDir = join(cwd, '.claude', 'skills');
     mkdirSync(skillsDir, { recursive: true });
     writeFileSync(join(skillsDir, 'db-access-layer.md'), RULE_BODY);
 
-    // Discovery: autodiscover picks up .pr-review/skills; homeOverride keeps the dev's
-    // real ~/.claude/skills out of the test.
+    // Discovery: autodiscover reads skills from the tool dir (.claude/skills); the rule
+    // is targeted (inject_into) so it injects. homeOverride keeps the dev's real skills out.
     const { config } = loadConfig({ cwd, homeOverride: home });
     const { skills } = loadAll({ cwd, config, skillsOnly: true, home });
 
     const rule = skills.find((s) => s.name === 'db-access-layer');
-    assert.ok(rule, 'the rule must be discovered from .pr-review/skills');
+    assert.ok(rule, 'the targeted rule must be discovered and injected');
     assert.deepEqual(rule!.injectInto, ['architecture', 'security']);
     assert.deepEqual(rule!.appliesTo, ['src/**/*.ts']);
 

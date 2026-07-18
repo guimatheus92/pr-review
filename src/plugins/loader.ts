@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import type { ReviewerDefinition, SkillDefinition } from '../types.js';
@@ -47,12 +47,22 @@ function walkMdFiles(root: string): string[] {
   return out;
 }
 
+/** Resolve to the real (symlink-followed) path so the same file reached via a
+ *  symlinked dir dedupes to one entry. Falls back to lexical resolve on error. */
+function realpathSafe(f: string): string {
+  try {
+    return realpathSync(f);
+  } catch {
+    return resolve(f);
+  }
+}
+
 function loadFromPaths(paths: string[], kind: 'reviewer' | 'skill'): (ReviewerDefinition | SkillDefinition)[] {
   const files: string[] = [];
   for (const p of paths) files.push(...walkMdFiles(p));
   const seen = new Set<string>();
   const unique = files.filter((f) => {
-    const norm = resolve(f);
+    const norm = realpathSafe(f);
     if (seen.has(norm)) return false;
     seen.add(norm);
     return true;
@@ -153,11 +163,7 @@ export interface LoadAllOptions {
   home?: string;
 }
 
-function isPrReviewDir(p: string): boolean {
-  return /[\/\\]\.pr-review[\/\\]skills$/.test(p);
-}
-
-/** A skill from a generic shared dir must declare review intent via targeting frontmatter. */
+/** A skill opts into explicit (authoritative) routing via targeting frontmatter. */
 function hasReviewTargeting(s: SkillDefinition): boolean {
   return s.appliesTo.length > 0 || (s.injectInto !== undefined && s.injectInto.length > 0);
 }
@@ -178,37 +184,29 @@ export function loadAll(opts: LoadAllOptions): LoadedSet & { catalog: SkillDefin
       const r = loadFromPaths([...paths.repoReviewers, ...paths.personalReviewers], 'reviewer') as ReviewerDefinition[];
       reviewers.push(...r);
     }
-    // .pr-review/skills is review-intent by location — everything loads (both buckets).
-    const prDirs = [...paths.repoSkills, ...paths.personalSkills].filter(isPrReviewDir);
-    skills.push(...(loadFromPaths(prDirs, 'skill') as SkillDefinition[]));
-
-    // Generic agent-skill dirs (.claude, .copilot, .github, .agents) also hold
-    // unrelated skills. Targeted ones (applies_to/inject_into) inject as rules.
-    // Untargeted REPO skills are surfaced as an on-demand catalog — reviewers read
-    // the relevant ones themselves — instead of being dropped blind. Untargeted
-    // HOME skills are personal noise (video/design helpers) and stay skipped.
-    const repoGeneric = loadFromPaths(
-      paths.repoSkills.filter((p) => !isPrReviewDir(p)),
-      'skill',
-    ) as SkillDefinition[];
+    // Skills live where the agent tools keep them (.claude, .copilot, .github,
+    // .agents) — read them from there, never moved or duplicated. A skill that
+    // declares targeting (applies_to/inject_into) injects as an explicit rule.
+    // The rest of the REPO skills become the catalog: the review matches each
+    // against the changed files and injects the relevant ones (see skill-match),
+    // leaving the tail available on-demand. Untargeted HOME skills are personal
+    // general-purpose helpers (video/design) — not review content — so skipped.
+    const repoGeneric = loadFromPaths(paths.repoSkills, 'skill') as SkillDefinition[];
     skills.push(...repoGeneric.filter(hasReviewTargeting));
     const repoUntargeted = repoGeneric.filter((s) => !hasReviewTargeting(s));
     catalog.push(...repoUntargeted);
     if (repoUntargeted.length > 0) {
       process.stderr.write(
-        `[skills] catalog: ${repoUntargeted.length} untargeted skill(s) from repo shared dirs (.claude/.copilot/.github/.agents) listed for on-demand reading — add applies_to/inject_into or move to .pr-review/skills/ to inject them fully\n`,
+        `[skills] ${repoUntargeted.length} project skill(s) from repo dirs (.claude/.copilot/.github/.agents) — relevant ones injected per change, the rest available on-demand\n`,
       );
     }
 
-    const personalGeneric = loadFromPaths(
-      paths.personalSkills.filter((p) => !isPrReviewDir(p)),
-      'skill',
-    ) as SkillDefinition[];
+    const personalGeneric = loadFromPaths(paths.personalSkills, 'skill') as SkillDefinition[];
     skills.push(...personalGeneric.filter(hasReviewTargeting));
     const personalSkipped = personalGeneric.filter((s) => !hasReviewTargeting(s)).length;
     if (personalSkipped > 0) {
       process.stderr.write(
-        `[skills] skipped ${personalSkipped} untargeted skill(s) from home shared dirs (~/.claude etc.) — add applies_to/inject_into frontmatter or move them to .pr-review/skills/ to include them in reviews\n`,
+        `[skills] skipped ${personalSkipped} personal skill(s) from home dirs (~/.claude etc.) — not used for review (add applies_to/inject_into to a repo skill to inject it)\n`,
       );
     }
   }
@@ -242,8 +240,8 @@ export function loadAll(opts: LoadAllOptions): LoadedSet & { catalog: SkillDefin
   }
 
   const deduped = dedupeByName({ reviewers, skills });
-  // An injected skill (from .pr-review or a targeted twin) wins over its catalog
-  // entry — the skill is already fully present, so drop the duplicate listing.
+  // A targeted/explicit skill wins over its catalog twin — it's already fully
+  // present in the injected set, so drop the duplicate catalog listing.
   const injectedNames = new Set(deduped.skills.map((s) => s.name));
   const catalogMap = new Map<string, SkillDefinition>();
   for (const s of catalog) {

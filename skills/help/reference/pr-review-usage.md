@@ -49,7 +49,7 @@ Posting line comments back to the PR is the default. Add `--dry-run` to preview 
 1. Detects the provider from the URL (GitHub or ADO)
 2. Gathers PR metadata, diff, linked work items, existing comments — metadata and comments fetched in parallel, cached for re-runs
 3. Triages deterministically: docs-only PRs (all in-scope files are docs) dispatch only the `quality` reviewer; skipped reviewers are logged
-4. Prepares the run dir: `pr-context.md` plus one `skills-<reviewer>.md` per reviewer containing the skills routed to it (`inject_into` + `applies_to` matching)
+4. Prepares the run dir: `pr-context.md` plus one `skills-<reviewer>.md` per reviewer containing the skills routed to it — repo skills relevant to the changed files are injected (or pinned explicitly via `inject_into` + `applies_to`); the rest go to an on-demand catalog in `pr-context.md`
 5. Spawns one agent session (Copilot CLI or Claude Code, per `--runtime`; default `auto` picks whichever is on PATH, copilot first) that dispatches all reviewers in parallel via `task()` / `Task()`; the verifier is dispatched only if Phase 1 produced a CRITICAL/HIGH finding. If the `codex` CLI is installed, a Codex second-opinion reviewer runs in parallel as a sibling process (opt out with `--no-codex`)
 6. De-duplicates findings against existing comments
 7. Posts **every** finding as a resolvable inline review comment (default) — lines are snapped to the diff, GitHub comments go as one batched review, and findings that can't anchor where they point are re-anchored to the first valid diff line with the original `file:line` in the body. Never a top-level comment, nothing dropped. `--dry-run` prints the summary instead
@@ -60,7 +60,7 @@ Exit codes: `0` clean, `1` findings at/above the `--fail-on` threshold survived 
 
 ## Add or remove review content
 
-Drop `.md` files in `.pr-review/skills/` (reference content injected into the built-in reviewers). The tool picks them up automatically. Standalone reviewer files in `.pr-review/reviewers/` are **not** loaded by the single-session review path — author skills instead. To remove a built-in reviewer, use `--skip <name>` per-invocation or `skip_reviewers:` in config. To test where a skill routes, run with `--context-only`.
+Drop `.md` files in a standard tool skill dir (`.claude/skills/`, `.copilot/skills/`, `.github/skills/`, `.agents/skills/`). The tool picks them up automatically and injects the ones relevant to each PR (the rest land in an on-demand catalog); `applies_to`/`inject_into` frontmatter optionally pins the routing. Standalone reviewer files are **not** loaded by the single-session review path — author skills instead. To remove a built-in reviewer, use `--skip <name>` per-invocation or `skip_reviewers:` in config. To test where a skill routes, run with `--context-only`.
 
 Full lifecycle (list, add, remove) in the `adding-your-own-md` skill. The seven built-in reviewers and how to manage them are in [README.md](../../README.md#managing-reviewers).
 

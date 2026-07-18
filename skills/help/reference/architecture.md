@@ -49,7 +49,7 @@ src/
 │   ├── post.ts              # snapFindingsToDiff (snap + re-anchor: every finding lands inline) + batched posting with retry/backoff
 │   ├── status.ts            # `status <run-id>`: live progress snapshot / summary / resume hint (--detach poll target)
 │   ├── detach.ts            # `review --detach`: spawn a detached background run, return its run-id
-│   ├── init.ts              # scaffold .pr-review/skills/ in a repo
+│   ├── init.ts              # scaffold a starter team-rules skill in a repo
 │   ├── configure.ts         # write ~/.pr-review/config.yaml
 │   ├── plugins.ts           # `plugins list` / `plugins doctor`
 │   ├── cache.ts             # `cache info` / `cache clear`

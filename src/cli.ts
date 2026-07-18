@@ -244,7 +244,7 @@ program
 
 program
   .command('init')
-  .description('Scaffold .pr-review/skills/ in the current repo')
+  .description('Scaffold a starter review skill (.claude/skills/team-rules.md) in the current repo')
   .option('--force', 'Overwrite existing files', false)
   .option('--with-config', 'Also write a starter .pr-review.yaml', false)
   .action((opts: { force: boolean; withConfig: boolean }) => {
@@ -258,7 +258,7 @@ program
       } else {
         console.error('no primary stack detected — starter skill uses empty applies_to');
       }
-      console.error('\nEdit .pr-review/skills/team-rules.md to add your team conventions.');
+      console.error('\nEdit .claude/skills/team-rules.md to add your team conventions.');
     } catch (err) {
       console.error((err as Error).message);
       process.exit(1);

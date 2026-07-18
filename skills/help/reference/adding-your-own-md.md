@@ -22,18 +22,17 @@ Skills are standard `SKILL.md` reference docs, so they load from every conventio
 
 | Path | Type | Scope |
 |---|---|---|
-| `<repo>/.pr-review/skills/*.md` | Skills | Per-repo |
 | `<repo>/.claude/skills/*.md` | Skills | Per-repo (Claude Code convention) |
 | `<repo>/.copilot/skills/*.md` | Skills | Per-repo (Copilot CLI convention) |
 | `<repo>/.github/skills/*.md` | Skills | Per-repo (GitHub convention) |
 | `<repo>/.agents/skills/*.md` | Skills | Per-repo (AGENTS.md universal convention) |
-| `~/.pr-review/skills/*.md`, `~/.claude/skills/*.md`, `~/.copilot/skills/*.md`, `~/.agents/skills/*.md` | Skills | Personal, cross-repo |
+| `~/.claude/skills/*.md`, `~/.copilot/skills/*.md`, `~/.agents/skills/*.md` | Skills | Personal, cross-repo |
 
-**Skills in `.pr-review/skills/` (repo or home) are always injected** — the location itself declares review intent. Skills in the shared dirs (`.claude/`, `.copilot/`, `.github/`, `.agents/`) are handled by where they live and whether they carry targeting:
+Every repo skill is used — read straight from the dirs your agent tools already keep, with no separate folder and no duplication:
 
-- **Targeted** (`applies_to` and/or `inject_into`) → injected as a rule, same as a `.pr-review/skills/` skill.
-- **Untargeted, in a repo dir** → listed in an on-demand **catalog** (name + description + path) in the review context. Reviewers read the entries relevant to the changed files themselves; catalog skills are advisory background, not authoritative rules. This means a repo full of general-purpose agent skills is surfaced, not injected wholesale — so it never floods every reviewer's context.
-- **Untargeted, in a home dir** (`~/.claude/skills/` etc.) → skipped (with a stderr note); these are personal general-purpose helpers.
+- **Targeted** (`applies_to` and/or `inject_into`) → **injected** authoritatively, bypassing the heuristic (see the routing rules below).
+- **Untargeted** → run through a relevance heuristic that matches the skill's `name` + `description` against the changed file paths and the diff (accent-insensitive, stem/prefix matching, so Portuguese "planos/créditos" matches English `plans`/`Credits`). A **match** injects the full body into every reviewer; **no match** lists the skill in an on-demand **catalog** (name + description + path) that reviewers read when relevant — advisory background, not authoritative rules, but never dropped. So a repo full of general-purpose skills is surfaced, not injected wholesale — it never floods every reviewer's context.
+- **Untargeted, in a home dir** (`~/.claude/skills/` etc.) → skipped (with a stderr note); these are personal general-purpose helpers, not review content.
 
 The standard `SKILL.md` frontmatter is what we read:
 
@@ -44,7 +43,7 @@ The standard `SKILL.md` frontmatter is what we read:
 
 Routed skills are written per reviewer to `skills-<reviewer>.md` in the run dir (`~/.pr-review/runs/<id>/`). Skill bodies are capped at 16 KB each and each per-reviewer file at 64 KB — truncation warns on stderr. The catalog lives in `pr-context.md` under a separate 24 KB budget (one line per skill, description capped at 200 chars), so it never competes with the injected-skill caps.
 
-Use `.pr-review/skills/` when the content is review-specific (it loads unconditionally and stays out of regular agent sessions); add `applies_to`/`inject_into` to a skill in a shared dir when you want one file to serve both your normal agent sessions and pr-review.
+One `.md` in a skill dir serves both your normal agent sessions and pr-review; add `applies_to`/`inject_into` when you want to pin exactly which reviewers see it instead of leaning on the relevance heuristic. To force an entire directory injected regardless of relevance, point `extra_skills_dirs` / `--skills-dir` / `PR_REVIEW_SKILLS_DIR` at it.
 
 ## Other ways to add content
 
@@ -58,23 +57,23 @@ Use `.pr-review/skills/` when the content is review-specific (it loads unconditi
 ### Adding a per-repo skill (zero ceremony, team-shared)
 
 ```bash
-mkdir -p .pr-review/skills
-cp docs/our-auth-conventions.md  .pr-review/skills/       # context injected into reviewers
-git add .pr-review && git commit -m "add review rules"
+mkdir -p .claude/skills          # or .copilot/, .github/, .agents/
+cp docs/our-auth-conventions.md  .claude/skills/          # injected when relevant to the PR
+git add .claude && git commit -m "add review rules"
 ```
 
-The next `/pr-review <url>` picks it up automatically. No flags. No config.
+The next `/pr-review <url>` picks it up automatically. No flags. No config. If the skill's `name`/`description` matches the changed files it's injected; otherwise it lands in the on-demand catalog.
 
 ### Adding a personal skill (cross-repo, just you)
 
-Same idea, but in your home directory:
+Untargeted skills in a home dir are skipped (they're treated as general-purpose helpers), so give a personal *review* skill explicit targeting:
 
 ```bash
-mkdir -p ~/.pr-review/skills
-cp ~/notes/personal-checklist.md  ~/.pr-review/skills/
+mkdir -p ~/.claude/skills
+cp ~/notes/personal-checklist.md  ~/.claude/skills/       # add applies_to/inject_into frontmatter
 ```
 
-Loaded automatically on every `pr-review` run from any repo. Use for cross-team review habits you carry with you.
+With `applies_to`/`inject_into` frontmatter it's injected on every `pr-review` run from any repo. Or force a whole directory in with `--skills-dir ~/notes/review` (or `PR_REVIEW_SKILLS_DIR`). Use for cross-team review habits you carry with you.
 
 ### Adding an ad-hoc file for one run
 
@@ -125,7 +124,7 @@ skip_reviewers:
 Just delete the file:
 
 ```bash
-rm .pr-review/skills/my-old-skill.md
+rm .claude/skills/my-old-skill.md
 ```
 
 ### Removing a built-in from the plugin source
@@ -152,7 +151,7 @@ applies_to: ["**/*.cs"]
 ...
 ```
 
-Drop it in `.pr-review/skills/` (team) or `~/.pr-review/skills/` (personal). The security reviewer then evaluates the diff against its built-in criteria plus yours.
+Drop it in a repo skill dir (`.claude/skills/` etc.) for the team, or a home dir with the same frontmatter for personal use. The security reviewer then evaluates the diff against its built-in criteria plus yours.
 
 ## Verifying changes took effect
 

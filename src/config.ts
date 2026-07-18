@@ -187,7 +187,6 @@ export function autodiscoveryPaths(cwd: string = process.cwd(), home: string = h
     // separate .pr-review/reviewers/ folder (deliberately not auto-discovered).
     repoReviewers: [] as string[],
     repoSkills: [
-      join(cwd, '.pr-review', 'skills'),
       join(cwd, '.claude', 'skills'),
       join(cwd, '.copilot', 'skills'),
       join(cwd, '.github', 'skills'),
@@ -195,7 +194,6 @@ export function autodiscoveryPaths(cwd: string = process.cwd(), home: string = h
     ],
     personalReviewers: [] as string[],
     personalSkills: [
-      join(home, '.pr-review', 'skills'),
       join(home, '.claude', 'skills'),
       join(home, '.copilot', 'skills'),
       join(home, '.agents', 'skills'),

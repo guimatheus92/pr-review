@@ -114,11 +114,13 @@ test('loadConfig — language: default en, yaml key, env override', () => {
   }
 });
 
-test('autodiscoveryPaths — built-in reviewers are agents (no reviewer dirs auto-discovered); skills broaden to standard paths', () => {
+test('autodiscoveryPaths — built-in reviewers are agents (no reviewer dirs auto-discovered); skills read from the tool dirs', () => {
   const paths = autodiscoveryPaths('/repo', '/home/user');
   assert.equal(paths.repoReviewers.length, 0);
   assert.equal(paths.personalReviewers.length, 0);
-  assert.ok(paths.repoSkills.some((p) => /\.pr-review[\/\\]skills$/.test(p)));
+  // Skills are read from where the agent tools keep them — no .pr-review/skills concept.
+  assert.ok(!paths.repoSkills.some((p) => /\.pr-review[\/\\]skills$/.test(p)), 'no .pr-review/skills');
+  assert.ok(!paths.personalSkills.some((p) => /\.pr-review[\/\\]skills$/.test(p)), 'no home .pr-review/skills');
   assert.ok(paths.repoSkills.some((p) => /\.claude[\/\\]skills$/.test(p)));
   assert.ok(paths.repoSkills.some((p) => /\.copilot[\/\\]skills$/.test(p)));
   assert.ok(paths.repoSkills.some((p) => /\.github[\/\\]skills$/.test(p)));

@@ -45,9 +45,26 @@ test('summarizeSkills: counts injected/reviewers/catalog and builds the brief + 
   assert.ok(!text.includes('pp-billing'), 'catalog skill must not be listed by name');
 });
 
-test('summarizeSkills: an injected skill matching no files/reviewers shows the placeholder', () => {
+test('summarizeSkills: an injected skill reaching nobody shows the placeholder', () => {
   const { section } = summarizeSkills([{ skill: 'tsx-only', source: 's', targets: [] }]);
-  assert.ok(section.join('\n').includes('| tsx-only | — (no matching files) |'));
+  assert.ok(section.join('\n').includes('| tsx-only | (nobody — no matching files/reviewers) |'));
+});
+
+test('summarizeSkills: a verifier-only skill is labelled verifier, not the no-route placeholder', () => {
+  const { section, brief } = summarizeSkills([{ skill: 'v-only', source: 's', targets: ['verifier'] }]);
+  assert.ok(section.join('\n').includes('| v-only | verifier |'), section.join('\n'));
+  assert.equal(brief, '1 skill(s) → 0 reviewer(s) · 0 catalog');
+});
+
+test('summarizeSkills: singular reviewer count reads "1 reviewer"', () => {
+  const { section } = summarizeSkills([{ skill: 'sec-only', source: 's', targets: ['security', 'verifier'] }]);
+  assert.ok(section.join('\n').includes('**Injected:** 1 (into 1 reviewer)'), section.join('\n'));
+});
+
+test('summarizeSkills: no skills at all still renders the zero totals (a run with no skills says so)', () => {
+  const text = summarizeSkills([]).section.join('\n');
+  assert.ok(text.includes('## Skills'));
+  assert.ok(text.includes('**Injected:** 0 (into 0 reviewers) · **Catalog (on-demand):** 0'));
 });
 
 test('summarizeSkills: transparency note makes clear catalog ≠ ignored', () => {

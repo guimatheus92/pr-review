@@ -382,9 +382,14 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
       targets: [CATALOG_TARGET],
     })),
   ];
-  // Persist the routing so a --resume (which never re-runs prepareSessionContext)
-  // can still render the Skills section. Written early, before the reviewer phase.
-  writeFileSync(resolve(opts.outDir, 'skill-routing.json'), JSON.stringify(skillRouting), 'utf8');
+  // Persist the routing so a --resume (which never re-runs prepareSessionContext) can
+  // still render the Skills section. Best-effort: this artifact is display-only, so a
+  // failed write must never take down a run that would otherwise review and post.
+  try {
+    writeFileSync(resolve(opts.outDir, 'skill-routing.json'), JSON.stringify(skillRouting), 'utf8');
+  } catch (err) {
+    process.stderr.write(`[single-session] could not write skill-routing.json: ${(err as Error).message}\n`);
+  }
 
   const orchestratorPrompt = buildOrchestratorPrompt(opts, {
     contextPath,

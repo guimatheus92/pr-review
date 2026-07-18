@@ -4,7 +4,7 @@ import { runGather } from './gather.js';
 import { runPost } from './post.js';
 import { loadAll } from '../plugins/loader.js';
 import { loadConfig, type ConfigOverrides } from '../config.js';
-import { parseFindingsFile, prepareSessionContext, REVIEWER_OUTPUT_FILES, runSingleSession } from '../dispatch/single-session.js';
+import { CATALOG_TARGET, parseFindingsFile, prepareSessionContext, REVIEWER_OUTPUT_FILES, runSingleSession, type SkillRoute } from '../dispatch/single-session.js';
 import { resolveRuntime, type Runtime, type RuntimeChoice } from '../dispatch/runtime.js';
 import { detectCodex, runCodexReviewer } from '../dispatch/codex.js';
 import { ensureRunDir, RUNS_ROOT } from '../util/tmp.js';
@@ -109,6 +109,37 @@ function earlyExitGate(gather: GatherOutput): string | null {
   return null;
 }
 
+/**
+ * Split skill routing into injected (rules) vs catalog (on-demand), and render
+ * both a compact one-liner (`brief`, for the live progress feed) and the full
+ * `## Skills` markdown section. `verifier` is dropped from a skill's displayed
+ * targets — it always receives the union, so listing it is noise.
+ */
+export function summarizeSkills(skillRouting: SkillRoute[]): { section: string[]; brief: string } {
+  const isCatalog = (r: SkillRoute) => r.targets.length === 1 && r.targets[0] === CATALOG_TARGET;
+  const injected = skillRouting.filter((r) => !isCatalog(r));
+  const catalog = skillRouting.filter(isCatalog);
+  const reviewers = new Set<string>();
+  for (const r of injected) for (const t of r.targets) if (t !== 'verifier' && t !== CATALOG_TARGET) reviewers.add(t);
+
+  const brief = `${injected.length} skill(s) → ${reviewers.size} reviewer(s) · ${catalog.length} catalog`;
+  const section = [
+    `## Skills`,
+    ``,
+    `**Injected:** ${injected.length} (into ${reviewers.size} reviewer${reviewers.size === 1 ? '' : 's'}) · **Catalog (on-demand):** ${catalog.length}`,
+  ];
+  if (injected.length > 0) {
+    section.push(``, `| Skill | Injected into |`, `|---|---|`);
+    for (const r of injected) {
+      const into = r.targets.filter((t) => t !== 'verifier');
+      const label = into.length > 0 ? into.join(', ') : r.targets.includes('verifier') ? 'verifier' : '— (no matching files)';
+      section.push(`| ${r.skill} | ${label} |`);
+    }
+  }
+  section.push('');
+  return { section, brief };
+}
+
 export function renderSummary(
   prUrl: string,
   outputs: ReviewerOutput[],
@@ -116,6 +147,7 @@ export function renderSummary(
   droppedCount: number,
   elapsedMs: number,
   postResult?: { posted: number; attempted: number; skipped: number; errors: { error: string }[] },
+  skillRouting?: SkillRoute[],
 ): string {
   const totalRaw = outputs.reduce((n, o) => n + o.findings.length, 0);
   const lines: string[] = [
@@ -136,6 +168,8 @@ export function renderSummary(
     lines.push(`| ${o.reviewerName} | ${o.findings.length} | ${status} |`);
   }
   lines.push('');
+
+  if (skillRouting) lines.push(...summarizeSkills(skillRouting).section);
 
   const sorted = finalFindings
     .slice()
@@ -189,6 +223,7 @@ async function finalizeReview(a: {
   forcePost?: boolean;
   overallStart: number;
   provider?: PrProvider;
+  skillRouting?: SkillRoute[];
 }): Promise<ReviewResult> {
   for (const out of a.outputs) {
     try {
@@ -256,7 +291,7 @@ async function finalizeReview(a: {
     process.stderr.write(`[review] --dry-run: skipping post\n`);
   }
 
-  const summary = renderSummary(a.prUrl, a.outputs, finalFindings, droppedCount, Date.now() - a.overallStart, postResult);
+  const summary = renderSummary(a.prUrl, a.outputs, finalFindings, droppedCount, Date.now() - a.overallStart, postResult, a.skillRouting);
   writeFileSync(join(a.outDir, 'pr-review-summary.md'), summary, 'utf8');
   writeFileSync(
     join(a.outDir, 'pr-review-findings.json'),
@@ -318,6 +353,16 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   process.stderr.write(`[review] resuming run ${runId} from ${outDir}\n`);
   appendProgress(outDir, 'resume', `run ${runId}`);
   const { config } = loadConfig({ cwd: process.cwd(), cliOverrides: toConfigOverrides(opts) });
+  // The live run persisted routing here; absent (old runs) → Skills section omitted.
+  let skillRouting: SkillRoute[] | undefined;
+  const routingPath = join(outDir, 'skill-routing.json');
+  if (existsSync(routingPath)) {
+    try {
+      skillRouting = JSON.parse(readFileSync(routingPath, 'utf8')) as SkillRoute[];
+    } catch {
+      // corrupt routing file → degrade to no Skills section
+    }
+  }
   return finalizeReview({
     prUrl: opts.prUrl,
     outDir,
@@ -331,6 +376,7 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     forcePost: opts.forcePost,
     overallStart,
     provider: opts.provider,
+    skillRouting,
   });
 }
 
@@ -483,7 +529,11 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   // Context is prepared exactly once and shared by the session and the codex
   // sibling — a second prepare would rewrite every context/skills file.
   const sessionCtx = prepareSessionContext(sessionOpts);
-  appendProgress(outDir, 'dispatch', `${sessionCtx.dispatchedReviewers.length} reviewers`);
+  // Heads-up at the start: print the Skills section (foreground console + detached.log)
+  // and fold a compact count into the dispatch progress event (the live `status` snapshot).
+  const skills = summarizeSkills(sessionCtx.skillRouting);
+  process.stderr.write(skills.section.join('\n') + '\n');
+  appendProgress(outDir, 'dispatch', `${sessionCtx.dispatchedReviewers.length} reviewers · ${skills.brief}`);
 
   // Codex runs as a sibling process, in parallel with the orchestrator session.
   // runCodexReviewer resolves on every failure path (spawn error, timeout,
@@ -519,6 +569,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     forcePost: opts.forcePost,
     overallStart,
     provider,
+    skillRouting: sessionCtx.skillRouting,
   });
 
   if (result.exitCode === 2) {

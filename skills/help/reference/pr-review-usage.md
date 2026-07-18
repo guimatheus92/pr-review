@@ -54,6 +54,8 @@ Posting line comments back to the PR is the default. Add `--dry-run` to preview 
 6. De-duplicates findings against existing comments
 7. Posts **every** finding as a resolvable inline review comment (default) — lines are snapped to the diff, GitHub comments go as one batched review, and findings that can't anchor where they point are re-anchored to the first valid diff line with the original `file:line` in the body. Never a top-level comment, nothing dropped. `--dry-run` prints the summary instead
 
+The run also reports which skills it used: a `## Skills` block printed at dispatch (stderr / `detached.log`, plus a count in the live `status` feed) and a matching `## Skills` section in the final summary — a totals line (`Injected: N (into M reviewers) · Catalog (on-demand): K`) plus a table of the injected skills and which reviewers each reached. Catalog (untargeted, on-demand) skills are counted, not listed by name.
+
 Exit codes: `0` clean, `1` findings at/above the `--fail-on` threshold survived dedupe, `2` pipeline error (the orchestrator produced no parseable findings).
 
 ## Add or remove review content

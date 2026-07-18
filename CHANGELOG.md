@@ -4,6 +4,9 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+### Added
+- **The review now reports which skills it used — at the start and in the final summary.** With skill discovery easier (the catalog), a run surfaces its skills instead of leaving you to guess. At dispatch it prints a `## Skills` block to stderr (foreground console / `detached.log`) and folds a count into the progress feed (`N skill(s) → M reviewer(s) · K catalog`) that `status` shows live. The `pr-review-summary.md` gains a matching `## Skills` section: a totals line (`Injected: N (into M reviewers) · Catalog (on-demand): K`) plus a table of the injected skills and which reviewers each reached (`verifier` omitted — it always gets the union; a skill matching no changed files shows `— (no matching files)`). Catalog skills are counted, not listed by name. The live run persists `skill-routing.json` so a `--resume` reproduces the section (absent → section omitted, degrades cleanly).
+
 ## [0.2.0] — 2026-07-17
 
 ### Added

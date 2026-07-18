@@ -3,8 +3,8 @@ import { strict as assert } from 'node:assert';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { renderSummary } from '../src/commands/review.js';
-import { parseFindingsFile } from '../src/dispatch/single-session.js';
+import { renderSummary, summarizeSkills } from '../src/commands/review.js';
+import { parseFindingsFile, CATALOG_TARGET, type SkillRoute } from '../src/dispatch/single-session.js';
 import type { ReviewerOutput } from '../src/types.js';
 
 function output(over: Partial<ReviewerOutput>): ReviewerOutput {
@@ -24,6 +24,41 @@ test('renderSummary: a reviewer with an error still renders ✗ with the message
   const row = md.split('\n').find((l) => l.includes('| codex |'));
   assert.ok(row, 'codex row present');
   assert.ok(row!.includes('✗ exited 3'), `expected ✗ exited 3, got: ${row}`);
+});
+
+const ROUTING: SkillRoute[] = [
+  { skill: 'pp-regras-plano', source: 's1', targets: ['security', 'architecture', 'verifier'] },
+  { skill: 'estilo-time', source: 's2', targets: ['quality', 'verifier'] },
+  { skill: 'pp-billing', source: 's3', targets: [CATALOG_TARGET] },
+];
+
+test('summarizeSkills: counts injected/reviewers/catalog and builds the brief + section', () => {
+  const { section, brief } = summarizeSkills(ROUTING);
+  assert.equal(brief, '2 skill(s) → 3 reviewer(s) · 1 catalog');
+  const text = section.join('\n');
+  assert.ok(text.includes('## Skills'));
+  assert.ok(text.includes('**Injected:** 2 (into 3 reviewers) · **Catalog (on-demand):** 1'));
+  // verifier dropped from the displayed targets
+  assert.ok(text.includes('| pp-regras-plano | security, architecture |'), text);
+  assert.ok(text.includes('| estilo-time | quality |'), text);
+  // catalog skill is counted, never listed by name
+  assert.ok(!text.includes('pp-billing'), 'catalog skill must not be listed by name');
+});
+
+test('summarizeSkills: an injected skill matching no files/reviewers shows the placeholder', () => {
+  const { section } = summarizeSkills([{ skill: 'tsx-only', source: 's', targets: [] }]);
+  assert.ok(section.join('\n').includes('| tsx-only | — (no matching files) |'));
+});
+
+test('renderSummary: includes the Skills section when routing is passed, omits it otherwise', () => {
+  const withSkills = renderSummary('u', [output({ reviewerName: 'security' })], [], 0, 1000, undefined, ROUTING);
+  assert.ok(withSkills.includes('## Skills'), 'Skills section present');
+  assert.ok(withSkills.includes('| pp-regras-plano | security, architecture |'));
+  // reviewer table intact and distinct from the skills table
+  assert.ok(withSkills.split('\n').some((l) => l.includes('| security |') && l.includes('✓')));
+
+  const noSkills = renderSummary('u', [output({ reviewerName: 'security' })], [], 0, 1000);
+  assert.ok(!noSkills.includes('## Skills'), 'no Skills section without routing');
 });
 
 test('parseFindingsFile: reviewers from a structured file get exitCode 0 (delivered = success)', () => {

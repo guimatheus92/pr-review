@@ -102,6 +102,9 @@ export function skillsRulesSentence(skillsPath: string | undefined): string {
     : '';
 }
 
+/** The pseudo-target marking a catalog (on-demand) skill in skillRouting — not a real reviewer. */
+export const CATALOG_TARGET = '(catalog — on-demand)';
+
 export interface SkillRoute {
   skill: string;
   source: string;
@@ -369,9 +372,12 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
     ...(opts.catalog ?? []).map((s) => ({
       skill: s.name,
       source: s.source,
-      targets: ['(catalog — on-demand)'],
+      targets: [CATALOG_TARGET],
     })),
   ];
+  // Persist the routing so a --resume (which never re-runs prepareSessionContext)
+  // can still render the Skills section. Written early, before the reviewer phase.
+  writeFileSync(resolve(opts.outDir, 'skill-routing.json'), JSON.stringify(skillRouting), 'utf8');
 
   const orchestratorPrompt = buildOrchestratorPrompt(opts, {
     contextPath,

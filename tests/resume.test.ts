@@ -152,6 +152,21 @@ test('resume — Skills section: omitted when skill-routing.json is absent, rend
   }
 });
 
+test('resume — a corrupt or wrong-shape skill-routing.json degrades, never aborts the resume', async () => {
+  // Wrong shape parses fine but would crash summarizeSkills — AFTER posting — if unvalidated.
+  for (const bad of ['{"skill":', '{}', 'null', '[{"skill":"x"}]']) {
+    const dir = seedRun(ONE);
+    try {
+      writeFileSync(join(dir, 'skill-routing.json'), bad, 'utf8');
+      const r = await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: false, dryRun: true, provider: fakeProvider().provider });
+      assert.match(r.summary, /PR Review Summary/, `resume completed for ${bad}`);
+      assert.ok(!r.summary.includes('## Skills'), `Skills section omitted for ${bad}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test('resume — missing gather and missing reviewer output each error clearly', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pr-resume-'));
   try {

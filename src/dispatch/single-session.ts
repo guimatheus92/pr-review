@@ -6,6 +6,7 @@ import { matchesAny } from '../util/globs.js';
 import { parseReviewerOutput } from './parsers.js';
 import { normalizeModel, runtimeBinary, runtimeSpawnArgs, taskCall, taskToolName, type Runtime } from './runtime.js';
 import { appendProgress } from '../util/progress.js';
+import { selectRelevantSkills } from './skill-match.js';
 
 /** Exported so tests can lock the registry against the agents/*.md files. */
 export const BUILTIN_AGENTS = [
@@ -191,7 +192,7 @@ function triageReviewers(shorts: string[], inScopePaths: string[]): { dispatch: 
   };
 }
 
-function writeContextFile(opts: SingleSessionOptions): string {
+function writeContextFile(opts: SingleSessionOptions, catalog: SkillDefinition[]): string {
   const { gather, outDir } = opts;
   const inScope = gather.changedFiles.filter((f) => !f.excluded);
   const metaLines: string[] = [
@@ -244,7 +245,6 @@ function writeContextFile(opts: SingleSessionOptions): string {
     metaLines.push(`- ${f.path} (${f.status}, +${f.additions} -${f.deletions})`);
   }
 
-  const catalog = opts.catalog ?? [];
   if (catalog.length > 0) {
     metaLines.push(
       '',
@@ -301,9 +301,16 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
   const findingsPath = resolve(opts.outDir, 'single-session-findings.json');
   const phase1Path = resolve(opts.outDir, 'phase1-findings.json');
 
-  writeContextFile(opts);
+  const inScopeFiles = opts.gather.changedFiles.filter((f) => !f.excluded);
+  const inScopePaths = inScopeFiles.map((f) => f.path);
 
-  const inScopePaths = opts.gather.changedFiles.filter((f) => !f.excluded).map((f) => f.path);
+  // Catalog skills whose name/description matches the changed files are promoted to
+  // injected (force-fed into every reviewer); the rest stay in the on-demand catalog.
+  const { matched, rest } = selectRelevantSkills(opts.catalog ?? [], inScopeFiles);
+  const injectedSkills = [...opts.skills, ...matched];
+
+  writeContextFile(opts, rest);
+
   const skip = new Set(opts.skipReviewers);
   const activeShorts = BUILTIN_AGENTS.map(agentToShortName).filter((s) => !skip.has(s));
   const { dispatch: dispatchedReviewers, skipped: triageSkipped } = triageReviewers(activeShorts, inScopePaths);
@@ -327,7 +334,7 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
 
   const verifierUnion = new Map<string, SkillDefinition>();
   for (const short of dispatchedReviewers) {
-    const list = applicableSkills(opts.skills, short, inScopePaths);
+    const list = applicableSkills(injectedSkills, short, inScopePaths);
     const path = writeSkills(short, list);
     if (path) skillsFiles.set(short, path);
     for (const s of list) verifierUnion.set(s.name, s);
@@ -339,7 +346,7 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
       COMPANION_SLASH.some((c) => opts.installedCompanions.includes(c.pluginId)));
   if (companionsActive) {
     const list = applicableSkills(
-      opts.skills.filter((s) => !s.injectInto || s.injectInto.length === 0),
+      injectedSkills.filter((s) => !s.injectInto || s.injectInto.length === 0),
       'companions',
       inScopePaths,
     );
@@ -349,14 +356,14 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
   }
 
   if (opts.includeCodex) {
-    const list = applicableSkills(opts.skills, 'codex', inScopePaths);
+    const list = applicableSkills(injectedSkills, 'codex', inScopePaths);
     const path = writeSkills('codex', list);
     if (path) skillsFiles.set('codex', path);
     for (const s of list) verifierUnion.set(s.name, s);
   }
 
   if (wantVerifier) {
-    for (const s of applicableSkills(opts.skills, 'verifier', inScopePaths)) {
+    for (const s of applicableSkills(injectedSkills, 'verifier', inScopePaths)) {
       verifierUnion.set(s.name, s);
     }
     const path = writeSkills('verifier', [...verifierUnion.values()]);
@@ -364,20 +371,25 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
   }
 
   const skillRouting: SkillRoute[] = [
-    ...opts.skills.map((s) => ({
+    ...injectedSkills.map((s) => ({
       skill: s.name,
       source: s.source,
       targets: [...(routing.get(s.name) ?? [])],
     })),
-    ...(opts.catalog ?? []).map((s) => ({
+    ...rest.map((s) => ({
       skill: s.name,
       source: s.source,
       targets: [CATALOG_TARGET],
     })),
   ];
-  // Persist the routing so a --resume (which never re-runs prepareSessionContext)
-  // can still render the Skills section. Written early, before the reviewer phase.
-  writeFileSync(resolve(opts.outDir, 'skill-routing.json'), JSON.stringify(skillRouting), 'utf8');
+  // Persist the routing so a --resume (which never re-runs prepareSessionContext) can
+  // still render the Skills section. Best-effort: this artifact is display-only, so a
+  // failed write must never take down a run that would otherwise review and post.
+  try {
+    writeFileSync(resolve(opts.outDir, 'skill-routing.json'), JSON.stringify(skillRouting), 'utf8');
+  } catch (err) {
+    process.stderr.write(`[single-session] could not write skill-routing.json: ${(err as Error).message}\n`);
+  }
 
   const orchestratorPrompt = buildOrchestratorPrompt(opts, {
     contextPath,

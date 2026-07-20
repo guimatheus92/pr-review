@@ -87,19 +87,21 @@ On a publish run (the default), every finding lands as a resolvable **inline** r
 
 ## Adding your own rules
 
-Drop `.md` files in standard skill paths — no flags, no config:
+Review rules live where your agent tools already keep skills — no separate folder, no duplication, no flags:
 
 ```
 your-repo/
-└── .pr-review/
+└── .claude/                           # or .copilot/, .github/, .agents/
     └── skills/
-        ├── our-auth-conventions.md    # injected as context into matching reviewers
+        ├── our-auth-conventions.md    # auto-injected when relevant to the PR
         └── team-style-guide.md
 ```
 
-Optional frontmatter targets a skill: `applies_to` (globs — the skill is injected only when an in-scope changed file matches) and `inject_into` (reviewer names — omit to reach all reviewers). Preview the routing with `--context-only`, which prints a skill→reviewer table and exits without running reviewers. A live run also reports which skills it used — a `## Skills` block at dispatch (stderr / `detached.log`) and a matching section in the final summary (injected skills + which reviewers each reached, plus a catalog count).
+Per PR the tool matches each repo skill's `name` + `description` against the changed file paths and the diff (accent-insensitive, stem/prefix matching, so Portuguese "planos/créditos" matches English `plans`/`Credits`). A **match** force-feeds the skill's full body into every reviewer (shows as "Injected: N" in the summary); **no match** leaves it in an on-demand **catalog** (name + description + path) that reviewers read when relevant — so a catalogued skill is never simply ignored.
 
-Skills from the shared dirs (`.claude/skills/`, `.copilot/skills/`, `.github/skills/`, `.agents/skills/`) are also picked up. A skill that declares review targeting (`applies_to` and/or `inject_into`) is **injected** as a rule, same as a `.pr-review/skills/` skill. An **untargeted repo** skill is instead listed in an on-demand **catalog** (name + description + path) in the review context — reviewers read the ones relevant to the changed files, treating them as advisory background rather than authoritative rules. Untargeted **home** skills (`~/.claude/skills/` etc.) stay skipped, since those are personal general-purpose helpers. Anything in `.pr-review/skills/` is injected unconditionally. Preview it all with `--context-only` (catalog entries show as `(catalog — on-demand)`). See [reviewers vs skills](skills/help/reference/reviewers-vs-skills.md) for the full authoring guide.
+Optional frontmatter refines this: `applies_to` (globs — inject only when an in-scope changed file matches) and `inject_into` (reviewer short names — scope to specific reviewers). A skill carrying either is routed explicitly, bypassing the heuristic; a skill with neither goes through inject-if-relevant-else-catalog. Neither is required for a skill to be used. Untargeted **home** skills (`~/.claude/skills/` etc.) stay skipped — those are personal general-purpose helpers, not review content. To force a whole directory injected regardless of relevance, point `extra_skills_dirs` (in `.pr-review.yaml`), `--skills-dir`, or `PR_REVIEW_SKILLS_DIR` at it.
+
+Preview the routing with `--context-only`, which prints a skill→reviewer table (catalog entries show as `(catalog — on-demand)`) and exits without running reviewers. A live run also reports which skills it used — a `## Skills` block at dispatch (stderr / `detached.log`) and a matching section in the final summary (injected skills + which reviewers each reached, plus a catalog count). See [reviewers vs skills](skills/help/reference/reviewers-vs-skills.md) for the full authoring guide.
 
 ## Built-in reviewers
 
@@ -113,7 +115,7 @@ Skills from the shared dirs (`.claude/skills/`, `.copilot/skills/`, `.github/ski
 | `silent-failure` | Swallowed errors, masked failures |
 | `verifier` | Cross-reviewer reconciliation (runs last) |
 
-Skip with `--skip <name>`, override by placing a same-named `.md` in `.pr-review/skills/`.
+Skip with `--skip <name>`; tighten one by authoring a skill scoped to it (`inject_into: [<name>]`).
 
 When the `codex` CLI is installed, an optional `codex` second-opinion reviewer also runs — as a sibling process in parallel with the agent session, reading the same PR context. A different model family catches what the primary model misses. Its findings merge into the normal dedupe/post pipeline. Opt out with `--no-codex`, `invoke_codex: false`, `PR_REVIEW_NO_CODEX=1`, or `--skip codex`.
 
@@ -131,7 +133,7 @@ pr-review review <pr-url> [flags]            # full pipeline
 #   --copilot <path>        path to the copilot binary (implies --runtime copilot unless --runtime given)
 pr-review gather <pr-url> [--out <path>]     # fetch + cache metadata only
 pr-review post <pr-url> --findings <path>    # post pre-computed findings
-pr-review init [--with-config] [--force]     # scaffold .pr-review/skills/
+pr-review init [--with-config] [--force]     # scaffold a starter team-rules skill + optional .pr-review.yaml
 pr-review configure [path] [--force]         # write ~/.pr-review/config.yaml
 pr-review doctor                             # environment preflight: runtimes, codex, companions, auth
 pr-review plugins list                       # list loaded reviewers + skills

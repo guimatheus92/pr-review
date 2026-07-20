@@ -109,11 +109,17 @@ function earlyExitGate(gather: GatherOutput): string | null {
   return null;
 }
 
+/** Shown when a skill reached no dispatched reviewer — globs matched nothing, or its
+ *  inject_into named a reviewer that was skipped/triaged away. Shared with --context-only. */
+const NO_ROUTE_LABEL = '(nobody — no matching files/reviewers)';
+
 /**
  * Split skill routing into injected (rules) vs catalog (on-demand), and render
  * both a compact one-liner (`brief`, for the live progress feed) and the full
- * `## Skills` markdown section. `verifier` is dropped from a skill's displayed
- * targets — it always receives the union, so listing it is noise.
+ * `## Skills` markdown section. `verifier` is filtered out of a skill's displayed
+ * targets — when it runs it receives the union of what the other reviewers got, so
+ * repeating it on every row is noise. The one exception: a skill whose *only* target
+ * is verifier still shows it, otherwise the row would misreport as unrouted.
  */
 export function summarizeSkills(skillRouting: SkillRoute[]): { section: string[]; brief: string } {
   const isCatalog = (r: SkillRoute) => r.targets.length === 1 && r.targets[0] === CATALOG_TARGET;
@@ -131,10 +137,22 @@ export function summarizeSkills(skillRouting: SkillRoute[]): { section: string[]
   if (injected.length > 0) {
     section.push(``, `| Skill | Injected into |`, `|---|---|`);
     for (const r of injected) {
-      const into = r.targets.filter((t) => t !== 'verifier');
-      const label = into.length > 0 ? into.join(', ') : r.targets.includes('verifier') ? 'verifier' : '— (no matching files)';
+      // Same predicate as the reviewer count above, so a row can never disagree with the total.
+      const into = r.targets.filter((t) => t !== 'verifier' && t !== CATALOG_TARGET);
+      let label = NO_ROUTE_LABEL;
+      if (into.length > 0) label = into.join(', ');
+      else if (r.targets.includes('verifier')) label = 'verifier';
       section.push(`| ${r.skill} | ${label} |`);
     }
+  }
+  if (catalog.length > 0) {
+    // Make clear that catalog ≠ ignored — "Injected: 0" must not read as "skills unused".
+    section.push(
+      ``,
+      injected.length > 0
+        ? `_Injected skills matched the changed files. The other ${catalog.length} are available on-demand — reviewers open the relevant ones as needed; not ignored._`
+        : `_${catalog.length} skill(s) available on-demand — reviewers open the relevant ones as needed (none matched the changed files strongly enough to force-inject). Not ignored._`,
+    );
   }
   section.push('');
   return { section, brief };
@@ -358,9 +376,18 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   const routingPath = join(outDir, 'skill-routing.json');
   if (existsSync(routingPath)) {
     try {
-      skillRouting = JSON.parse(readFileSync(routingPath, 'utf8')) as SkillRoute[];
-    } catch {
-      // corrupt routing file → degrade to no Skills section
+      // Validate the shape, not just the syntax: JSON that parses to a non-array
+      // ({}, null, "x") would otherwise reach summarizeSkills and throw there —
+      // i.e. AFTER posting — losing the summary on an otherwise successful resume.
+      const parsed: unknown = JSON.parse(readFileSync(routingPath, 'utf8'));
+      if (Array.isArray(parsed) && parsed.every((r) => r && typeof r.skill === 'string' && Array.isArray(r.targets))) {
+        skillRouting = parsed as SkillRoute[];
+      } else {
+        process.stderr.write(`[review] resume: skill-routing.json has an unexpected shape — Skills section omitted\n`);
+      }
+    } catch (err) {
+      // An absent file is expected (old runs); one that exists but fails to load is not.
+      process.stderr.write(`[review] resume: skill-routing.json unreadable (${(err as Error).message}) — Skills section omitted\n`);
     }
   }
   return finalizeReview({
@@ -474,8 +501,11 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   // Single-session mode dispatches runtime-registered agents only; user-authored
   // context goes in skills, so reviewer .md loading is skipped entirely.
   const loaded = loadAll({ cwd, config, skillsOnly: true });
-  const catalogNote = loaded.catalog.length > 0 ? `, ${loaded.catalog.length} catalog entr${loaded.catalog.length === 1 ? 'y' : 'ies'}` : '';
-  process.stderr.write(`[review] loaded ${loaded.skills.length} skill(s)${catalogNote}\n`);
+  // Discovery count only — the relevant ones are injected per-change by the heuristic in
+  // prepareSessionContext, and the accurate injected/catalog split is reported in the
+  // `## Skills` summary block. (Don't print an "injected" number here — it would read 0.)
+  const discovered = loaded.skills.length + loaded.catalog.length;
+  process.stderr.write(`[review] discovered ${discovered} project skill(s) — relevant ones injected per change (see the Skills summary)\n`);
 
   const sessionOpts = {
     prUrl: opts.prUrl,
@@ -512,7 +542,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     } else {
       lines.push(`| Skill | Injected into | Source |`, `|---|---|---|`);
       for (const r of ctx.skillRouting) {
-        lines.push(`| ${r.skill} | ${r.targets.length ? r.targets.join(', ') : '(nobody — no matching files/reviewers)'} | ${r.source} |`);
+        lines.push(`| ${r.skill} | ${r.targets.length ? r.targets.join(', ') : NO_ROUTE_LABEL} | ${r.source} |`);
       }
     }
     const summary = lines.join('\n');

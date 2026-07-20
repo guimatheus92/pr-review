@@ -4,6 +4,15 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+### Changed
+- **Skills are now used from where the agent tools keep them, and the relevant ones are injected automatically per PR.** Skills live in `.claude/skills`, `.copilot/skills`, `.github/skills`, `.agents/skills` (repo and home) — no moving, no duplicating. For each PR the review matches every repo skill's name + description against the changed files and diff (accent-folded, stem-matched, so pt "planos/créditos" hits en `plans`/`Credits`); a match is **injected** (full body, force-fed into every reviewer — shows as `Injected: N`), the rest stay in the **on-demand catalog**. `applies_to`/`inject_into` frontmatter is now purely an **optional** override for explicit, authoritative routing — no longer required for a skill to be used. The summary explains that catalog skills are read on demand, not ignored.
+- **Removed the `.pr-review/skills/` special directory.** Review skills no longer need a dedicated folder or duplication — they're read from the tool dirs above. Explicit `extra_skills_dirs` / `--skills-dir` / `PR_REVIEW_SKILLS_DIR` still force-inject a whole directory when you want that.
+
+### Fixed
+- **Skill discovery no longer double-counts a symlinked mirror dir.** `loadFromPaths` dedupes by real (symlink-followed) path, so a workspace where e.g. `.agents/skills` symlinks to another repo's `.claude/skills` reports the true skill count instead of 2× (the `84 → 42` confusion).
+- **A malformed `skill-routing.json` no longer kills a `--resume` after it has already posted.** The resume read validated only JSON syntax, so a file that parsed to the wrong shape (`{}`, `null`, an entry without `targets`) reached the summary renderer and threw — after `runPost` published the comments — leaving the run with no `pr-review-summary.md` and stuck at the `post` phase. The shape is now validated, the failure is logged instead of silently swallowed, and the Skills section simply degrades away. Writing the artifact is also best-effort now: a display-only file can no longer take down a run that would otherwise review and post.
+- **Summary skill labels are consistent with `--context-only`.** A skill that reached no dispatched reviewer now reads `(nobody — no matching files/reviewers)` in both places (the old summary-only `— (no matching files)` mis-stated the cause: `inject_into` naming a skipped or triaged-away reviewer produces the same empty routing).
+
 ## [0.3.0] — 2026-07-18
 
 ### Added

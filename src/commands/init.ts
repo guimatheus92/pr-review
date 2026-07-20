@@ -66,7 +66,7 @@ const CONFIG_TEMPLATE = `# .pr-review.yaml — per-repo config (committed; share
 # Default model for reviewers that don't specify their own.
 # default_model: claude-opus-4.8
 
-# Extra directories to load skills/reviewers from (beyond the conventional .pr-review/ paths).
+# Extra directories to load skills/reviewers from (beyond the auto-discovered skill dirs).
 # extra_skills_dirs:
 #   - ./docs/conventions
 # extra_reviewers_dirs:
@@ -100,7 +100,9 @@ export function runInit(opts: InitOptions = {}): InitResult {
     detectedStack: null,
   };
 
-  const skillsDir = join(cwd, '.pr-review', 'skills');
+  // Scaffold into a dir the review path actually discovers (.claude/skills is the
+  // common one; .copilot/.github/.agents work identically). No .pr-review/skills.
+  const skillsDir = join(cwd, '.claude', 'skills');
   if (!existsSync(skillsDir)) {
     mkdirSync(skillsDir, { recursive: true });
     result.createdDirs.push(skillsDir);

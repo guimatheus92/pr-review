@@ -280,6 +280,33 @@ test('skill-routing.json — persisted at dispatch time, equal to ctx.skillRouti
   }
 });
 
+test('catalog — a skill matching the changed files is promoted to injected (not left on-demand)', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const catalog: SkillDefinition[] = [
+      { name: 'orders-rules', source: '/abs/orders-rules.md', body: 'ORDERS_RULE_BODY', appliesTo: [], description: 'rules for the orders service and checkout' },
+      { name: 'video-helper', source: '/abs/video.md', body: 'VIDEO_BODY', appliesTo: [], description: 'video editing captions and overlays' },
+    ];
+    const ctx = prepareSessionContext({ ...baseOpts(outDir, ['src/orders/service.ts'], []), catalog });
+
+    const orders = ctx.skillRouting.find((r) => r.skill === 'orders-rules')!;
+    assert.ok(!orders.targets.includes('(catalog — on-demand)'), 'matched skill promoted out of catalog');
+    assert.ok(orders.targets.includes('security'), 'promoted skill injected into reviewers');
+    const video = ctx.skillRouting.find((r) => r.skill === 'video-helper')!;
+    assert.deepEqual(video.targets, ['(catalog — on-demand)'], 'unmatched skill stays on-demand');
+
+    const secBody = readFileSync(join(outDir, 'skills-security.md'), 'utf8');
+    assert.ok(secBody.includes('ORDERS_RULE_BODY'), 'promoted skill body is injected');
+    assert.ok(!secBody.includes('VIDEO_BODY'), 'unmatched skill body is not injected');
+    // The on-demand catalog in pr-context.md lists only the unmatched skill.
+    const contextBody = readFileSync(ctx.contextPath, 'utf8');
+    assert.ok(contextBody.includes('**video-helper**'), 'unmatched skill listed in catalog');
+    assert.ok(!contextBody.includes('**orders-rules**'), 'promoted skill no longer in the catalog list');
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
 test('catalog — routing table rows carry the (catalog — on-demand) target', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {

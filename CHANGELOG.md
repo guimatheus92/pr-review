@@ -4,6 +4,8 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-20
+
 ### Changed
 - **Skills are now used from where the agent tools keep them, and the relevant ones are injected automatically per PR.** Skills live in `.claude/skills`, `.copilot/skills`, `.github/skills`, `.agents/skills` (repo and home) — no moving, no duplicating. For each PR the review matches every repo skill's name + description against the changed files and diff (accent-folded, stem-matched, so pt "planos/créditos" hits en `plans`/`Credits`); a match is **injected** (full body, force-fed into every reviewer — shows as `Injected: N`), the rest stay in the **on-demand catalog**. `applies_to`/`inject_into` frontmatter is now purely an **optional** override for explicit, authoritative routing — no longer required for a skill to be used. The summary explains that catalog skills are read on demand, not ignored.
 - **Removed the `.pr-review/skills/` special directory.** Review skills no longer need a dedicated folder or duplication — they're read from the tool dirs above. Explicit `extra_skills_dirs` / `--skills-dir` / `PR_REVIEW_SKILLS_DIR` still force-inject a whole directory when you want that.

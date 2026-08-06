@@ -164,6 +164,17 @@ program
         process.stdout.write(summary + '\n');
         if (exitCode !== 0) process.exitCode = exitCode;
       } catch (err) {
+        // Detached child (--run-dir set): persist the failure so `status` can
+        // say why — the parent is long gone and stdout goes to detached.log.
+        if (opts.runDir) {
+          try {
+            const { writeFileSync } = await import('node:fs');
+            const { join } = await import('node:path');
+            writeFileSync(join(opts.runDir, 'error.txt'), ((err as Error).stack ?? String(err)) + '\n');
+          } catch {
+            // best-effort: the real error is about to be printed and exit(2)'d
+          }
+        }
         console.error((err as Error).message);
         process.exit(2);
       }

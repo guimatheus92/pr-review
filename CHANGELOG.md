@@ -4,6 +4,11 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+### Fixed
+- **`--detach` no longer dies in the background with a generic "No auth token available" when the credential CLI fallback (`gh` keyring / `az`) flakes in the detached child.** The parent now resolves the provider credential in the foreground *before* spawning — via a new provider `authEnv()` pre-flight — and injects it into the child env (`GITHUB_TOKEN`; `AZURE_DEVOPS_PAT`, or the new `AZURE_DEVOPS_BEARER` round-trip var so a bearer token isn't misread as a PAT). A missing credential now fails the launch immediately instead of killing the background run ~25s later.
+- **Token-resolution failures are no longer swallowed.** Both providers now pipe the fallback CLI's stderr and include its exit code/stderr detail in the thrown message (`` `gh auth token` failed: … `` / `` `az account get-access-token` failed: … ``), so a future occurrence is diagnosable from `detached.log`.
+- **A detached run that dies before producing findings now persists the fatal error** to `<run-dir>/error.txt`, and `status` surfaces it inline on a `failed` run instead of only pointing at `detached.log`.
+
 ## [0.4.0] — 2026-07-20
 
 ### Changed

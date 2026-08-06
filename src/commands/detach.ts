@@ -1,7 +1,7 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import { closeSync, openSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { newRunDirForUrl } from '../providers/index.js';
+import { detectProvider, newRunDirForUrl } from '../providers/index.js';
 
 export interface DetachResult {
   runId: string;
@@ -22,6 +22,11 @@ export interface DetachResult {
  * `spawnFn` is a test seam.
  */
 export function detachReview(prUrl: string, argv: string[], spawnFn: typeof nodeSpawn = nodeSpawn): DetachResult {
+  // Resolve auth here, in the foreground: the keyring-backed CLI fallbacks
+  // (`gh auth token`, `az account get-access-token`) can flake in a detached
+  // child, and a missing credential should fail the launch immediately instead
+  // of killing the background run before it produces anything.
+  const authEnv = detectProvider(prUrl).authEnv();
   const outDir = newRunDirForUrl(prUrl);
   const childArgs = argv.filter((a) => a !== '--detach').concat('--run-dir', outDir);
   const log = openSync(join(outDir, 'detached.log'), 'a');
@@ -30,6 +35,7 @@ export function detachReview(prUrl: string, argv: string[], spawnFn: typeof node
     detached: true,
     stdio: ['ignore', log, log],
     windowsHide: true,
+    env: { ...process.env, ...authEnv },
   });
   // The parent exits right after this returns, so a spawn failure would vanish
   // without an explicit listener.

@@ -8,6 +8,12 @@ export interface BatchComment {
 
 export interface PrProvider {
   readonly name: 'github' | 'azuredevops';
+  /**
+   * Resolve auth in this (foreground) process and return env var(s) that let a
+   * child process skip the CLI/keyring fallbacks (used by the --detach
+   * pre-flight). Throws when no credential is available.
+   */
+  authEnv(): Record<string, string>;
   parseUrl(url: string): PrRef | null;
   fetchMetadata(ref: PrRef): Promise<PrMetadata>;
   fetchChangedFiles(ref: PrRef): Promise<ChangedFile[]>;

@@ -69,7 +69,8 @@ diff_excludes:
 | `PR_REVIEW_NO_COMPANION_WARN` | `companion_warn: false` |
 | `PR_REVIEW_NO_CODEX` | `invoke_codex: false` (also `--no-codex`) |
 | `GITHUB_TOKEN` / `GH_TOKEN` / `COPILOT_GITHUB_TOKEN` | GitHub auth |
-| `AZURE_DEVOPS_PAT` / `SYSTEM_ACCESSTOKEN` | ADO auth |
+| `AZURE_DEVOPS_PAT` / `SYSTEM_ACCESSTOKEN` / `AZURE_DEVOPS_EXT_PAT` | ADO auth (PAT) |
+| `AZURE_DEVOPS_BEARER` | ADO auth (bearer token; also set by the `--detach` pre-flight) |
 
 ## Auto-discovery paths
 

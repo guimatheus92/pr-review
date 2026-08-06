@@ -88,8 +88,12 @@ export function runStatus(runId: string, now = Date.now()): StatusResult {
         `  Finish it (fast — no re-review): pr-review review <pr-url> --resume ${runId}`,
     };
   }
+  const errPath = join(outDir, 'error.txt');
+  const errTxt = existsSync(errPath) ? readFileSync(errPath, 'utf8').trim() : '';
   return {
     state: 'failed',
-    text: `${snapshot}\n\n✗ the run stopped before producing findings — see ${join(outDir, 'detached.log')}`,
+    text:
+      `${snapshot}\n\n✗ the run stopped before producing findings — see ${join(outDir, 'detached.log')}` +
+      (errTxt ? `\n\n${errTxt}` : ''),
   };
 }

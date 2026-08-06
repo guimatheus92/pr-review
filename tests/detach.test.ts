@@ -3,7 +3,11 @@ import { strict as assert } from 'node:assert';
 import { rmSync } from 'node:fs';
 import { detachReview } from '../src/commands/detach.js';
 
-test('detachReview — strips --detach, appends --run-dir, spawns detached+unref with an error listener', () => {
+test('detachReview — strips --detach, appends --run-dir, spawns detached+unref with an error listener and pre-resolved auth env', () => {
+  // Pre-set the token so the parent pre-flight resolves from env (no `gh` subprocess).
+  const prevToken = process.env.GITHUB_TOKEN;
+  process.env.GITHUB_TOKEN = 'test-token';
+  process.env.PR_REVIEW_TEST_CANARY = 'canary';
   const calls: Array<{ cmd: string; args: string[]; opts: Record<string, unknown> }> = [];
   const child = {
     events: [] as string[],
@@ -31,10 +35,16 @@ test('detachReview — strips --detach, appends --run-dir, spawns detached+unref
     assert.deepEqual(args.slice(-2), ['--run-dir', outDir], 'run-dir appended, shared with parent');
     assert.equal(opts.detached, true);
     assert.equal(opts.windowsHide, true);
+    const env = opts.env as NodeJS.ProcessEnv;
+    assert.equal(env.GITHUB_TOKEN, 'test-token', 'auth resolved in the parent and injected into the child env');
+    assert.equal(env.PR_REVIEW_TEST_CANARY, 'canary', 'parent env still spread into the child');
     assert.ok(child.unrefed, 'child.unref() called so the parent can exit');
     assert.ok(child.events.includes('error'), 'spawn-error listener attached');
     assert.ok(runId.length > 0);
   } finally {
+    if (prevToken === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = prevToken;
+    delete process.env.PR_REVIEW_TEST_CANARY;
     rmSync(outDir, { recursive: true, force: true });
   }
 });

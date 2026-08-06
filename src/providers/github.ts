@@ -10,10 +10,14 @@ function resolveToken(): string {
   const fromEnv = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? process.env.COPILOT_GITHUB_TOKEN;
   if (fromEnv) return fromEnv;
   try {
-    return execFileSync('gh', ['auth', 'token'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-  } catch {
+    return execFileSync('gh', ['auth', 'token'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  } catch (e) {
+    const err = e as Error & { code?: string; status?: number; stderr?: string | Buffer };
+    const detail = [err.code ?? err.status, err.stderr?.toString().trim() || err.message]
+      .filter(Boolean)
+      .join(': ');
     throw new Error(
-      'No GitHub auth token available. Set GITHUB_TOKEN env var or run `gh auth login`.',
+      `No GitHub auth token available (\`gh auth token\` failed: ${detail}). Set GITHUB_TOKEN env var or run \`gh auth login\`.`,
     );
   }
 }
@@ -45,6 +49,10 @@ export function isTransientGitHubError(err: Error): boolean {
 export class GitHubProvider implements PrProvider {
   readonly name = 'github' as const;
   private octokit: Octokit | null = null;
+
+  authEnv(): Record<string, string> {
+    return { GITHUB_TOKEN: resolveToken() };
+  }
 
   private client(): Octokit {
     if (!this.octokit) {

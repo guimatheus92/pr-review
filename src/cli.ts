@@ -246,6 +246,13 @@ program
       const { runStatus, statusExitCode } = await import('./commands/status.js');
       const r = runStatus(runId);
       process.stdout.write(r.text + '\n');
+      if (r.state === 'done') {
+        const { RUNS_ROOT } = await import('./util/tmp.js');
+        const { join } = await import('node:path');
+        // stderr, so stdout stays the verbatim summary. Agents polling through
+        // a truncating channel (background notifications) re-read this file.
+        process.stderr.write(`summary file: ${join(RUNS_ROOT, runId, 'pr-review-summary.md')}\n`);
+      }
       process.exit(statusExitCode(r.state));
     } catch (err) {
       console.error((err as Error).message);

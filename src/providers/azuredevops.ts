@@ -5,6 +5,7 @@ import type { GitPullRequest, GitPullRequestCommentThread, Comment } from 'azure
 import type { ChangedFile, ExistingComment, Finding, PrMetadata, PrRef } from '../types.js';
 import type { PrProvider } from './types.js';
 import { withRetry } from '../util/retry.js';
+import { execErrorDetail } from '../util/exec-error.js';
 
 const URL_RES = [
   /^https?:\/\/dev\.azure\.com\/([^\/]+)\/([^\/]+)\/_git\/([^\/]+)\/pullrequest\/(\d+)/i,
@@ -38,6 +39,13 @@ interface AdoCredential {
 function resolveCredential(): AdoCredential {
   const pat = process.env.AZURE_DEVOPS_PAT ?? process.env.SYSTEM_ACCESSTOKEN ?? process.env.AZURE_DEVOPS_EXT_PAT;
   if (pat) return { token: pat, kind: 'pat' };
+  // User-settable bearer-token var (documented in the README auth table),
+  // *also* injected by the --detach pre-flight (authEnv) — kept separate from
+  // the PAT vars because a bearer token read back as a PAT would bind to the
+  // wrong auth handler.
+  const bearer = process.env.AZURE_DEVOPS_BEARER;
+  if (bearer) return { token: bearer, kind: 'bearer' };
+  let azDetail = '';
   try {
     // az ships as az.cmd on Windows, which only a shell can launch — and
     // shell+args-array trips DEP0190, so win32 gets a prebuilt command string
@@ -46,18 +54,18 @@ function resolveCredential(): AdoCredential {
     const argv = ['account', 'get-access-token', '--resource', ADO_AZURE_AD_RESOURCE_ID, '--query', 'accessToken', '-o', 'tsv'];
     const token = (
       process.platform === 'win32'
-        ? execSync(['az', ...argv].join(' '), { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
-        : execFileSync('az', argv, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+        ? execSync(['az', ...argv].join(' '), { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+        : execFileSync('az', argv, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
     ).trim();
     if (token) {
       process.stderr.write(`[ado] using bearer token from \`az account get-access-token\`\n`);
       return { token, kind: 'bearer' };
     }
-  } catch {
-    // fall through
+  } catch (e) {
+    azDetail = execErrorDetail(e);
   }
   throw new Error(
-    'No Azure DevOps token available. Set AZURE_DEVOPS_PAT, or run `az login` so `az account get-access-token` can mint a bearer token.',
+    `No Azure DevOps token available${azDetail ? ` (\`az account get-access-token\` failed: ${azDetail})` : ''}. Set AZURE_DEVOPS_PAT, or run \`az login\` so \`az account get-access-token\` can mint a bearer token.`,
   );
 }
 
@@ -205,6 +213,11 @@ export class AzureDevOpsProvider implements PrProvider {
   private connections: Map<string, azdev.WebApi> = new Map();
   private gitApis: Map<string, Promise<GitApi>> = new Map();
   private prCache: Map<string, Promise<GitPullRequest>> = new Map();
+
+  authEnv(): Record<string, string> {
+    const cred = resolveCredential();
+    return cred.kind === 'bearer' ? { AZURE_DEVOPS_BEARER: cred.token } : { AZURE_DEVOPS_PAT: cred.token };
+  }
 
   private connection(orgUrl: string): azdev.WebApi {
     const cached = this.connections.get(orgUrl);

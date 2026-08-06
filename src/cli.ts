@@ -164,6 +164,18 @@ program
         process.stdout.write(summary + '\n');
         if (exitCode !== 0) process.exitCode = exitCode;
       } catch (err) {
+        // Detached child (--run-dir set): persist the failure so `status` can
+        // say why — the parent is long gone and stdout goes to detached.log.
+        if (opts.runDir) {
+          try {
+            const { writeFileSync } = await import('node:fs');
+            const { join } = await import('node:path');
+            const { ERROR_FILE } = await import('./commands/status.js');
+            writeFileSync(join(opts.runDir, ERROR_FILE), ((err as Error).stack ?? String(err)) + '\n');
+          } catch {
+            // best-effort: the real error is about to be printed and exit(2)'d
+          }
+        }
         console.error((err as Error).message);
         process.exit(2);
       }
@@ -235,6 +247,13 @@ program
       const { runStatus, statusExitCode } = await import('./commands/status.js');
       const r = runStatus(runId);
       process.stdout.write(r.text + '\n');
+      if (r.state === 'done') {
+        const { RUNS_ROOT } = await import('./util/tmp.js');
+        const { join } = await import('node:path');
+        // stderr, so stdout stays the verbatim summary. Agents polling through
+        // a truncating channel (background notifications) re-read this file.
+        process.stderr.write(`summary file: ${join(RUNS_ROOT, runId, 'pr-review-summary.md')}\n`);
+      }
       process.exit(statusExitCode(r.state));
     } catch (err) {
       console.error((err as Error).message);

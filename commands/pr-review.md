@@ -30,18 +30,17 @@ node "$CLI" review $ARGUMENTS --detach
 
 ## Step 2 — poll until done
 
-Poll the run about every 25 seconds, each as a SEPARATE short command (never one long-running call). Show the user each progress snapshot as it arrives:
+Poll `node "$CLI" status <run-id>` about every 25 seconds and show the user each progress snapshot as it arrives. How you wait between polls depends on the harness:
 
-```bash
-sleep 25; node "$CLI" status <run-id>
-```
+- Under current Claude Code, chaining a foreground sleep (`sleep 25; node "$CLI" status <run-id>`) is **blocked**. Use the harness's background waiter instead — e.g. the Monitor tool with an until-loop that runs the status command every ~25s and surfaces each snapshot. Do not chain shorter sleeps to work around the block.
+- Where foreground sleeps are allowed (e.g. Copilot CLI), `sleep 25; node "$CLI" status <run-id>` as separate short calls is fine — never one long-running blocking call.
 
-React to the exit code:
+React to the `status` exit code:
 
-- **0** — done: `status` printed the final summary. Print that summary verbatim and stop.
+- **0** — done. The final summary can be 10–20 KB and **background/monitor notifications truncate long text — never reproduce the summary from a notification**. Read `~/.pr-review/runs/<run-id>/pr-review-summary.md` (on exit 0 `status` also prints `summary file: <path>` on stderr), or re-run `node "$CLI" status <run-id>` once in the foreground, and print that full content verbatim. Then stop.
 - **20** — still running: show the snapshot, then poll again.
 - **21** — reviewers finished but posting was interrupted. Finish it (fast, no re-review): `node "$CLI" review <pr-url> --resume <run-id>`, then print its summary verbatim.
-- **22** — the run stopped before producing findings. Report it and point at `~/.pr-review/runs/<run-id>/detached.log`; stop.
+- **22** — the run stopped before producing findings. `status` surfaces the recorded fatal error when one exists; report it and point at `~/.pr-review/runs/<run-id>/detached.log`; stop.
 - **1** — run not found: report the error and stop.
 
 Print the review summary verbatim — do not editorialize, summarize, or skip sections. `review --fail-on` exiting 1 means findings at/above that severity were reported, not a tool failure; exit 2 is a pipeline error. All run artifacts (gather data, prompts, raw outputs, findings JSON, the `progress.ndjson` feed, summary) live under `~/.pr-review/runs/<run-id>/`.

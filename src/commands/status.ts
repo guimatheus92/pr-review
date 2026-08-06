@@ -6,6 +6,13 @@ import { readProgress, renderProgressSnapshot } from '../util/progress.js';
 
 export type StatusState = 'done' | 'running' | 'interrupted' | 'failed' | 'missing';
 
+/**
+ * Fatal-error artifact a detached child writes before exiting (producer:
+ * cli.ts review catch). Named here, next to the consumer, like PROGRESS_FILE
+ * and MARKER_FILE — writer and reader share one source of truth.
+ */
+export const ERROR_FILE = 'error.txt';
+
 export interface StatusResult {
   state: StatusState;
   text: string;
@@ -54,7 +61,9 @@ function hasReviewerOutput(outDir: string): boolean {
  *  - `done`        → the summary is on disk; text IS the summary.
  *  - `running`     → the run process is alive; a live progress snapshot.
  *  - `interrupted` → the process died with reviewer output on disk but no summary; resume it.
- *  - `failed`      → the process died before producing any findings; check detached.log.
+ *  - `failed`      → the process died before producing any findings; the
+ *                    recorded fatal error (error.txt) is surfaced inline when
+ *                    present, plus the detached.log pointer.
  *  - `missing`     → no such run dir.
  *
  * Liveness (run.pid) is what separates a slow-but-healthy run from a dead one —
@@ -88,7 +97,7 @@ export function runStatus(runId: string, now = Date.now()): StatusResult {
         `  Finish it (fast — no re-review): pr-review review <pr-url> --resume ${runId}`,
     };
   }
-  const errPath = join(outDir, 'error.txt');
+  const errPath = join(outDir, ERROR_FILE);
   const errTxt = existsSync(errPath) ? readFileSync(errPath, 'utf8').trim() : '';
   return {
     state: 'failed',

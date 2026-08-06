@@ -5,6 +5,7 @@ import type { GitPullRequest, GitPullRequestCommentThread, Comment } from 'azure
 import type { ChangedFile, ExistingComment, Finding, PrMetadata, PrRef } from '../types.js';
 import type { PrProvider } from './types.js';
 import { withRetry } from '../util/retry.js';
+import { execErrorDetail } from '../util/exec-error.js';
 
 const URL_RES = [
   /^https?:\/\/dev\.azure\.com\/([^\/]+)\/([^\/]+)\/_git\/([^\/]+)\/pullrequest\/(\d+)/i,
@@ -38,8 +39,10 @@ interface AdoCredential {
 function resolveCredential(): AdoCredential {
   const pat = process.env.AZURE_DEVOPS_PAT ?? process.env.SYSTEM_ACCESSTOKEN ?? process.env.AZURE_DEVOPS_EXT_PAT;
   if (pat) return { token: pat, kind: 'pat' };
-  // Round-trip var set by the --detach pre-flight (authEnv): a bearer token
-  // must not come back as a PAT or the child picks the wrong auth handler.
+  // User-settable bearer-token var (documented in the README auth table),
+  // *also* injected by the --detach pre-flight (authEnv) — kept separate from
+  // the PAT vars because a bearer token read back as a PAT would bind to the
+  // wrong auth handler.
   const bearer = process.env.AZURE_DEVOPS_BEARER;
   if (bearer) return { token: bearer, kind: 'bearer' };
   let azDetail = '';
@@ -59,10 +62,7 @@ function resolveCredential(): AdoCredential {
       return { token, kind: 'bearer' };
     }
   } catch (e) {
-    const err = e as Error & { code?: string; status?: number; stderr?: string | Buffer };
-    azDetail = [err.code ?? err.status, err.stderr?.toString().trim() || err.message]
-      .filter(Boolean)
-      .join(': ');
+    azDetail = execErrorDetail(e);
   }
   throw new Error(
     `No Azure DevOps token available${azDetail ? ` (\`az account get-access-token\` failed: ${azDetail})` : ''}. Set AZURE_DEVOPS_PAT, or run \`az login\` so \`az account get-access-token\` can mint a bearer token.`,

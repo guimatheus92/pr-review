@@ -48,3 +48,21 @@ test('detachReview — strips --detach, appends --run-dir, spawns detached+unref
     rmSync(outDir, { recursive: true, force: true });
   }
 });
+
+test('detachReview — a failed auth pre-flight throws before spawning anything', () => {
+  let spawns = 0;
+  const fakeSpawn = (() => {
+    spawns++;
+    return { on() { return this; }, unref() {} };
+  }) as unknown as typeof import('node:child_process').spawn;
+
+  const url = 'https://github.com/o/r/pull/7';
+  assert.throws(
+    () =>
+      detachReview(url, ['review', url, '--detach'], fakeSpawn, () => {
+        throw new Error('No GitHub auth token available.');
+      }),
+    /No GitHub auth token/,
+  );
+  assert.equal(spawns, 0, 'no detached child after a failed pre-flight');
+});

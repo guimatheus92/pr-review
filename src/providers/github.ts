@@ -3,23 +3,28 @@ import { execFileSync } from 'node:child_process';
 import type { ChangedFile, ExistingComment, Finding, PrMetadata, PrRef } from '../types.js';
 import type { BatchComment, PrProvider } from './types.js';
 import { withRetry } from '../util/retry.js';
+import { execErrorDetail } from '../util/exec-error.js';
 
 const URL_RE = /^https?:\/\/(?:www\.)?github\.com\/([^\/]+)\/([^\/]+)\/pull\/(\d+)/i;
 
 function resolveToken(): string {
   const fromEnv = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? process.env.COPILOT_GITHUB_TOKEN;
   if (fromEnv) return fromEnv;
+  let detail: string;
   try {
-    return execFileSync('gh', ['auth', 'token'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    const token = execFileSync('gh', ['auth', 'token'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    // Guard the empty-but-exit-0 case (broken keyring/hosts.yml state): an
+    // empty token must throw here — returning '' would make authEnv() inject
+    // GITHUB_TOKEN='' and the detached child would silently fall through to
+    // this same flaky CLI fallback the pre-flight exists to avoid.
+    if (token) return token;
+    detail = '`gh auth token` printed an empty token';
   } catch (e) {
-    const err = e as Error & { code?: string; status?: number; stderr?: string | Buffer };
-    const detail = [err.code ?? err.status, err.stderr?.toString().trim() || err.message]
-      .filter(Boolean)
-      .join(': ');
-    throw new Error(
-      `No GitHub auth token available (\`gh auth token\` failed: ${detail}). Set GITHUB_TOKEN env var or run \`gh auth login\`.`,
-    );
+    detail = `\`gh auth token\` failed: ${execErrorDetail(e)}`;
   }
+  throw new Error(
+    `No GitHub auth token available (${detail}). Set GITHUB_TOKEN env var or run \`gh auth login\`.`,
+  );
 }
 
 function classifyAuthor(login: string): ExistingComment['source'] {

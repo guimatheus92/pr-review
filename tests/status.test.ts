@@ -3,7 +3,7 @@ import { strict as assert } from 'node:assert';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { RUNS_ROOT } from '../src/util/tmp.js';
-import { runStatus, statusExitCode } from '../src/commands/status.js';
+import { ERROR_FILE, runStatus, statusExitCode } from '../src/commands/status.js';
 
 // status resolves run-id → RUNS_ROOT/<id>; seed test dirs there and clean up.
 function seed(id: string): string {
@@ -62,6 +62,22 @@ test('runStatus — a dead pid with no findings → failed (poller can stop)', (
     const r = runStatus(id);
     assert.equal(r.state, 'failed');
     assert.match(r.text, /detached\.log/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runStatus — failed run with error.txt surfaces the recorded error inline', () => {
+  const id = 'status-test-failed-error';
+  const dir = seed(id);
+  try {
+    writeFileSync(join(dir, 'run.pid'), String(DEAD_PID), 'utf8');
+    writeFileSync(join(dir, 'progress.ndjson'), JSON.stringify({ ts: 1, phase: 'gather', detail: '' }) + '\n', 'utf8');
+    writeFileSync(join(dir, ERROR_FILE), 'Error: boom\n  at gather (x.ts:1)\n', 'utf8');
+    const r = runStatus(id);
+    assert.equal(r.state, 'failed');
+    assert.match(r.text, /Error: boom/, 'recorded fatal error is inlined');
+    assert.match(r.text, /detached\.log/, 'log pointer still present alongside the inline error');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -2,20 +2,6 @@ import type { Finding, Severity } from '../types.js';
 
 const SEVERITY_TOKENS: Severity[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'NIT'];
 
-function extractJsonBlock(raw: string): string | null {
-  const fence = raw.match(/```(?:json)?\s*\n([\s\S]*?)\n```/i);
-  if (fence) return fence[1];
-  const first = raw.indexOf('{');
-  const firstArr = raw.indexOf('[');
-  let start = -1;
-  if (first === -1) start = firstArr;
-  else if (firstArr === -1) start = first;
-  else start = Math.min(first, firstArr);
-  if (start === -1) return null;
-  const balanced = sliceBalancedJson(raw, start);
-  return balanced ?? raw.slice(start).trim();
-}
-
 /**
  * Slice from `start` to the position where the opening brace/bracket closes,
  * tracking string literals and escapes — LLM output routinely has trailing
@@ -46,22 +32,61 @@ function sliceBalancedJson(raw: string, start: number): string | null {
   return null;
 }
 
-export function parseJsonFindings(raw: string): Finding[] {
-  const block = extractJsonBlock(raw);
-  if (!block) return [];
+/**
+ * Parse one extracted block into Findings: a bare array, `{findings: […]}`,
+ * or the orchestrator's own `{reviewers: [{findings: […]}]}` contract shape
+ * (the file payload it sometimes prints to stdout instead of writing).
+ */
+function findingsFromBlock(block: string): Finding[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(block);
   } catch {
     return [];
   }
-  const list = Array.isArray(parsed)
-    ? parsed
-    : (parsed as { findings?: unknown }).findings;
+  const o = parsed as { findings?: unknown; reviewers?: unknown };
+  let list: unknown;
+  if (Array.isArray(parsed)) list = parsed;
+  else if (Array.isArray(o.findings)) list = o.findings;
+  else if (Array.isArray(o.reviewers)) {
+    list = o.reviewers.flatMap((r: { findings?: unknown }) =>
+      Array.isArray(r?.findings) ? r.findings : [],
+    );
+  }
   if (!Array.isArray(list)) return [];
   return list
     .map((item) => normalizeFinding(item))
     .filter((f): f is Finding => f !== null);
+}
+
+/**
+ * Extract findings from EVERY JSON value in the blob, not just the first —
+ * a narrated orchestrator transcript interleaves prose brackets ("[security]")
+ * with the real arrays, and stopping at the first extraction lost them all.
+ * Repeated blocks may duplicate findings; the pipeline's dedupe handles that.
+ */
+export function parseJsonFindings(raw: string): Finding[] {
+  // Fenced blocks first — the common "```json … ```" case, all of them.
+  const fenced: Finding[] = [];
+  for (const m of raw.matchAll(/```(?:json)?\s*\n([\s\S]*?)\n```/gi)) {
+    fenced.push(...findingsFromBlock(m[1]!));
+  }
+  if (fenced.length > 0) return fenced;
+  // ponytail: O(n²) worst case on bracket-dense blobs; fine for CLI stdout sizes.
+  const merged: Finding[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i] !== '{' && raw[i] !== '[') continue;
+    const slice = sliceBalancedJson(raw, i);
+    if (!slice) continue;
+    const got = findingsFromBlock(slice);
+    if (got.length > 0) {
+      merged.push(...got);
+      i += slice.length - 1; // jump past the consumed block
+    }
+    // else: prose bracket / non-finding JSON — keep scanning from inside it,
+    // so a real array nested after (or within) it is still reached
+  }
+  return merged;
 }
 
 function normalizeFinding(item: unknown): Finding | null {

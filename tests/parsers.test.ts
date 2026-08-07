@@ -33,6 +33,40 @@ test('parseJsonFindings — invalid JSON returns empty', () => {
   assert.deepEqual(parseJsonFindings('not json'), []);
 });
 
+test('parseJsonFindings — salvage: prose bracket before the real array does not defeat the parse', () => {
+  const raw = 'I dispatched [security] and [quality] reviewers.\n[{"severity":"HIGH","title":"x","body":"y","file":"a.ts","line":1}]';
+  const result = parseJsonFindings(raw);
+  assert.equal(result.length, 1, 'the narration bracket must not win the extraction race');
+  assert.equal(result[0]!.severity, 'HIGH');
+});
+
+test('parseJsonFindings — salvage: multiple JSON arrays interleaved with prose are merged', () => {
+  const raw = [
+    'quality returned:',
+    '[{"severity":"MEDIUM","title":"q1","body":"b1","file":"a.ts","line":1}]',
+    'test-coverage returned:',
+    '[{"severity":"LOW","title":"t1","body":"b2","file":"b.ts","line":2},{"severity":"LOW","title":"t2","body":"b3","file":"c.ts","line":3}]',
+    'the other reviewers returned [] — nothing to report.',
+  ].join('\n');
+  const result = parseJsonFindings(raw);
+  assert.equal(result.length, 3, 'findings from every array, not just the first');
+});
+
+test('parseJsonFindings — salvage: the orchestrator contract shape {reviewers:[…]} printed to stdout', () => {
+  const raw =
+    'Writing the findings now.\n' +
+    '{"reviewers":[{"name":"quality","findings":[{"severity":"HIGH","title":"x","body":"y"}]},{"name":"security","findings":[]}]}\n' +
+    'DONE';
+  const result = parseJsonFindings(raw);
+  assert.equal(result.length, 1, 'the file payload printed instead of written must salvage');
+});
+
+test('parseJsonFindings — salvage: first fenced block is prose-only, second holds the findings', () => {
+  const raw = '```\nsome quoted diff excerpt\n```\nand the findings:\n```json\n[{"severity":"NIT","title":"x","body":"y"}]\n```';
+  const result = parseJsonFindings(raw);
+  assert.equal(result.length, 1, 'a non-findings first fence must not end the search');
+});
+
 test('parseJsonFindings — normalizes severity casing', () => {
   const raw = `[{"severity":"high","title":"x","body":"y"}]`;
   const result = parseJsonFindings(raw);

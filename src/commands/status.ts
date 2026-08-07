@@ -7,9 +7,10 @@ import { readProgress, renderProgressSnapshot } from '../util/progress.js';
 export type StatusState = 'done' | 'running' | 'interrupted' | 'failed' | 'missing';
 
 /**
- * Fatal-error artifact a detached child writes before exiting (producer:
- * cli.ts review catch). Named here, next to the consumer, like PROGRESS_FILE
- * and MARKER_FILE — writer and reader share one source of truth.
+ * Fatal-error artifact a detached child writes before exiting (producers:
+ * cli.ts review catch, and finalizeReview on a pipeline failure). Named here,
+ * next to the consumer, like PROGRESS_FILE and MARKER_FILE — writer and
+ * reader share one source of truth.
  */
 export const ERROR_FILE = 'error.txt';
 

@@ -10,6 +10,7 @@ import { detectCodex, runCodexReviewer } from '../dispatch/codex.js';
 import { ensureRunDir, RUNS_ROOT } from '../util/tmp.js';
 import { appendProgress } from '../util/progress.js';
 import { readPostedMarker, writePostedMarker } from '../util/posted-marker.js';
+import { ERROR_FILE } from './status.js';
 import { detectProvider } from '../providers/index.js';
 import { dedupeAgainstExisting, dedupeWithinBatch } from '../dedupe.js';
 import { detectCompanions, formatWarning } from '../plugins/companions.js';
@@ -227,8 +228,10 @@ function toConfigOverrides(opts: ReviewCmdOptions): ConfigOverrides {
 /**
  * Shared tail: dedupe → (idempotent) post → summary. Used by both a fresh run
  * and `--resume`, so the dedupe/post/summary contract lives in exactly one place.
+ * On `findingsUnavailable` (pipeline failure) it writes error.txt instead of the
+ * summary, so `status` reports `failed` — never a clean review. Exported for tests.
  */
-async function finalizeReview(a: {
+export async function finalizeReview(a: {
   prUrl: string;
   outDir: string;
   gather: GatherOutput;
@@ -309,23 +312,39 @@ async function finalizeReview(a: {
     process.stderr.write(`[review] --dry-run: skipping post\n`);
   }
 
-  const summary = renderSummary(a.prUrl, a.outputs, finalFindings, droppedCount, Date.now() - a.overallStart, postResult, a.skillRouting);
-  writeFileSync(join(a.outDir, 'pr-review-summary.md'), summary, 'utf8');
-  writeFileSync(
-    join(a.outDir, 'pr-review-findings.json'),
-    JSON.stringify(
-      {
-        reviewers: a.outputs.map((o) => ({ reviewer: o.reviewerName, findings: o.findings })),
-        finalFindings,
-        droppedCount,
-      },
-      null,
-      2,
-    ),
-    'utf8',
-  );
-  process.stderr.write(`[review] wrote summary to ${join(a.outDir, 'pr-review-summary.md')}\n`);
-  appendProgress(a.outDir, 'done', `${postResult?.posted ?? 0} posted, ${finalFindings.length} findings`);
+  let summary: string;
+  if (a.findingsUnavailable) {
+    // A failed pipeline must never mint the done-state artifacts: `status`
+    // treats pr-review-summary.md as "done, exit 0" the moment it exists.
+    summary =
+      'pipeline failure: the orchestrator produced no parseable findings — this is NOT a clean PR.\n' +
+      'Details: orchestrator-failure.log in this run dir.\n' +
+      '--resume cannot recover this run (no reviewer output on disk); re-run the review.';
+    try {
+      writeFileSync(join(a.outDir, ERROR_FILE), summary + '\n', 'utf8');
+    } catch {
+      // status degrades to the detached.log pointer
+    }
+    appendProgress(a.outDir, 'error', 'orchestrator produced no parseable findings');
+  } else {
+    summary = renderSummary(a.prUrl, a.outputs, finalFindings, droppedCount, Date.now() - a.overallStart, postResult, a.skillRouting);
+    writeFileSync(join(a.outDir, 'pr-review-summary.md'), summary, 'utf8');
+    writeFileSync(
+      join(a.outDir, 'pr-review-findings.json'),
+      JSON.stringify(
+        {
+          reviewers: a.outputs.map((o) => ({ reviewer: o.reviewerName, findings: o.findings })),
+          finalFindings,
+          droppedCount,
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+    process.stderr.write(`[review] wrote summary to ${join(a.outDir, 'pr-review-summary.md')}\n`);
+    appendProgress(a.outDir, 'done', `${postResult?.posted ?? 0} posted, ${finalFindings.length} findings`);
+  }
 
   const exitCode = decideExitCode(a.findingsUnavailable, finalFindings, a.failOn);
   if (exitCode === 1) {
@@ -609,13 +628,14 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     process.stderr.write(
       `[review] pipeline failure: the orchestrator produced no parseable findings (this is NOT a clean PR).${codexNote}\n`,
     );
-    // The orchestrator's own stdout/stderr are otherwise console-only — persist a
-    // tail so this failure class (e.g. a transient rate limit) is diagnosable.
+    // The orchestrator's own stdout/stderr are otherwise console-only — persist
+    // them in full: when the contract fails, stdout may hold the only copy of
+    // the reviewer findings, and a tail makes even manual salvage impossible.
     try {
       const failLog = join(outDir, 'orchestrator-failure.log');
       writeFileSync(
         failLog,
-        `exitCode=${session.exitCode}\n\n=== stdout (tail) ===\n${session.rawOrchestratorOutput.slice(-8000)}\n\n=== stderr (tail) ===\n${session.rawOrchestratorStderr.slice(-8000)}\n`,
+        `exitCode=${session.exitCode}\n\n=== stdout ===\n${session.rawOrchestratorOutput}\n\n=== stderr ===\n${session.rawOrchestratorStderr}\n`,
         'utf8',
       );
       process.stderr.write(`[review] wrote orchestrator failure log to ${failLog}\n`);

@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { RUNS_ROOT } from '../src/util/tmp.js';
-import { ERROR_FILE, runStatus, statusExitCode } from '../src/commands/status.js';
+import { ERROR_FILE, RUNS_ROOT } from '../src/util/tmp.js';
+import { runStatus, statusExitCode } from '../src/commands/status.js';
 
 // status resolves run-id → RUNS_ROOT/<id>; seed test dirs there and clean up.
 function seed(id: string): string {

@@ -2,9 +2,9 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { RUNS_ROOT } from '../src/util/tmp.js';
-import { finalizeReview } from '../src/commands/review.js';
-import { ERROR_FILE, runStatus } from '../src/commands/status.js';
+import { ERROR_FILE, RUNS_ROOT } from '../src/util/tmp.js';
+import { finalizeReview, writeOrchestratorFailureLog } from '../src/commands/review.js';
+import { runStatus } from '../src/commands/status.js';
 import { readProgress } from '../src/util/progress.js';
 import type { Finding, PrRef, ReviewerOutput } from '../src/types.js';
 import type { BatchComment, PrProvider } from '../src/providers/types.js';
@@ -82,6 +82,23 @@ test('finalizeReview — a pipeline failure never mints the done artifacts; stat
     const s = runStatus(id);
     assert.equal(s.state, 'failed', 'status must not read the failure as a clean review');
     assert.match(s.text, /NOT a clean PR/, 'the recorded error is surfaced inline');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('writeOrchestratorFailureLog — persists the ENTIRE stdout/stderr, never a tail', () => {
+  const id = 'finalize-failure-log-test';
+  const dir = seedRun(id);
+  try {
+    // Well past the old 8 KB tail: the head marker must survive in the log.
+    const stdout = 'HEAD-OF-STDOUT ' + 'x'.repeat(20_000) + ' TAIL-OF-STDOUT';
+    const stderr = 'HEAD-OF-STDERR ' + 'y'.repeat(20_000) + ' TAIL-OF-STDERR';
+    writeOrchestratorFailureLog(dir, 0, stdout, stderr);
+    const log = readFileSync(join(dir, 'orchestrator-failure.log'), 'utf8');
+    assert.ok(log.includes(stdout), 'full stdout must be present (head included)');
+    assert.ok(log.includes(stderr), 'full stderr must be present (head included)');
+    assert.match(log, /exitCode=0/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

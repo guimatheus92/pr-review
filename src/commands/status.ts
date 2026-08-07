@@ -1,18 +1,10 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { RUNS_ROOT } from '../util/tmp.js';
+import { ERROR_FILE, RUNS_ROOT } from '../util/tmp.js';
 import { REVIEWER_OUTPUT_FILES } from '../dispatch/single-session.js';
 import { readProgress, renderProgressSnapshot } from '../util/progress.js';
 
 export type StatusState = 'done' | 'running' | 'interrupted' | 'failed' | 'missing';
-
-/**
- * Fatal-error artifact a detached child writes before exiting (producers:
- * cli.ts review catch, and finalizeReview on a pipeline failure). Named here,
- * next to the consumer, like PROGRESS_FILE and MARKER_FILE — writer and
- * reader share one source of truth.
- */
-export const ERROR_FILE = 'error.txt';
 
 export interface StatusResult {
   state: StatusState;

@@ -7,10 +7,9 @@ import { loadConfig, type ConfigOverrides } from '../config.js';
 import { CATALOG_TARGET, parseFindingsFile, prepareSessionContext, REVIEWER_OUTPUT_FILES, runSingleSession, type SkillRoute } from '../dispatch/single-session.js';
 import { resolveRuntime, type Runtime, type RuntimeChoice } from '../dispatch/runtime.js';
 import { detectCodex, runCodexReviewer } from '../dispatch/codex.js';
-import { ensureRunDir, RUNS_ROOT } from '../util/tmp.js';
+import { ensureRunDir, ERROR_FILE, RUNS_ROOT } from '../util/tmp.js';
 import { appendProgress } from '../util/progress.js';
 import { readPostedMarker, writePostedMarker } from '../util/posted-marker.js';
-import { ERROR_FILE } from './status.js';
 import { detectProvider } from '../providers/index.js';
 import { dedupeAgainstExisting, dedupeWithinBatch } from '../dedupe.js';
 import { detectCompanions, formatWarning } from '../plugins/companions.js';
@@ -226,6 +225,21 @@ function toConfigOverrides(opts: ReviewCmdOptions): ConfigOverrides {
 }
 
 /**
+ * Persist the orchestrator's FULL stdout/stderr on a pipeline failure — when
+ * the contract fails, stdout may hold the only copy of the reviewer findings,
+ * and a tail would make even manual salvage impossible. Exported for tests.
+ */
+export function writeOrchestratorFailureLog(outDir: string, exitCode: number | null, stdout: string, stderr: string): void {
+  try {
+    const failLog = join(outDir, 'orchestrator-failure.log');
+    writeFileSync(failLog, `exitCode=${exitCode}\n\n=== stdout ===\n${stdout}\n\n=== stderr ===\n${stderr}\n`, 'utf8');
+    process.stderr.write(`[review] wrote orchestrator failure log to ${failLog}\n`);
+  } catch (err) {
+    process.stderr.write(`[review] could not write orchestrator-failure.log: ${(err as Error).message}\n`);
+  }
+}
+
+/**
  * Shared tail: dedupe → (idempotent) post → summary. Used by both a fresh run
  * and `--resume`, so the dedupe/post/summary contract lives in exactly one place.
  * On `findingsUnavailable` (pipeline failure) it writes error.txt instead of the
@@ -322,8 +336,9 @@ export async function finalizeReview(a: {
       '--resume cannot recover this run (no reviewer output on disk); re-run the review.';
     try {
       writeFileSync(join(a.outDir, ERROR_FILE), summary + '\n', 'utf8');
-    } catch {
-      // status degrades to the detached.log pointer
+    } catch (err) {
+      // status degrades to the detached.log pointer — but say why on stderr
+      process.stderr.write(`[review] could not write ${ERROR_FILE}: ${(err as Error).message}\n`);
     }
     appendProgress(a.outDir, 'error', 'orchestrator produced no parseable findings');
   } else {
@@ -628,20 +643,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     process.stderr.write(
       `[review] pipeline failure: the orchestrator produced no parseable findings (this is NOT a clean PR).${codexNote}\n`,
     );
-    // The orchestrator's own stdout/stderr are otherwise console-only — persist
-    // them in full: when the contract fails, stdout may hold the only copy of
-    // the reviewer findings, and a tail makes even manual salvage impossible.
-    try {
-      const failLog = join(outDir, 'orchestrator-failure.log');
-      writeFileSync(
-        failLog,
-        `exitCode=${session.exitCode}\n\n=== stdout ===\n${session.rawOrchestratorOutput}\n\n=== stderr ===\n${session.rawOrchestratorStderr}\n`,
-        'utf8',
-      );
-      process.stderr.write(`[review] wrote orchestrator failure log to ${failLog}\n`);
-    } catch (err) {
-      process.stderr.write(`[review] could not write orchestrator-failure.log: ${(err as Error).message}\n`);
-    }
+    writeOrchestratorFailureLog(outDir, session.exitCode, session.rawOrchestratorOutput, session.rawOrchestratorStderr);
   }
   return result;
 }

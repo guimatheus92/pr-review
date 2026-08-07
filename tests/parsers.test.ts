@@ -67,6 +67,32 @@ test('parseJsonFindings — salvage: first fenced block is prose-only, second ho
   assert.equal(result.length, 1, 'a non-findings first fence must not end the search');
 });
 
+test('parseJsonFindings — salvage: findings split across a fenced block and a bare array are all merged', () => {
+  const raw =
+    '```json\n[{"severity":"HIGH","title":"fenced","body":"b1","file":"a.ts","line":1}]\n```\n' +
+    'and quality also returned:\n' +
+    '[{"severity":"LOW","title":"bare","body":"b2","file":"b.ts","line":2}]';
+  const result = parseJsonFindings(raw);
+  assert.equal(result.length, 2, 'fenced findings must not short-circuit the bare-array scan');
+});
+
+test('parseJsonFindings — salvage: fenced non-findings block (diff echo) then a bare findings array', () => {
+  const raw = '```\n- old line\n+ new line\n```\nfindings:\n[{"severity":"MEDIUM","title":"x","body":"y"}]';
+  const result = parseJsonFindings(raw);
+  assert.equal(result.length, 1, 'an empty fence must fall through to the scan');
+});
+
+test('parseJsonFindings — salvage: findings array nested inside an unrelated JSON object', () => {
+  const raw = 'run output: {"meta":{"run":1},"data":[{"severity":"HIGH","title":"x","body":"y"}]}';
+  const result = parseJsonFindings(raw);
+  assert.equal(result.length, 1, 'nested findings must be reached structurally');
+});
+
+test('parseJsonFindings — salvage: a prose-quoted log object is NOT mistaken for a finding', () => {
+  const raw = 'Example log: {"level":"error","message":"db timeout"}\nno findings here';
+  assert.deepEqual(parseJsonFindings(raw), []);
+});
+
 test('parseJsonFindings — normalizes severity casing', () => {
   const raw = `[{"severity":"high","title":"x","body":"y"}]`;
   const result = parseJsonFindings(raw);

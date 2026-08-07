@@ -110,7 +110,8 @@ const FENCE_RE = /```(?:json)?\s*\n([\s\S]*?)\n```/gi;
  * payloads, and may split findings across fenced blocks and bare arrays.
  * Fenced blocks are parsed first and excised so the scan never re-parses their
  * ranges; the remainder is scanned for balanced JSON values. Repeated payloads
- * may duplicate findings; the pipeline's dedupe handles that.
+ * may duplicate findings; the default pipeline dedupes them before posting
+ * (not under --dedupe-mode off — this function itself does not dedupe).
  */
 export function parseJsonFindings(raw: string): Finding[] {
   const merged: Finding[] = [];

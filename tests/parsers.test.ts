@@ -88,6 +88,11 @@ test('parseJsonFindings — salvage: findings array nested inside an unrelated J
   assert.equal(result.length, 1, 'nested findings must be reached structurally');
 });
 
+test('parseJsonFindings — a fenced block holding a JSON scalar (null) degrades to [], never throws', () => {
+  assert.deepEqual(parseJsonFindings('```json\nnull\n```'), []);
+  assert.equal(parseJsonFindings('```json\ntrue\n```\n[{"severity":"LOW","title":"x","body":"y"}]').length, 1);
+});
+
 test('parseJsonFindings — salvage: a prose-quoted log object is NOT mistaken for a finding', () => {
   const raw = 'Example log: {"level":"error","message":"db timeout"}\nno findings here';
   assert.deepEqual(parseJsonFindings(raw), []);

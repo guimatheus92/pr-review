@@ -125,6 +125,8 @@ test('finalizeReview — codex sibling findings still post on a pipeline failure
       provider,
     });
     assert.equal(calls.batches.length, 1, 'the lone sibling pass is still posted');
+    assert.equal(calls.batches[0]!.length, 1, 'the batch carries exactly the codex finding');
+    assert.match(calls.batches[0]![0]!.body, /a real finding body/, 'the posted comment is the seeded finding');
     assert.equal(r.exitCode, 2, 'a sibling pass is not a complete review — still a pipeline failure');
     assert.ok(!existsSync(join(dir, 'pr-review-summary.md')), 'still no done-state artifact');
     assert.ok(existsSync(join(dir, ERROR_FILE)));

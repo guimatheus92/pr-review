@@ -254,6 +254,12 @@ export async function finalizeReview(a: {
   publish: boolean;
   dryRun?: boolean;
   failOn?: Severity;
+  /**
+   * The orchestrator's primary contract failed (no parseable findings from the
+   * session). True can coexist with non-empty `outputs` — the Codex sibling's
+   * findings still dedupe and post — but the run is a pipeline failure (exit 2)
+   * and must never mint the done-state summary.
+   */
   findingsUnavailable: boolean;
   forcePost?: boolean;
   overallStart: number;
@@ -333,7 +339,7 @@ export async function finalizeReview(a: {
     summary =
       'pipeline failure: the orchestrator produced no parseable findings — this is NOT a clean PR.\n' +
       'Details: orchestrator-failure.log in this run dir.\n' +
-      '--resume cannot recover this run (no reviewer output on disk); re-run the review.';
+      '--resume cannot recover this run (no loadable reviewer output); re-run the review.';
     try {
       writeFileSync(join(a.outDir, ERROR_FILE), summary + '\n', 'utf8');
     } catch (err) {

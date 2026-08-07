@@ -7,7 +7,7 @@ import { loadConfig, type ConfigOverrides } from '../config.js';
 import { CATALOG_TARGET, parseFindingsFile, prepareSessionContext, REVIEWER_OUTPUT_FILES, runSingleSession, type SkillRoute } from '../dispatch/single-session.js';
 import { resolveRuntime, type Runtime, type RuntimeChoice } from '../dispatch/runtime.js';
 import { detectCodex, runCodexReviewer } from '../dispatch/codex.js';
-import { ensureRunDir, RUNS_ROOT } from '../util/tmp.js';
+import { ensureRunDir, ERROR_FILE, RUNS_ROOT } from '../util/tmp.js';
 import { appendProgress } from '../util/progress.js';
 import { readPostedMarker, writePostedMarker } from '../util/posted-marker.js';
 import { detectProvider } from '../providers/index.js';
@@ -225,10 +225,27 @@ function toConfigOverrides(opts: ReviewCmdOptions): ConfigOverrides {
 }
 
 /**
+ * Persist the orchestrator's FULL stdout/stderr on a pipeline failure — when
+ * the contract fails, stdout may hold the only copy of the reviewer findings,
+ * and a tail would make even manual salvage impossible. Exported for tests.
+ */
+export function writeOrchestratorFailureLog(outDir: string, exitCode: number | null, stdout: string, stderr: string): void {
+  try {
+    const failLog = join(outDir, 'orchestrator-failure.log');
+    writeFileSync(failLog, `exitCode=${exitCode}\n\n=== stdout ===\n${stdout}\n\n=== stderr ===\n${stderr}\n`, 'utf8');
+    process.stderr.write(`[review] wrote orchestrator failure log to ${failLog}\n`);
+  } catch (err) {
+    process.stderr.write(`[review] could not write orchestrator-failure.log: ${(err as Error).message}\n`);
+  }
+}
+
+/**
  * Shared tail: dedupe → (idempotent) post → summary. Used by both a fresh run
  * and `--resume`, so the dedupe/post/summary contract lives in exactly one place.
+ * On `findingsUnavailable` (pipeline failure) it writes error.txt instead of the
+ * summary, so `status` reports `failed` — never a clean review. Exported for tests.
  */
-async function finalizeReview(a: {
+export async function finalizeReview(a: {
   prUrl: string;
   outDir: string;
   gather: GatherOutput;
@@ -237,6 +254,12 @@ async function finalizeReview(a: {
   publish: boolean;
   dryRun?: boolean;
   failOn?: Severity;
+  /**
+   * The orchestrator's primary contract failed (no parseable findings from the
+   * session). True can coexist with non-empty `outputs` — the Codex sibling's
+   * findings still dedupe and post — but the run is a pipeline failure (exit 2)
+   * and must never mint the done-state summary.
+   */
   findingsUnavailable: boolean;
   forcePost?: boolean;
   overallStart: number;
@@ -309,23 +332,40 @@ async function finalizeReview(a: {
     process.stderr.write(`[review] --dry-run: skipping post\n`);
   }
 
-  const summary = renderSummary(a.prUrl, a.outputs, finalFindings, droppedCount, Date.now() - a.overallStart, postResult, a.skillRouting);
-  writeFileSync(join(a.outDir, 'pr-review-summary.md'), summary, 'utf8');
-  writeFileSync(
-    join(a.outDir, 'pr-review-findings.json'),
-    JSON.stringify(
-      {
-        reviewers: a.outputs.map((o) => ({ reviewer: o.reviewerName, findings: o.findings })),
-        finalFindings,
-        droppedCount,
-      },
-      null,
-      2,
-    ),
-    'utf8',
-  );
-  process.stderr.write(`[review] wrote summary to ${join(a.outDir, 'pr-review-summary.md')}\n`);
-  appendProgress(a.outDir, 'done', `${postResult?.posted ?? 0} posted, ${finalFindings.length} findings`);
+  let summary: string;
+  if (a.findingsUnavailable) {
+    // A failed pipeline must never mint the done-state artifacts: `status`
+    // treats pr-review-summary.md as "done, exit 0" the moment it exists.
+    summary =
+      'pipeline failure: the orchestrator produced no parseable findings — this is NOT a clean PR.\n' +
+      'Details: orchestrator-failure.log in this run dir.\n' +
+      '--resume cannot recover this run (no loadable reviewer output); re-run the review.';
+    try {
+      writeFileSync(join(a.outDir, ERROR_FILE), summary + '\n', 'utf8');
+    } catch (err) {
+      // status degrades to the detached.log pointer — but say why on stderr
+      process.stderr.write(`[review] could not write ${ERROR_FILE}: ${(err as Error).message}\n`);
+    }
+    appendProgress(a.outDir, 'error', 'orchestrator produced no parseable findings');
+  } else {
+    summary = renderSummary(a.prUrl, a.outputs, finalFindings, droppedCount, Date.now() - a.overallStart, postResult, a.skillRouting);
+    writeFileSync(join(a.outDir, 'pr-review-summary.md'), summary, 'utf8');
+    writeFileSync(
+      join(a.outDir, 'pr-review-findings.json'),
+      JSON.stringify(
+        {
+          reviewers: a.outputs.map((o) => ({ reviewer: o.reviewerName, findings: o.findings })),
+          finalFindings,
+          droppedCount,
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+    process.stderr.write(`[review] wrote summary to ${join(a.outDir, 'pr-review-summary.md')}\n`);
+    appendProgress(a.outDir, 'done', `${postResult?.posted ?? 0} posted, ${finalFindings.length} findings`);
+  }
 
   const exitCode = decideExitCode(a.findingsUnavailable, finalFindings, a.failOn);
   if (exitCode === 1) {
@@ -609,19 +649,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     process.stderr.write(
       `[review] pipeline failure: the orchestrator produced no parseable findings (this is NOT a clean PR).${codexNote}\n`,
     );
-    // The orchestrator's own stdout/stderr are otherwise console-only — persist a
-    // tail so this failure class (e.g. a transient rate limit) is diagnosable.
-    try {
-      const failLog = join(outDir, 'orchestrator-failure.log');
-      writeFileSync(
-        failLog,
-        `exitCode=${session.exitCode}\n\n=== stdout (tail) ===\n${session.rawOrchestratorOutput.slice(-8000)}\n\n=== stderr (tail) ===\n${session.rawOrchestratorStderr.slice(-8000)}\n`,
-        'utf8',
-      );
-      process.stderr.write(`[review] wrote orchestrator failure log to ${failLog}\n`);
-    } catch (err) {
-      process.stderr.write(`[review] could not write orchestrator-failure.log: ${(err as Error).message}\n`);
-    }
+    writeOrchestratorFailureLog(outDir, session.exitCode, session.rawOrchestratorOutput, session.rawOrchestratorStderr);
   }
   return result;
 }

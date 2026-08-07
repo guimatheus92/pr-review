@@ -5,6 +5,14 @@ import type { PrRef } from '../types.js';
 
 export const RUNS_ROOT = join(homedir(), '.pr-review', 'runs');
 
+/**
+ * Fatal-error artifact of a run, surfaced inline by `status` on a failed run.
+ * Producers: the cli.ts review catch (thrown errors) and finalizeReview
+ * (pipeline failure). Lives here in the shared util layer — like PROGRESS_FILE
+ * and MARKER_FILE — so producers and the consumer all import it downward.
+ */
+export const ERROR_FILE = 'error.txt';
+
 export function ensureRunDir(ref?: Pick<PrRef, 'provider' | 'owner' | 'repo' | 'number'>): string {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const id = ref

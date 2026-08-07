@@ -2,20 +2,6 @@ import type { Finding, Severity } from '../types.js';
 
 const SEVERITY_TOKENS: Severity[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'NIT'];
 
-function extractJsonBlock(raw: string): string | null {
-  const fence = raw.match(/```(?:json)?\s*\n([\s\S]*?)\n```/i);
-  if (fence) return fence[1];
-  const first = raw.indexOf('{');
-  const firstArr = raw.indexOf('[');
-  let start = -1;
-  if (first === -1) start = firstArr;
-  else if (firstArr === -1) start = first;
-  else start = Math.min(first, firstArr);
-  if (start === -1) return null;
-  const balanced = sliceBalancedJson(raw, start);
-  return balanced ?? raw.slice(start).trim();
-}
-
 /**
  * Slice from `start` to the position where the opening brace/bracket closes,
  * tracking string literals and escapes — LLM output routinely has trailing
@@ -46,22 +32,109 @@ function sliceBalancedJson(raw: string, start: number): string | null {
   return null;
 }
 
-export function parseJsonFindings(raw: string): Finding[] {
-  const block = extractJsonBlock(raw);
-  if (!block) return [];
-  let parsed: unknown;
+/**
+ * Strict shape gate for JSON values discovered loose in prose: a real finding
+ * carries a known severity, or a title plus a body. A quoted log object like
+ * `{"level":"error","message":"db timeout"}` must NOT become a finding.
+ */
+function findingShaped(item: unknown): boolean {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
+  const o = item as Record<string, unknown>;
+  if (typeof o.severity === 'string' && (SEVERITY_TOKENS as string[]).includes(o.severity.toUpperCase())) {
+    return true;
+  }
+  const title = typeof o.title === 'string' ? o.title : typeof o.summary === 'string' ? o.summary : '';
+  const body = typeof o.body === 'string' ? o.body : typeof o.description === 'string' ? o.description : '';
+  return title.trim() !== '' && body.trim() !== '';
+}
+
+/** Items under an explicit `findings` key were declared as findings — normalize leniently. */
+function declaredFindings(list: unknown): Finding[] {
+  if (!Array.isArray(list)) return [];
+  return list.map((item) => normalizeFinding(item)).filter((f): f is Finding => f !== null);
+}
+
+/**
+ * Walk a parsed JSON value and collect findings wherever they live: a bare
+ * array of finding-shaped objects, `{findings: […]}`, the orchestrator's
+ * `{reviewers: [{findings: […]}]}` file payload printed to stdout instead of
+ * written, or any of those nested deeper (e.g. `{meta: …, data: [findings]}`).
+ * Structural recursion on the parsed value — never re-parses text.
+ */
+function collectFindings(value: unknown): Finding[] {
+  if (Array.isArray(value)) {
+    const shaped = value.filter(findingShaped).map((i) => normalizeFinding(i)).filter((f): f is Finding => f !== null);
+    if (shaped.length > 0) return shaped;
+    return value.flatMap((v) => collectFindings(v));
+  }
+  if (value && typeof value === 'object') {
+    const o = value as Record<string, unknown>;
+    const declared = [
+      ...declaredFindings(o.findings),
+      ...(Array.isArray(o.reviewers)
+        ? o.reviewers.flatMap((r) => declaredFindings((r as { findings?: unknown } | null)?.findings))
+        : []),
+    ];
+    if (declared.length > 0) return declared;
+    return Object.values(o).flatMap((v) => collectFindings(v));
+  }
+  return [];
+}
+
+function findingsFromBlock(block: string): Finding[] {
   try {
-    parsed = JSON.parse(block);
+    return collectFindings(JSON.parse(block));
   } catch {
     return [];
   }
-  const list = Array.isArray(parsed)
-    ? parsed
-    : (parsed as { findings?: unknown }).findings;
-  if (!Array.isArray(list)) return [];
-  return list
-    .map((item) => normalizeFinding(item))
-    .filter((f): f is Finding => f !== null);
+}
+
+/**
+ * Cheap O(1) gate before slicing at a bracket: does it plausibly open a JSON
+ * value? Prose ("[security]") and code ("array[i]") brackets fail here without
+ * paying for a balanced slice, keeping the scan near-linear on narrated blobs.
+ */
+function plausibleJsonStart(raw: string, i: number): boolean {
+  let j = i + 1;
+  while (j < raw.length && /\s/.test(raw[j]!)) j++;
+  const next = raw[j];
+  if (raw[i] === '{') return next === '"' || next === '}';
+  return next === '{' || next === '[' || next === '"' || next === ']';
+}
+
+const FENCE_RE = /```(?:json)?\s*\n([\s\S]*?)\n```/gi;
+
+/**
+ * Extract findings from every JSON value in the blob and merge them — a
+ * narrated transcript interleaves prose brackets ("[security]") with the real
+ * payloads, and may split findings across fenced blocks and bare arrays.
+ * Fenced blocks are parsed first and excised so the scan never re-parses their
+ * ranges; the remainder is scanned for balanced JSON values. Repeated payloads
+ * may duplicate findings; the default pipeline dedupes them before posting
+ * (not under --dedupe-mode off — this function itself does not dedupe).
+ */
+export function parseJsonFindings(raw: string): Finding[] {
+  const merged: Finding[] = [];
+  const rest = raw.replace(FENCE_RE, (_m, inner: string) => {
+    merged.push(...findingsFromBlock(inner));
+    return '\n';
+  });
+  // ponytail: a plausible-looking but unparseable balanced slice still costs
+  // O(n) each; the start-gate makes that rare enough for full-stdout input.
+  for (let i = 0; i < rest.length; i++) {
+    if ((rest[i] !== '{' && rest[i] !== '[') || !plausibleJsonStart(rest, i)) continue;
+    const slice = sliceBalancedJson(rest, i);
+    if (!slice) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(slice);
+    } catch {
+      continue; // balanced but not JSON (prose bracket) — rescan from inside it
+    }
+    merged.push(...collectFindings(parsed));
+    i += slice.length - 1; // parsed cleanly: nesting was walked structurally, skip past
+  }
+  return merged;
 }
 
 function normalizeFinding(item: unknown): Finding | null {

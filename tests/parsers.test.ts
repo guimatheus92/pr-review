@@ -33,6 +33,71 @@ test('parseJsonFindings — invalid JSON returns empty', () => {
   assert.deepEqual(parseJsonFindings('not json'), []);
 });
 
+test('parseJsonFindings — salvage: prose bracket before the real array does not defeat the parse', () => {
+  const raw = 'I dispatched [security] and [quality] reviewers.\n[{"severity":"HIGH","title":"x","body":"y","file":"a.ts","line":1}]';
+  const result = parseJsonFindings(raw);
+  assert.equal(result.length, 1, 'the narration bracket must not win the extraction race');
+  assert.equal(result[0]!.severity, 'HIGH');
+});
+
+test('parseJsonFindings — salvage: multiple JSON arrays interleaved with prose are merged', () => {
+  const raw = [
+    'quality returned:',
+    '[{"severity":"MEDIUM","title":"q1","body":"b1","file":"a.ts","line":1}]',
+    'test-coverage returned:',
+    '[{"severity":"LOW","title":"t1","body":"b2","file":"b.ts","line":2},{"severity":"LOW","title":"t2","body":"b3","file":"c.ts","line":3}]',
+    'the other reviewers returned [] — nothing to report.',
+  ].join('\n');
+  const result = parseJsonFindings(raw);
+  assert.equal(result.length, 3, 'findings from every array, not just the first');
+});
+
+test('parseJsonFindings — salvage: the orchestrator contract shape {reviewers:[…]} printed to stdout', () => {
+  const raw =
+    'Writing the findings now.\n' +
+    '{"reviewers":[{"name":"quality","findings":[{"severity":"HIGH","title":"x","body":"y"}]},{"name":"security","findings":[]}]}\n' +
+    'DONE';
+  const result = parseJsonFindings(raw);
+  assert.equal(result.length, 1, 'the file payload printed instead of written must salvage');
+});
+
+test('parseJsonFindings — salvage: first fenced block is prose-only, second holds the findings', () => {
+  const raw = '```\nsome quoted diff excerpt\n```\nand the findings:\n```json\n[{"severity":"NIT","title":"x","body":"y"}]\n```';
+  const result = parseJsonFindings(raw);
+  assert.equal(result.length, 1, 'a non-findings first fence must not end the search');
+});
+
+test('parseJsonFindings — salvage: findings split across a fenced block and a bare array are all merged', () => {
+  const raw =
+    '```json\n[{"severity":"HIGH","title":"fenced","body":"b1","file":"a.ts","line":1}]\n```\n' +
+    'and quality also returned:\n' +
+    '[{"severity":"LOW","title":"bare","body":"b2","file":"b.ts","line":2}]';
+  const result = parseJsonFindings(raw);
+  assert.equal(result.length, 2, 'fenced findings must not short-circuit the bare-array scan');
+});
+
+test('parseJsonFindings — salvage: fenced non-findings block (diff echo) then a bare findings array', () => {
+  const raw = '```\n- old line\n+ new line\n```\nfindings:\n[{"severity":"MEDIUM","title":"x","body":"y"}]';
+  const result = parseJsonFindings(raw);
+  assert.equal(result.length, 1, 'an empty fence must fall through to the scan');
+});
+
+test('parseJsonFindings — salvage: findings array nested inside an unrelated JSON object', () => {
+  const raw = 'run output: {"meta":{"run":1},"data":[{"severity":"HIGH","title":"x","body":"y"}]}';
+  const result = parseJsonFindings(raw);
+  assert.equal(result.length, 1, 'nested findings must be reached structurally');
+});
+
+test('parseJsonFindings — a fenced block holding a JSON scalar (null) degrades to [], never throws', () => {
+  assert.deepEqual(parseJsonFindings('```json\nnull\n```'), []);
+  assert.equal(parseJsonFindings('```json\ntrue\n```\n[{"severity":"LOW","title":"x","body":"y"}]').length, 1);
+});
+
+test('parseJsonFindings — salvage: a prose-quoted log object is NOT mistaken for a finding', () => {
+  const raw = 'Example log: {"level":"error","message":"db timeout"}\nno findings here';
+  assert.deepEqual(parseJsonFindings(raw), []);
+});
+
 test('parseJsonFindings — normalizes severity casing', () => {
   const raw = `[{"severity":"high","title":"x","body":"y"}]`;
   const result = parseJsonFindings(raw);

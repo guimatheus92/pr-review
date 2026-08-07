@@ -170,7 +170,7 @@ program
           try {
             const { writeFileSync } = await import('node:fs');
             const { join } = await import('node:path');
-            const { ERROR_FILE } = await import('./commands/status.js');
+            const { ERROR_FILE } = await import('./util/tmp.js');
             writeFileSync(join(opts.runDir, ERROR_FILE), ((err as Error).stack ?? String(err)) + '\n');
           } catch {
             // best-effort: the real error is about to be printed and exit(2)'d

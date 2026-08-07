@@ -1,17 +1,10 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { RUNS_ROOT } from '../util/tmp.js';
+import { ERROR_FILE, RUNS_ROOT } from '../util/tmp.js';
 import { REVIEWER_OUTPUT_FILES } from '../dispatch/single-session.js';
 import { readProgress, renderProgressSnapshot } from '../util/progress.js';
 
 export type StatusState = 'done' | 'running' | 'interrupted' | 'failed' | 'missing';
-
-/**
- * Fatal-error artifact a detached child writes before exiting (producer:
- * cli.ts review catch). Named here, next to the consumer, like PROGRESS_FILE
- * and MARKER_FILE — writer and reader share one source of truth.
- */
-export const ERROR_FILE = 'error.txt';
 
 export interface StatusResult {
   state: StatusState;
@@ -57,6 +50,26 @@ function hasReviewerOutput(outDir: string): boolean {
 }
 
 /**
+ * `interrupted` must mean "resume will actually work". A corrupt or truncated
+ * findings file (the orchestrator-flake class) exists on disk but resume can't
+ * load it — reporting `interrupted` would hint a --resume that dead-ends and
+ * hide the error.txt a pipeline failure just wrote. Mirrors resumeReview's
+ * loader: ANY output file that parses to the {reviewers:[…]} shape is enough.
+ */
+function hasResumableOutput(outDir: string): boolean {
+  return REVIEWER_OUTPUT_FILES.some((f) => {
+    const p = join(outDir, f);
+    if (!existsSync(p)) return false;
+    try {
+      const parsed = JSON.parse(readFileSync(p, 'utf8')) as { reviewers?: unknown };
+      return !!parsed && Array.isArray(parsed.reviewers);
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
  * Render the current state of a run for the slash-command poll loop:
  *  - `done`        → the summary is on disk; text IS the summary.
  *  - `running`     → the run process is alive; a live progress snapshot.
@@ -89,7 +102,7 @@ export function runStatus(runId: string, now = Date.now()): StatusResult {
     return { state: 'running', text: `${snapshot}\n\n(run ${runId} in progress — poll again shortly)` };
   }
 
-  if (hasReviewerOutput(outDir)) {
+  if (hasResumableOutput(outDir)) {
     return {
       state: 'interrupted',
       text:

@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { RUNS_ROOT } from '../src/util/tmp.js';
-import { ERROR_FILE, runStatus, statusExitCode } from '../src/commands/status.js';
+import { ERROR_FILE, RUNS_ROOT } from '../src/util/tmp.js';
+import { runStatus, statusExitCode } from '../src/commands/status.js';
 
 // status resolves run-id → RUNS_ROOT/<id>; seed test dirs there and clean up.
 function seed(id: string): string {
@@ -48,6 +48,36 @@ test('runStatus — a dead pid with reviewer output → interrupted (resume it)'
     const r = runStatus(id);
     assert.equal(r.state, 'interrupted');
     assert.match(r.text, /--resume/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runStatus — a corrupt findings file reads failed (error.txt inline), never a dead-end interrupted', () => {
+  const id = 'status-test-corrupt-findings';
+  const dir = seed(id);
+  try {
+    writeFileSync(join(dir, 'run.pid'), String(DEAD_PID), 'utf8');
+    // The orchestrator-flake class: a truncated final write left unparseable JSON.
+    writeFileSync(join(dir, 'single-session-findings.json'), '{"reviewers":[{"name":"qual', 'utf8');
+    writeFileSync(join(dir, ERROR_FILE), 'pipeline failure: NOT a clean PR\n', 'utf8');
+    const r = runStatus(id);
+    assert.equal(r.state, 'failed', 'resume cannot load this file — interrupted would hint a dead-end --resume');
+    assert.match(r.text, /NOT a clean PR/, 'the recorded error must surface');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runStatus — corrupt final file but a valid phase1 fallback → interrupted (resume genuinely works)', () => {
+  const id = 'status-test-corrupt-with-phase1';
+  const dir = seed(id);
+  try {
+    writeFileSync(join(dir, 'run.pid'), String(DEAD_PID), 'utf8');
+    writeFileSync(join(dir, 'single-session-findings.json'), '{"reviewers":[{"na', 'utf8');
+    writeFileSync(join(dir, 'phase1-findings.json'), '{"reviewers":[]}', 'utf8');
+    const r = runStatus(id);
+    assert.equal(r.state, 'interrupted', 'resumeReview falls back to phase1 — the hint is honest here');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

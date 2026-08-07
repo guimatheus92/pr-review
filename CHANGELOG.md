@@ -4,6 +4,13 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-08-07
+
+### Fixed
+- **A pipeline failure is no longer reported as a clean review.** When the orchestrator produced no parseable findings (exit code 2), `finalizeReview` still wrote a normal zero-finding `pr-review-summary.md` and a `done` progress event — and `status` treats the summary's existence as "done, exit 0", so a detached run that failed presented as a clean PR. On `findingsUnavailable` the run now writes the failure to `error.txt` instead of minting the summary, emits an `error` progress event, and `status` reports `failed` (exit 22) with the message inline. Codex second-opinion findings collected before the failure are still posted, and the exit code stays 2.
+- **Stdout salvage now recovers findings from a narrated orchestrator transcript.** The JSON parser extracted exactly one value — the first fenced block or the earliest `[`/`{`, which a prose bracket like `[security]` could win, defeating the whole parse. `parseJsonFindings` now merges findings from every JSON block in the blob (all fenced blocks, then every balanced value) and also understands the orchestrator's own `{"reviewers":[{"name":…,"findings":[…]}]}` file payload printed to stdout instead of written.
+- **`orchestrator-failure.log` now keeps the orchestrator's full stdout/stderr** (was: last 8 KB tails). When the contract fails, stdout may hold the only copy of the reviewer findings, and a tail made even manual salvage impossible.
+
 ## [0.4.1] — 2026-08-06
 
 ### Fixed

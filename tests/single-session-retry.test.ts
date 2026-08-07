@@ -87,6 +87,21 @@ test('runSingleSession — does not retry a non-transient failure', async () => 
   assert.equal(result.findingsUnavailable, true);
 });
 
+test('runSingleSession — salvage-2: contract payload printed to stdout, no files written → findings recovered (the incident shape)', async () => {
+  const { ctx, opts } = setup();
+  const spawn: FakeSpawn = async () => ({
+    // Narrated transcript: prose brackets + the consolidated payload printed instead of written.
+    stdout: `I dispatched [quality] and [security] reviewers.\n${findingsJson('printed-not-written')}\nDONE`,
+    stderr: '',
+    exitCode: 0,
+  });
+  const result = await run(opts, ctx, spawn);
+  assert.equal(result.findingsUnavailable, false, 'stdout salvage must recover the printed payload');
+  const findings = result.outputs.flatMap((o) => o.findings);
+  assert.equal(findings.length, 1);
+  assert.equal((findings[0] as { body: string }).body, 'printed-not-written');
+});
+
 test('runSingleSession — clears a stale findings file before retrying', async () => {
   const { ctx, opts } = setup();
   writeFileSync(ctx.findingsPath, findingsJson('stale-previous-run')); // leftover from a prior run

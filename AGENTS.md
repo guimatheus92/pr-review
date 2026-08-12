@@ -1,6 +1,6 @@
 # pr-review
 
-Generic, plugin-based PR review tool for GitHub and Azure DevOps, packaged as a plugin for Copilot CLI or Claude Code. Orchestrates parallel reviewer agents in a single agent session via the `task` tool (Copilot) / `Task` tool (Claude Code), and posts **every** finding back to the PR as a resolvable inline review thread.
+Generic, plugin-based PR review tool for GitHub, Azure DevOps, and GitLab, packaged as a plugin for Copilot CLI or Claude Code. Orchestrates parallel reviewer agents in a single agent session via the `task` tool (Copilot) / `Task` tool (Claude Code), and posts **every** finding back to the PR as a resolvable inline review thread.
 
 ## Build & test
 
@@ -24,7 +24,7 @@ The bundle at `dist/cli.cjs` is the single-file distribution artifact. The slash
 - `src/util/progress.ts` / `src/util/posted-marker.ts` — the `progress.ndjson` phase/heartbeat live feed and the `posted.marker` re-post guard (refuses re-post only on a fully-completed prior post; fail-closed on a corrupt marker)
 - `src/dispatch/codex.ts` — optional Codex second-opinion reviewer; runs as a sibling process in parallel with the orchestrator session when the `codex` CLI is installed (opt out: `--no-codex`)
 - `src/dispatch/line-snap.ts` — snaps finding line numbers to the nearest valid diff line before posting
-- `src/providers/github.ts` / `azuredevops.ts` — PR data fetchers + comment posters (GitHub inline comments go out as one review batch, with per-comment fallback)
+- `src/providers/github.ts` / `azuredevops.ts` / `gitlab.ts` — PR data fetchers + comment posters (GitHub inline comments go out as one review batch, with per-comment fallback; GitLab posts per-discussion via plain fetch)
 - `src/dispatch/parsers.ts` — JSON / bracketed-markdown / section-header output parsers
 - `src/dedupe.ts` — Jaccard token similarity, strict/loose/off modes
 - `src/config.ts` — 5-level config merge (flags > env > repo yaml > global yaml > defaults)

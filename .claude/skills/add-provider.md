@@ -25,3 +25,4 @@ description: How to add a new PR hosting provider (e.g. GitLab, Bitbucket) to pr
 
 - GitHub: `src/providers/github.ts` — uses `@octokit/rest`, `gh auth token` fallback; posts inline comments as one batched review (`POST /pulls/:n/reviews`, event COMMENT) with per-comment retry/backoff fallback on transient 422/403/5xx
 - Azure DevOps: `src/providers/azuredevops.ts` — uses `azure-devops-node-api`, concurrent LCS diff synthesis; `createThread` has retry/backoff, and the PR object + git API are cached per run
+- GitLab: `src/providers/gitlab.ts` — plain `fetch` against REST v4 (no client lib, no batch endpoint); `positionForLine` supplies `old_line` for context-line discussion positions (skipping it 400s); owner keeps namespace slashes, flattened by `safeOwner` for run-dir/cache names

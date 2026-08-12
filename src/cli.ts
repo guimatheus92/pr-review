@@ -18,7 +18,7 @@ const program = new Command();
 
 program
   .name('pr-review')
-  .description('Generic, plugin-based PR review for GitHub and Azure DevOps via Copilot CLI or Claude Code')
+  .description('Generic, plugin-based PR review for GitHub, Azure DevOps, and GitLab via Copilot CLI or Claude Code')
   .version(typeof __PR_REVIEW_VERSION__ === 'string' ? __PR_REVIEW_VERSION__ : '0.0.0-dev');
 
 program

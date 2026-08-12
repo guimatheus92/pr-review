@@ -83,12 +83,13 @@ export async function runPost(opts: PostOptions): Promise<PostResult> {
   }
 
   // Snap reviewer-supplied lines to the nearest valid diff line so inline
-  // comments do not 422 the batch review. On GitHub, findings that cannot
-  // anchor where they point are re-anchored instead of dropped — every
+  // comments do not 422 the batch review. On GitHub and GitLab, findings that
+  // cannot anchor where they point are re-anchored instead of dropped — every
   // finding must land as a resolvable inline review thread.
   let findings = allFindings;
   if (opts.gather) {
-    const snap = snapFindingsToDiff(allFindings, opts.gather.changedFiles, provider.name === 'github');
+    const reanchor = provider.name === 'github' || provider.name === 'gitlab';
+    const snap = snapFindingsToDiff(allFindings, opts.gather.changedFiles, reanchor);
     findings = snap.findings;
     if (snap.snapped > 0) process.stderr.write(`[post] snapped ${snap.snapped} finding line(s) to the diff\n`);
     if (snap.reanchored > 0) {

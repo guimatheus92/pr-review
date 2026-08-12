@@ -1,6 +1,7 @@
 import { mkdtempSync, mkdirSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { safeOwner } from '../cache/keys.js';
 import type { PrRef } from '../types.js';
 
 export const RUNS_ROOT = join(homedir(), '.pr-review', 'runs');
@@ -16,7 +17,7 @@ export const ERROR_FILE = 'error.txt';
 export function ensureRunDir(ref?: Pick<PrRef, 'provider' | 'owner' | 'repo' | 'number'>): string {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const id = ref
-    ? `${ref.provider}__${ref.owner}__${ref.repo}__${ref.number}__${stamp}`
+    ? `${ref.provider}__${safeOwner(ref)}__${ref.repo}__${ref.number}__${stamp}`
     : `adhoc__${stamp}`;
   const outDir = join(RUNS_ROOT, id);
   mkdirSync(outDir, { recursive: true });

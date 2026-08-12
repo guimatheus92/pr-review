@@ -4,6 +4,17 @@ import type { GatherOutput, PrRef } from '../types.js';
 
 export const CACHE_ROOT = join(homedir(), '.pr-review', 'cache');
 
+/**
+ * GitLab nested namespaces put '/' in owner, which would nest the cache and
+ * run dirs — and `status <run-id>` resolves the id with basename(), so a
+ * nested run dir breaks status entirely. One flattener shared by run-dir
+ * naming, cache paths, and cache clearing so writer/reader/clearer never
+ * drift. GitHub/ADO owners never contain '/' → their names are unchanged.
+ */
+export function safeOwner(ref: Pick<PrRef, 'owner'>): string {
+  return ref.owner.replace(/\//g, '-');
+}
+
 export function gatherCacheKey(ref: PrRef, headSha: string, lastCommentId: string): string {
   return `${ref.provider}-${ref.owner}-${ref.repo}-${ref.number}-${headSha}-${lastCommentId}`;
 }
@@ -12,7 +23,7 @@ export function gatherCachePath(ref: PrRef, headSha: string, lastCommentId: stri
   return join(
     CACHE_ROOT,
     ref.provider,
-    `${ref.owner}__${ref.repo}`,
+    `${safeOwner(ref)}__${ref.repo}`,
     String(ref.number),
     `${headSha.slice(0, 12)}-${lastCommentId}.json`,
   );

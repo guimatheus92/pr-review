@@ -1,4 +1,4 @@
-import type { ChangedFile, ExistingComment, Finding, PrMetadata, PrRef } from '../types.js';
+import type { ChangedFile, ExistingComment, Finding, PrMetadata, PrRef, Provider } from '../types.js';
 
 export interface BatchComment {
   path: string;
@@ -7,7 +7,7 @@ export interface BatchComment {
 }
 
 export interface PrProvider {
-  readonly name: 'github' | 'azuredevops';
+  readonly name: Provider;
   /**
    * Resolve auth in this (foreground) process and return env var(s) that let a
    * child process skip the CLI/keyring fallbacks (used by the --detach

@@ -1,5 +1,6 @@
 import { GitHubProvider } from './github.js';
 import { AzureDevOpsProvider } from './azuredevops.js';
+import { GitLabProvider } from './gitlab.js';
 import { loadConfig } from '../config.js';
 import type { Provider, PrRef } from '../types.js';
 import type { PrProvider } from './types.js';
@@ -14,6 +15,10 @@ const URL_SHAPES: Record<Provider, string[]> = {
     'https://<org>.visualstudio.com/[<collection>/][<project>/]_git/<repo>/pullrequest/<id>',
     'https://<server>/<collection>/<project>/_git/<repo>/pullrequest/<id>  (Azure DevOps Server)',
   ],
+  gitlab: [
+    'https://gitlab.com/<group>[/<subgroup>]/<project>/-/merge_requests/<iid>',
+    'https://<gitlab-host>/<group>/<project>/-/merge_requests/<iid>',
+  ],
 };
 
 function shapesHelp(names: Provider[] = Object.keys(URL_SHAPES) as Provider[]): string {
@@ -24,12 +29,14 @@ function hostsTip(hostname: string): string {
   return [
     'For a self-hosted server, map the host in ~/.pr-review/config.yaml or .pr-review.yaml:',
     '  hosts:',
-    `    ${hostname}: github   # or: azuredevops`,
+    `    ${hostname}: github   # or: azuredevops | gitlab`,
   ].join('\n');
 }
 
 function makeProvider(name: Provider): PrProvider {
-  return name === 'github' ? new GitHubProvider() : new AzureDevOpsProvider();
+  if (name === 'github') return new GitHubProvider();
+  if (name === 'gitlab') return new GitLabProvider();
+  return new AzureDevOpsProvider();
 }
 
 /**
@@ -48,12 +55,17 @@ export function detectProvider(url: string, hosts?: Record<string, Provider>): P
   const host = u.hostname.toLowerCase();
   if (host === 'github.com' || host === 'www.github.com') return makeProvider('github');
   if (host === 'dev.azure.com' || host.endsWith('.visualstudio.com')) return makeProvider('azuredevops');
+  if (host === 'gitlab.com' || host === 'www.gitlab.com') return makeProvider('gitlab');
   const mapped = (hosts ?? loadConfig().config.hosts)[host];
   if (mapped) return makeProvider(mapped);
   const seg = u.pathname.split('/').filter(Boolean).map((s) => s.toLowerCase());
   const gi = seg.indexOf('_git');
   if (gi >= 0 && seg[gi + 2] === 'pullrequest') return makeProvider('azuredevops');
   if (seg[2] === 'pull' && /^\d+$/.test(seg[3] ?? '')) return makeProvider('github');
+  // /-/merge_requests/<iid> is unambiguously GitLab; the legacy no-/-/ form
+  // on a self-hosted host is too weak a signal — that one needs the hosts: map.
+  const di = seg.indexOf('-');
+  if (di >= 0 && seg[di + 1] === 'merge_requests' && /^\d+$/.test(seg[di + 2] ?? '')) return makeProvider('gitlab');
   throw new Error(`Unrecognized PR URL: ${url}\nExpected one of:\n${shapesHelp()}\n${hostsTip(host)}`);
 }
 

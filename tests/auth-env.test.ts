@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { GitHubProvider } from '../src/providers/github.js';
 import { AzureDevOpsProvider } from '../src/providers/azuredevops.js';
+import { GitLabProvider } from '../src/providers/gitlab.js';
 
 /** Run fn with env vars temporarily set (undefined = unset), restoring after. */
 function withEnv(vars: Record<string, string | undefined>, fn: () => void) {
@@ -34,6 +35,12 @@ test('AzureDevOpsProvider.authEnv — PAT round-trips as AZURE_DEVOPS_PAT', () =
       assert.deepEqual(new AzureDevOpsProvider().authEnv(), { AZURE_DEVOPS_PAT: 'pat' });
     },
   );
+});
+
+test('GitLabProvider.authEnv — env token round-trips as GITLAB_TOKEN, no subprocess', () => {
+  withEnv({ GITLAB_TOKEN: 'glt', GITLAB_ACCESS_TOKEN: undefined }, () => {
+    assert.deepEqual(new GitLabProvider().authEnv(), { GITLAB_TOKEN: 'glt' });
+  });
 });
 
 test('AzureDevOpsProvider.authEnv — bearer round-trips as AZURE_DEVOPS_BEARER, never as a PAT', () => {

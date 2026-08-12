@@ -38,7 +38,7 @@ invoke_companions: true
 invoke_codex: true               # Codex second-opinion reviewer (auto-skipped if codex not installed)
 companion_warn: true
 dedupe_mode: strict              # strict | loose | off
-hosts:                           # self-hosted hostname → provider (github | azuredevops)
+hosts:                           # self-hosted hostname → provider (github | azuredevops | gitlab)
   github.mycorp.com: github
   tfs.corp.com: azuredevops
 ```

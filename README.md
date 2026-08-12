@@ -1,6 +1,6 @@
 # pr-review
 
-A generic, plugin-based PR review tool for GitHub and Azure DevOps, packaged as a plugin for [Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/plugins-creating) **or** Claude Code. Orchestrates parallel reviewer agents in a single agent session (companion plugins optional) and posts **every** finding back to the PR as a resolvable inline review comment — never a top-level comment, nothing dropped. When the `codex` CLI is installed, a Codex second-opinion reviewer runs alongside automatically.
+A generic, plugin-based PR review tool for GitHub, Azure DevOps, and GitLab, packaged as a plugin for [Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/plugins-creating) **or** Claude Code. Orchestrates parallel reviewer agents in a single agent session (companion plugins optional) and posts **every** finding back to the PR as a resolvable inline review comment — never a top-level comment, nothing dropped. When the `codex` CLI is installed, a Codex second-opinion reviewer runs alongside automatically.
 
 ```
 /pr-review https://github.com/org/repo/pull/123
@@ -15,6 +15,8 @@ https://<ghes-host>/<owner>/<repo>/pull/<number>                                
 https://dev.azure.com/<org>[/<project>]/_git/<repo>/pullrequest/<id>
 https://<org>.visualstudio.com/[<collection>/][<project>/]_git/<repo>/pullrequest/<id>   # legacy ADO
 https://<server>/<collection>/<project>/_git/<repo>/pullrequest/<id>                 # Azure DevOps Server (best-effort)
+https://gitlab.com/<group>[/<subgroup>]/<project>/-/merge_requests/<iid>
+https://<gitlab-host>/<group>/<project>/-/merge_requests/<iid>                       # self-managed GitLab
 ```
 
 Trailing paths, query strings, and fragments are ignored (`…/pull/42/files?diff=split` works). Self-hosted hosts are auto-detected from the path shape; if a host's URLs prove nothing, map it explicitly in config:
@@ -80,6 +82,7 @@ npm install && npm run build
 |---|---|---|
 | GitHub | `GITHUB_TOKEN` / `GH_TOKEN` / `COPILOT_GITHUB_TOKEN` | `gh auth token` |
 | Azure DevOps | `AZURE_DEVOPS_PAT` / `SYSTEM_ACCESSTOKEN` / `AZURE_DEVOPS_EXT_PAT` (PAT), `AZURE_DEVOPS_BEARER` (bearer) | `az account get-access-token` |
+| GitLab | `GITLAB_TOKEN` / `GITLAB_ACCESS_TOKEN` | `glab config get token -h <host>` |
 
 `--detach` resolves the credential in the foreground and injects it into the background child's env, so the CLI/keyring fallbacks never have to run detached — a missing credential fails the launch immediately.
 

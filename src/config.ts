@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { RUNTIME_CHOICES, type RuntimeChoice } from './dispatch/runtime.js';
+import { PROVIDERS, type Provider } from './types.js';
 
 export interface Config {
   defaultModel: string;
@@ -23,6 +24,8 @@ export interface Config {
   runtime: RuntimeChoice;
   /** Run the Codex second-opinion reviewer when the codex CLI is installed. */
   invokeCodex: boolean;
+  /** Self-hosted hostname → provider mapping (e.g. github.mycorp.com: github). */
+  hosts: Record<string, Provider>;
 }
 
 const DEFAULTS: Config = {
@@ -42,6 +45,7 @@ const DEFAULTS: Config = {
   language: 'en',
   runtime: 'auto',
   invokeCodex: true,
+  hosts: {},
 };
 
 interface RawConfig {
@@ -60,6 +64,7 @@ interface RawConfig {
   language?: string;
   runtime?: RuntimeChoice;
   invoke_codex?: boolean;
+  hosts?: Record<string, string>;
 }
 
 function expandHome(p: string): string {
@@ -101,6 +106,15 @@ function applyRaw(target: Config, raw: RawConfig, baseDir: string): void {
   if (raw.language) target.language = raw.language;
   if (raw.runtime) target.runtime = raw.runtime;
   if (typeof raw.invoke_codex === 'boolean') target.invokeCodex = raw.invoke_codex;
+  for (const [host, provider] of Object.entries(raw.hosts ?? {})) {
+    if ((PROVIDERS as readonly string[]).includes(provider)) {
+      target.hosts[host.toLowerCase()] = provider as Provider;
+    } else {
+      process.stderr.write(
+        `[config] warning: hosts.${host}: unknown provider "${provider}" (expected ${PROVIDERS.join(' | ')}); ignored\n`,
+      );
+    }
+  }
 }
 
 function applyEnv(target: Config): void {

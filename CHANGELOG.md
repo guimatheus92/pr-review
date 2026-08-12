@@ -4,6 +4,14 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+### Added
+- **Every real-world PR URL shape now parses.** URL parsing moved from per-shape regexes to `new URL()` + path-segment walking, anchored on `_git` for Azure DevOps: legacy `https://<org>.visualstudio.com/[<collection>/][<project>/]_git/…` (with or without `DefaultCollection` — the exact shape that failed in the field), the project-omitted `dev.azure.com/<org>/_git/<repo>/…` form, and trailing paths/query strings/fragments on both providers (`…/pull/42/files?diff=split`). The duplicated ADO host regexes (`URL_RES` vs `orgHost()`) collapsed into one parser that computes the org/collection URL once.
+- **GitHub Enterprise Server and Azure DevOps Server (on-prem) URLs.** `PrRef` gained an optional `baseUrl` set by `parseUrl` (GHES: `https://<host>/api/v3`, fed to Octokit; ADO Server: `https://<host>/<virtualdir>/<collection>`, fed to the ADO connection). Self-hosted hosts are auto-detected from the PR path shape (the shapes are disjoint across providers); a new `hosts:` config map (`<hostname>: github | azuredevops`) is the explicit override, and the unrecognized-URL error prints the exact yaml to add. On a GHES host the `gh auth token` fallback now passes `--hostname` so it stops silently returning the github.com token. Cloud cache keys and run-dir names are byte-identical to before (guarded by a test).
+
+### Fixed
+- **A bad PR URL now fails `--detach` immediately in the foreground** — with the accepted shapes listed and, for legacy `visualstudio.com` URLs, the canonical `dev.azure.com` tip — instead of handing back a run-id whose detached child dies minutes later with `status` exit 22 (the field incident). URL validation runs before the auth pre-flight and before the run dir is minted; the silent `adhoc__` run-dir fallback for unparsable URLs is gone (new `resolvePr()` choke point used by review, gather, post, cache, and detach).
+- **`ci-integration.md`'s ADO pipeline example built a doubled URL** (`https://dev.azure.com/` prefixed onto `System.TeamFoundationCollectionUri`, which already expands to that) — it now uses the variable directly.
+
 ## [0.4.2] — 2026-08-07
 
 ### Fixed

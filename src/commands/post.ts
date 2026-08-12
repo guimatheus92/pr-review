@@ -1,4 +1,4 @@
-import { detectProvider } from '../providers/index.js';
+import { detectProvider, unparsablePrUrlMessage } from '../providers/index.js';
 import { buildValidLinesMap, snapLineToDiff } from '../dispatch/line-snap.js';
 import type { ChangedFile, Finding, GatherOutput, ReviewerOutput } from '../types.js';
 import type { BatchComment, PrProvider } from '../providers/types.js';
@@ -71,7 +71,7 @@ export function snapFindingsToDiff(
 export async function runPost(opts: PostOptions): Promise<PostResult> {
   const provider = opts.provider ?? detectProvider(opts.prUrl);
   const ref = provider.parseUrl(opts.prUrl);
-  if (!ref) throw new Error(`Failed to parse PR URL: ${opts.prUrl}`);
+  if (!ref) throw new Error(unparsablePrUrlMessage(provider.name, opts.prUrl));
 
   const allFindings: Finding[] = opts.outputs.flatMap((o) => o.findings);
   const result: PostResult = { attempted: 0, posted: 0, skipped: 0, errors: [] };

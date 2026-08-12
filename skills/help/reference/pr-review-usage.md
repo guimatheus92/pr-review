@@ -37,8 +37,10 @@ From inside a `copilot` or `claude` session in any repo:
 
 ```
 /pr-review https://github.com/<org>/<repo>/pull/<n>
-/pr-review https://dev.azure.com/<org>/<proj>/_git/<repo>/pullrequest/<id>
+/pr-review https://dev.azure.com/<org>[/<proj>]/_git/<repo>/pullrequest/<id>
 ```
+
+Also accepted: legacy `https://<org>.visualstudio.com/[<collection>/][<proj>/]_git/<repo>/pullrequest/<id>`, GitHub Enterprise Server hosts, and on-prem Azure DevOps Server (`https://<server>/<collection>/<proj>/_git/…`). Trailing paths/query strings are ignored. Self-hosted hosts auto-detect from the path shape, or map them in config with `hosts: {<hostname>: github|azuredevops}`.
 
 Under Claude Code the plugin command is namespaced: `/pr-review:pr-review <url>`. For a bare `/pr-review` there too, add the personal alias described in the README install section.
 

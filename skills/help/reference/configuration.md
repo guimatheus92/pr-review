@@ -38,6 +38,9 @@ invoke_companions: true
 invoke_codex: true               # Codex second-opinion reviewer (auto-skipped if codex not installed)
 companion_warn: true
 dedupe_mode: strict              # strict | loose | off
+hosts:                           # self-hosted hostname → provider (github | azuredevops)
+  github.mycorp.com: github
+  tfs.corp.com: azuredevops
 ```
 
 Runtime `auto` (the default) probes PATH: copilot first, then claude; it errors if neither is found. Model note: the copilot-style default `claude-opus-4.8` is mapped to `opus` for the claude runtime; models you set explicitly pass through as-is.

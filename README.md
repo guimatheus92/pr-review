@@ -7,6 +7,25 @@ A generic, plugin-based PR review tool for GitHub and Azure DevOps, packaged as 
 /pr-review https://dev.azure.com/org/proj/_git/repo/pullrequest/456 --dry-run
 ```
 
+### Accepted URL shapes
+
+```
+https://github.com/<owner>/<repo>/pull/<number>
+https://<ghes-host>/<owner>/<repo>/pull/<number>                                     # GitHub Enterprise Server
+https://dev.azure.com/<org>[/<project>]/_git/<repo>/pullrequest/<id>
+https://<org>.visualstudio.com/[<collection>/][<project>/]_git/<repo>/pullrequest/<id>   # legacy ADO
+https://<server>/<collection>/<project>/_git/<repo>/pullrequest/<id>                 # Azure DevOps Server (best-effort)
+```
+
+Trailing paths, query strings, and fragments are ignored (`…/pull/42/files?diff=split` works). Self-hosted hosts are auto-detected from the path shape; if a host's URLs prove nothing, map it explicitly in config:
+
+```yaml
+# ~/.pr-review/config.yaml or .pr-review.yaml
+hosts:
+  github.mycorp.com: github
+  tfs.corp.com: azuredevops
+```
+
 ## Why a CLI, not just a skill
 
 LLMs are unreliable at gathering metadata, deduplicating findings, and posting comments. A thin Node CLI handles those deterministic tasks; reviewer agents only do the actual reviewing. See [architecture](skills/help/reference/architecture.md) for the full execution model.

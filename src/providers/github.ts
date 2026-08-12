@@ -5,14 +5,21 @@ import type { BatchComment, PrProvider } from './types.js';
 import { withRetry } from '../util/retry.js';
 import { execErrorDetail } from '../util/exec-error.js';
 
-const URL_RE = /^https?:\/\/(?:www\.)?github\.com\/([^\/]+)\/([^\/]+)\/pull\/(\d+)/i;
+const CLOUD_API = 'https://api.github.com';
 
-function resolveToken(): string {
+function isCloudHost(host: string): boolean {
+  return host === 'github.com' || host === 'www.github.com';
+}
+
+function resolveToken(host?: string): string {
   const fromEnv = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? process.env.COPILOT_GITHUB_TOKEN;
   if (fromEnv) return fromEnv;
   let detail: string;
   try {
-    const token = execFileSync('gh', ['auth', 'token'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    // On a GHES host, gh stores a per-hostname token; without --hostname it
+    // would silently hand back the github.com one.
+    const args = host && !isCloudHost(host) ? ['auth', 'token', '--hostname', host] : ['auth', 'token'];
+    const token = execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
     // Guard the empty-but-exit-0 case (broken keyring/hosts.yml state): an
     // empty token must throw here — returning '' would make authEnv() inject
     // GITHUB_TOKEN='' and the detached child would silently fall through to
@@ -53,33 +60,46 @@ export function isTransientGitHubError(err: Error): boolean {
 
 export class GitHubProvider implements PrProvider {
   readonly name = 'github' as const;
-  private octokit: Octokit | null = null;
+  private clients: Map<string, Octokit> = new Map();
 
-  authEnv(): Record<string, string> {
-    return { GITHUB_TOKEN: resolveToken() };
+  authEnv(ref?: PrRef): Record<string, string> {
+    return { GITHUB_TOKEN: resolveToken(ref ? new URL(ref.url).hostname : undefined) };
   }
 
-  private client(): Octokit {
-    if (!this.octokit) {
-      this.octokit = new Octokit({ auth: resolveToken() });
+  private client(ref: PrRef): Octokit {
+    const baseUrl = ref.baseUrl ?? CLOUD_API;
+    let octokit = this.clients.get(baseUrl);
+    if (!octokit) {
+      octokit = new Octokit({ auth: resolveToken(new URL(ref.url).hostname), baseUrl });
+      this.clients.set(baseUrl, octokit);
     }
-    return this.octokit;
+    return octokit;
   }
 
   parseUrl(url: string): PrRef | null {
-    const m = url.match(URL_RE);
-    if (!m) return null;
+    let u: URL;
+    try {
+      u = new URL(url);
+    } catch {
+      return null;
+    }
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+    const seg = u.pathname.split('/').filter(Boolean);
+    if (seg.length < 4 || seg[2]!.toLowerCase() !== 'pull' || !/^\d+$/.test(seg[3]!)) return null;
+    const host = u.hostname.toLowerCase();
     return {
       provider: 'github',
       url,
-      owner: m[1],
-      repo: m[2],
-      number: parseInt(m[3], 10),
+      owner: seg[0]!,
+      repo: seg[1]!,
+      number: parseInt(seg[3]!, 10),
+      // GHES serves its REST API under /api/v3 (cloud uses api.github.com).
+      baseUrl: isCloudHost(host) ? CLOUD_API : `${u.protocol}//${u.host}/api/v3`,
     };
   }
 
   async fetchMetadata(ref: PrRef): Promise<PrMetadata> {
-    const { data: pr } = await this.client().pulls.get({
+    const { data: pr } = await this.client(ref).pulls.get({
       owner: ref.owner,
       repo: ref.repo,
       pull_number: ref.number,
@@ -110,7 +130,7 @@ export class GitHubProvider implements PrProvider {
     const results = await Promise.all(
       [...issueIds].map(async (id) => {
         try {
-          const { data: issue } = await this.client().issues.get({
+          const { data: issue } = await this.client(ref).issues.get({
             owner: ref.owner,
             repo: ref.repo,
             issue_number: parseInt(id, 10),
@@ -137,7 +157,7 @@ export class GitHubProvider implements PrProvider {
 
   async fetchChangedFiles(ref: PrRef): Promise<ChangedFile[]> {
     const files: ChangedFile[] = [];
-    const iterator = this.client().paginate.iterator(this.client().pulls.listFiles, {
+    const iterator = this.client(ref).paginate.iterator(this.client(ref).pulls.listFiles, {
       owner: ref.owner,
       repo: ref.repo,
       pull_number: ref.number,
@@ -159,7 +179,7 @@ export class GitHubProvider implements PrProvider {
   }
 
   async fetchFullDiff(ref: PrRef): Promise<string> {
-    const { data } = await this.client().pulls.get({
+    const { data } = await this.client(ref).pulls.get({
       owner: ref.owner,
       repo: ref.repo,
       pull_number: ref.number,
@@ -171,7 +191,7 @@ export class GitHubProvider implements PrProvider {
   async fetchExistingComments(ref: PrRef): Promise<ExistingComment[]> {
     const collectReviewComments = async (): Promise<ExistingComment[]> => {
       const out: ExistingComment[] = [];
-      const iter = this.client().paginate.iterator(this.client().pulls.listReviewComments, {
+      const iter = this.client(ref).paginate.iterator(this.client(ref).pulls.listReviewComments, {
         owner: ref.owner,
         repo: ref.repo,
         pull_number: ref.number,
@@ -195,7 +215,7 @@ export class GitHubProvider implements PrProvider {
     };
     const collectIssueComments = async (): Promise<ExistingComment[]> => {
       const out: ExistingComment[] = [];
-      const iter = this.client().paginate.iterator(this.client().issues.listComments, {
+      const iter = this.client(ref).paginate.iterator(this.client(ref).issues.listComments, {
         owner: ref.owner,
         repo: ref.repo,
         issue_number: ref.number,
@@ -224,7 +244,7 @@ export class GitHubProvider implements PrProvider {
 
   private async resolveHeadSha(ref: PrRef, headSha?: string): Promise<string> {
     if (headSha) return headSha;
-    const { data } = await this.client().pulls.get({
+    const { data } = await this.client(ref).pulls.get({
       owner: ref.owner,
       repo: ref.repo,
       pull_number: ref.number,
@@ -236,7 +256,7 @@ export class GitHubProvider implements PrProvider {
     if (comments.length === 0) return { posted: 0 };
     await withRetry(
       () =>
-        this.client().pulls.createReview({
+        this.client(ref).pulls.createReview({
           owner: ref.owner,
           repo: ref.repo,
           pull_number: ref.number,
@@ -266,7 +286,7 @@ export class GitHubProvider implements PrProvider {
     // review threads. An unanchorable finding surfaces as an error instead.
     const { data } = await withRetry(
       () =>
-        this.client().pulls.createReviewComment({
+        this.client(ref).pulls.createReviewComment({
           owner: ref.owner,
           repo: ref.repo,
           pull_number: ref.number,

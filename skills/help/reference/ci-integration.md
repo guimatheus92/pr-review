@@ -106,7 +106,8 @@ steps:
     displayName: 'Install pr-review plugin'
 
   - bash: |
-      PR_URL="https://dev.azure.com/$(System.TeamFoundationCollectionUri)$(System.TeamProject)/_git/$(Build.Repository.Name)/pullrequest/$(System.PullRequest.PullRequestId)"
+      # System.TeamFoundationCollectionUri already expands to https://dev.azure.com/<org>/
+      PR_URL="$(System.TeamFoundationCollectionUri)$(System.TeamProject)/_git/$(Build.Repository.Name)/pullrequest/$(System.PullRequest.PullRequestId)"
       pr-review review "$PR_URL"
     displayName: 'Review the PR'
     env:

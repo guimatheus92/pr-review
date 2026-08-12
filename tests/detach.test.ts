@@ -66,3 +66,26 @@ test('detachReview — a failed auth pre-flight throws before spawning anything'
   );
   assert.equal(spawns, 0, 'no detached child after a failed pre-flight');
 });
+
+test('detachReview — an unparsable PR URL throws in the foreground, before auth and before spawn', () => {
+  let spawns = 0;
+  let authCalls = 0;
+  const fakeSpawn = (() => {
+    spawns++;
+    return { on() { return this; }, unref() {} };
+  }) as unknown as typeof import('node:child_process').spawn;
+
+  // Legacy-shaped ADO URL that detection accepts but with a malformed tail —
+  // before the fail-fast reorder this minted an adhoc run dir and died in the child.
+  const url = 'https://github.com/o/r/issues/7';
+  assert.throws(
+    () =>
+      detachReview(url, ['review', url, '--detach'], fakeSpawn, () => {
+        authCalls++;
+        return {};
+      }),
+    /Failed to parse PR URL/,
+  );
+  assert.equal(spawns, 0, 'no detached child for a bad URL');
+  assert.equal(authCalls, 0, 'URL validation precedes the auth pre-flight');
+});

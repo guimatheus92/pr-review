@@ -4,6 +4,8 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-08-12
+
 ### Added
 - **GitLab provider.** Merge-request URLs (`https://gitlab.com/<group>[/<subgroup>]/<project>/-/merge_requests/<iid>`, legacy no-`/-/` form, and self-managed hosts via the `/-/merge_requests` path heuristic or the `hosts:` map) now review end to end: MR metadata + linked closes-issues, per-file diffs (paginated `/diffs`), existing notes for dedupe, and inline posting as resolvable discussions. Implemented with plain `fetch` against REST v4 — zero new dependencies. Auth: `GITLAB_TOKEN` / `GITLAB_ACCESS_TOKEN`, with `glab config get token -h <host>` as the CLI fallback (sent as `Authorization: Bearer`, which accepts both PATs and glab OAuth tokens). Discussion positions carry `old_line` for context lines via dual-cursor hunk math (`positionForLine`) — the main cause of GitLab's 400 "position is invalid" — and unanchorable findings re-anchor like GitHub's instead of dropping. GitLab has no batch endpoint, so posting is per-discussion with the existing retry/backoff.
 

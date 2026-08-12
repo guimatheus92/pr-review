@@ -4,6 +4,8 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-08-12
+
 ### Added
 - **Every real-world PR URL shape now parses.** URL parsing moved from per-shape regexes to `new URL()` + path-segment walking, anchored on `_git` for Azure DevOps: legacy `https://<org>.visualstudio.com/[<collection>/][<project>/]_git/…` (with or without `DefaultCollection` — the exact shape that failed in the field), the project-omitted `dev.azure.com/<org>/_git/<repo>/…` form, and trailing paths/query strings/fragments on both providers (`…/pull/42/files?diff=split`). The duplicated ADO host regexes (`URL_RES` vs `orgHost()`) collapsed into one parser that computes the org/collection URL once.
 - **GitHub Enterprise Server and Azure DevOps Server (on-prem) URLs.** `PrRef` gained an optional `baseUrl` set by `parseUrl` (GHES: `https://<host>/api/v3`, fed to Octokit; ADO Server: `https://<host>/<virtualdir>/<collection>`, fed to the ADO connection). Self-hosted hosts are auto-detected from the PR path shape (the shapes are disjoint across providers); a new `hosts:` config map (`<hostname>: github | azuredevops`) is the explicit override, and the unrecognized-URL error prints the exact yaml to add. On a GHES host the `gh auth token` fallback now passes `--hostname` so it stops silently returning the github.com token. Cloud cache keys and run-dir names are byte-identical to before (guarded by a test).

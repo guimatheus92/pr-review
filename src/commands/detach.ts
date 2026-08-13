@@ -1,7 +1,8 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import { closeSync, openSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { detectProvider, newRunDirForUrl } from '../providers/index.js';
+import { resolvePr } from '../providers/index.js';
+import { ensureRunDir } from '../util/tmp.js';
 
 export interface DetachResult {
   runId: string;
@@ -25,15 +26,17 @@ export function detachReview(
   prUrl: string,
   argv: string[],
   spawnFn: typeof nodeSpawn = nodeSpawn,
-  resolveAuthEnv: (url: string) => Record<string, string> = (url) => detectProvider(url).authEnv(),
+  resolveAuthEnv?: (url: string) => Record<string, string>,
 ): DetachResult {
-  // Resolve auth here, in the foreground: the keyring-backed CLI fallbacks
-  // (`gh auth token`, `az account get-access-token`) can flake in a detached
-  // child, and a missing credential should fail the launch immediately instead
-  // of killing the background run before it produces anything. Ordered before
-  // the run-dir mint so a failed pre-flight leaves nothing behind.
-  const authEnv = resolveAuthEnv(prUrl);
-  const outDir = newRunDirForUrl(prUrl);
+  // Parse the URL first, in the foreground: a bad URL must fail the launch
+  // here — not hand back a run-id whose detached child dies on it minutes
+  // later. Then resolve auth, also foreground: the keyring-backed CLI
+  // fallbacks (`gh auth token`, `az account get-access-token`) can flake in a
+  // detached child. Both are ordered before the run-dir mint so a failed
+  // pre-flight leaves nothing behind.
+  const { provider, ref } = resolvePr(prUrl);
+  const authEnv = resolveAuthEnv ? resolveAuthEnv(prUrl) : provider.authEnv(ref);
+  const outDir = ensureRunDir(ref);
   const childArgs = argv.filter((a) => a !== '--detach').concat('--run-dir', outDir);
   const log = openSync(join(outDir, 'detached.log'), 'a');
   const cliPath = process.argv[1]!;

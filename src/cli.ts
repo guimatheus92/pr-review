@@ -31,10 +31,9 @@ program
       let outPath = opts.out;
       if (!outPath) {
         const { ensureRunDir } = await import('./util/tmp.js');
-        const { detectProvider } = await import('./providers/index.js');
-        const provider = detectProvider(prUrl);
-        const ref = provider.parseUrl(prUrl);
-        outPath = `${ensureRunDir(ref ?? undefined)}/pr-review-gather.json`;
+        const { resolvePr } = await import('./providers/index.js');
+        const { ref } = resolvePr(prUrl);
+        outPath = `${ensureRunDir(ref)}/pr-review-gather.json`;
       }
       await runGather({ prUrl, outPath, useCache: opts.cache });
     } catch (err) {

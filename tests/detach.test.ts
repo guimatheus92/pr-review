@@ -66,3 +66,28 @@ test('detachReview — a failed auth pre-flight throws before spawning anything'
   );
   assert.equal(spawns, 0, 'no detached child after a failed pre-flight');
 });
+
+test('detachReview — an unparsable PR URL throws in the foreground, before auth and before spawn', () => {
+  let spawns = 0;
+  let authCalls = 0;
+  const fakeSpawn = (() => {
+    spawns++;
+    return { on() { return this; }, unref() {} };
+  }) as unknown as typeof import('node:child_process').spawn;
+
+  // Detection accepts the visualstudio.com host, but the extra path segments
+  // fail the ADO parse — the detection-accepted-then-parse-rejected shape of
+  // the field incident. Before the fail-fast reorder this minted an adhoc run
+  // dir and died inside the detached child (status exit 22).
+  const url = 'https://microsoft.visualstudio.com/a/b/c/_git/r/pullrequest/1';
+  assert.throws(
+    () =>
+      detachReview(url, ['review', url, '--detach'], fakeSpawn, () => {
+        authCalls++;
+        return {};
+      }),
+    /Failed to parse PR URL/,
+  );
+  assert.equal(spawns, 0, 'no detached child for a bad URL');
+  assert.equal(authCalls, 0, 'URL validation precedes the auth pre-flight');
+});

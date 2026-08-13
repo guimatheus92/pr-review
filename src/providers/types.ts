@@ -11,9 +11,11 @@ export interface PrProvider {
   /**
    * Resolve auth in this (foreground) process and return env var(s) that let a
    * child process skip the CLI/keyring fallbacks (used by the --detach
-   * pre-flight). Throws when no credential is available.
+   * pre-flight). Throws when no credential is available. `ref` is required so
+   * auth is host-scoped by construction — an optional ref would let a caller
+   * silently resolve a github.com token for an enterprise host.
    */
-  authEnv(): Record<string, string>;
+  authEnv(ref: PrRef): Record<string, string>;
   parseUrl(url: string): PrRef | null;
   fetchMetadata(ref: PrRef): Promise<PrMetadata>;
   fetchChangedFiles(ref: PrRef): Promise<ChangedFile[]>;

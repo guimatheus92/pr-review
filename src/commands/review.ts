@@ -10,7 +10,7 @@ import { detectCodex, runCodexReviewer } from '../dispatch/codex.js';
 import { ensureRunDir, ERROR_FILE, RUNS_ROOT } from '../util/tmp.js';
 import { appendProgress } from '../util/progress.js';
 import { readPostedMarker, writePostedMarker } from '../util/posted-marker.js';
-import { detectProvider } from '../providers/index.js';
+import { resolvePr } from '../providers/index.js';
 import { dedupeAgainstExisting, dedupeWithinBatch } from '../dedupe.js';
 import { detectCompanions, formatWarning } from '../plugins/companions.js';
 import type { PrProvider } from '../providers/types.js';
@@ -452,9 +452,8 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
 
   const overallStart = Date.now();
   const cwd = process.cwd();
-  const provider = opts.provider ?? detectProvider(opts.prUrl);
-  const ref = provider.parseUrl(opts.prUrl);
-  const outDir = opts.runDir ?? ensureRunDir(ref ?? undefined);
+  const { provider, ref } = resolvePr(opts.prUrl, undefined, opts.provider);
+  const outDir = opts.runDir ?? ensureRunDir(ref);
   if (opts.runDir) mkdirSync(opts.runDir, { recursive: true });
   process.stderr.write(`[review] run artifacts → ${outDir}\n`);
   // Liveness beacon: `status` checks this pid to tell a slow-but-healthy run

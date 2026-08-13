@@ -4,6 +4,16 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-08-12
+
+### Added
+- **Every real-world PR URL shape now parses.** URL parsing moved from per-shape regexes to `new URL()` + path-segment walking, anchored on `_git` for Azure DevOps: legacy `https://<org>.visualstudio.com/[<collection>/][<project>/]_git/…` (with or without `DefaultCollection` — the exact shape that failed in the field), the project-omitted `dev.azure.com/<org>/_git/<repo>/…` form, and trailing paths/query strings/fragments on both providers (`…/pull/42/files?diff=split`). The duplicated ADO host regexes (`URL_RES` vs `orgHost()`) collapsed into one parser that computes the org/collection URL once.
+- **GitHub Enterprise Server and Azure DevOps Server (on-prem) URLs.** `PrRef` gained an optional `baseUrl` set by `parseUrl` (GHES: `https://<host>/api/v3`, fed to Octokit; ADO Server: `https://<host>/<virtualdir>/<collection>`, fed to the ADO connection); refs lacking it (pre-0.5.0 serialized caches) re-derive it from `ref.url`. Self-hosted hosts resolve **only** through the new `hosts:` config map (`<hostname>: github | azuredevops`) — an explicit allowlist, never path-shape guessing, so a credential is only ever sent to a host the user named; the unrecognized-URL error prints the exact yaml to add. GHES auth is host-scoped: `GH_ENTERPRISE_TOKEN` / `GITHUB_ENTERPRISE_TOKEN` or `gh auth token --hostname <host>` — github.com env tokens are deliberately never sent to an enterprise host. Cloud cache keys and run-dir names are byte-identical to before (guarded by a test).
+
+### Fixed
+- **A bad PR URL now fails `--detach` immediately in the foreground** — with the accepted shapes listed and, for legacy `visualstudio.com` URLs, the canonical `dev.azure.com` tip — instead of handing back a run-id whose detached child dies minutes later with `status` exit 22 (the field incident). URL validation runs before the auth pre-flight and before the run dir is minted; the silent `adhoc__` run-dir fallback for unparsable URLs is gone (new `resolvePr()` choke point used by review, gather, post, cache, and detach).
+- **`ci-integration.md`'s ADO pipeline example built a doubled URL** (`https://dev.azure.com/` prefixed onto `System.TeamFoundationCollectionUri`, which already expands to that) — it now uses the variable directly.
+
 ## [0.4.2] — 2026-08-07
 
 ### Fixed

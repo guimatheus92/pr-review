@@ -1,5 +1,5 @@
 import { cacheInfo, clearCache } from '../cache/store.js';
-import { detectProvider } from '../providers/index.js';
+import { resolvePr } from '../providers/index.js';
 
 export function showCacheInfo(): void {
   const info = cacheInfo();
@@ -17,9 +17,7 @@ export function clearCacheCommand(opts: { prUrl?: string; all?: boolean }): void
     return;
   }
   if (opts.prUrl) {
-    const provider = detectProvider(opts.prUrl);
-    const ref = provider.parseUrl(opts.prUrl);
-    if (!ref) throw new Error(`Failed to parse PR URL: ${opts.prUrl}`);
+    const { ref } = resolvePr(opts.prUrl);
     const r = clearCache({ prRef: ref });
     console.log(`Removed ${r.removedFiles} cache file(s) for ${opts.prUrl}`);
     return;

@@ -13,7 +13,7 @@ description: How to add a new PR hosting provider (e.g. GitLab, Bitbucket) to pr
    - `fetchExistingComments(ref)` — existing inline comments (for dedupe)
    - `postLineComment(ref, finding)` — post an inline comment at file:line
 
-2. **Wire in detectProvider** — add URL pattern matching in `src/providers/index.ts`.
+2. **Wire in detectProvider** — `src/providers/index.ts` detects in two tiers: known cloud hostnames, then the user's `hosts:` config map. There is deliberately NO path-shape guessing for unknown hosts — detection decides where the caller's credential is sent, so auto-trusting a PR-shaped path on an unknown host would let a crafted URL exfiltrate the token. Add the new provider's cloud hostname branch, its entry in `URL_SHAPES`, and widen `PROVIDERS` in `src/types.ts`.
 
 3. **Add auth** — document env var(s) in the provider file and in `README.md` Authentication table.
 

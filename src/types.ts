@@ -1,4 +1,5 @@
-export type Provider = 'github' | 'azuredevops';
+export const PROVIDERS = ['github', 'azuredevops'] as const;
+export type Provider = (typeof PROVIDERS)[number];
 
 export interface PrRef {
   provider: Provider;
@@ -8,6 +9,14 @@ export interface PrRef {
   number: number;
   organization?: string;
   project?: string;
+  /**
+   * API base URL, set by parseUrl. GitHub: https://api.github.com or
+   * https://<host>/api/v3 (GHES). Azure DevOps: the org/collection URL
+   * (https://dev.azure.com/<org>, https://<org>.visualstudio.com, or
+   * https://<host>/<collection-path> on-prem). Optional for back-compat with
+   * old serialized refs; NEVER used in cache keys or run-dir names.
+   */
+  baseUrl?: string;
 }
 
 export interface PrMetadata {

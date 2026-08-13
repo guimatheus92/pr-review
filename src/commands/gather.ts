@@ -1,6 +1,6 @@
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { detectProvider } from '../providers/index.js';
+import { resolvePr } from '../providers/index.js';
 import type { GatherOutput } from '../types.js';
 import { applyDiffExclusions, summarizeExclusions } from '../dispatch/diff-filter.js';
 import { readGatherCache, writeGatherCache } from '../cache/store.js';
@@ -14,11 +14,7 @@ interface GatherCmdOptions {
 
 export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
   const useCache = opts.useCache ?? true;
-  const provider = detectProvider(opts.prUrl);
-  const ref = provider.parseUrl(opts.prUrl);
-  if (!ref) {
-    throw new Error(`Failed to parse PR URL: ${opts.prUrl}`);
-  }
+  const { provider, ref } = resolvePr(opts.prUrl);
 
   process.stderr.write(`[gather] fetching metadata for ${ref.provider} PR #${ref.number}…\n`);
   const [metadata, existingComments] = await Promise.all([

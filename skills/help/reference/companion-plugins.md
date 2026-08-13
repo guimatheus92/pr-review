@@ -35,6 +35,8 @@ Detection depends on the runtime: for the copilot runtime, `pr-review` queries `
 
 That prompt is dispatched via `task()` / `Task()` inside the same single review session as the built-in reviewers. The companion plugin's own orchestrator handles PR fetching, internal sub-agent dispatch, and finding consolidation. Its output is parsed by `pr-review`'s markdown-findings parser; the findings then flow through dedupe and posting like any other reviewer.
 
+**Companions run analysis-only.** Some companion commands are written to post their verdict straight to the PR (the official `code-review` command allows `gh pr comment` and posts a top-level "### Code review" summary on its own). pr-review's dispatch prompt explicitly forbids that: the subagent must skip any post-a-comment step in the companion's instructions and return the review as output instead — the CLI is the only thing that ever writes to the PR (inline-only, deduped, idempotent). If you ever see a top-level summary comment appear during a review, a dispatch path lost this directive — it's pinned by a session-context test.
+
 Skill routing note: companion agents receive only skills **without** `inject_into` — a skill scoped to specific built-in reviewers is never sent to a companion.
 
 Each companion appears as one row in the summary:

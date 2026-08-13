@@ -4,6 +4,9 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+### Fixed
+- **Dispatched agents can no longer post to the PR on their own.** The official `code-review` companion's slash command allows `gh pr comment` and its instructions post a top-level "### Code review / No issues found" verdict — so the subagent invoking it posted a summary comment straight to the PR (observed live on a Backend PR), bypassing the CLI's inline-only, deduped, idempotent posting. Every dispatch prompt now carries a hard `NO_POSTING_DIRECTIVE` (built-in reviewers, companion agents, companion slash commands — which now run in explicit analysis-only mode with "skip the posting step" — the verifier, and the orchestrator itself), and a session-context test fails if any dispatch line ever loses it. The Codex sibling was already read-only sandboxed.
+
 ## [0.6.0] — 2026-08-12
 
 ### Added

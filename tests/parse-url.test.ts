@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { join } from 'node:path';
 import { detectProvider, resolvePr } from '../src/providers/index.js';
-import { GitHubProvider } from '../src/providers/github.js';
-import { AzureDevOpsProvider } from '../src/providers/azuredevops.js';
+import { GitHubProvider, apiBaseFor } from '../src/providers/github.js';
+import { AzureDevOpsProvider, orgUrlFor } from '../src/providers/azuredevops.js';
 import { gatherCachePath, CACHE_ROOT } from '../src/cache/keys.js';
 
 // The URL from the field report that motivated this file: detection accepted
@@ -14,24 +14,25 @@ const LEGACY_ADO_URL =
 // Always pass hosts explicitly so tests never read the user's real config.
 const NO_HOSTS = {};
 
-test('detectProvider — cloud hostnames, config map, and path-shape heuristic', () => {
+test('detectProvider — cloud hostnames plus the explicit hosts: allowlist for self-hosted', () => {
   const cases: Array<{ url: string; expect: 'github' | 'azuredevops'; hosts?: Record<string, 'github' | 'azuredevops'> }> = [
     { url: 'https://github.com/o/r/pull/1', expect: 'github' },
     { url: 'HTTPS://WWW.GITHUB.COM/o/r/pull/1', expect: 'github' },
     { url: 'https://dev.azure.com/org/p/_git/r/pullrequest/2', expect: 'azuredevops' },
     { url: LEGACY_ADO_URL, expect: 'azuredevops' },
-    // Unknown hosts: the path shape decides.
-    { url: 'https://github.mycorp.com/o/r/pull/5', expect: 'github' },
-    { url: 'https://tfs.corp.com/tfs/DC/P/_git/r/pullrequest/7', expect: 'azuredevops' },
-    // Explicit config mapping wins for a host whose path proves nothing.
-    { url: 'https://scm.corp.com/o/r/pull/9', expect: 'github', hosts: { 'scm.corp.com': 'github' } },
+    // Self-hosted hosts resolve only through the config allowlist — a
+    // credential is only ever sent to a host the user explicitly named.
+    { url: 'https://github.mycorp.com/o/r/pull/5', expect: 'github', hosts: { 'github.mycorp.com': 'github' } },
+    { url: 'https://tfs.corp.com/tfs/DC/P/_git/r/pullrequest/7', expect: 'azuredevops', hosts: { 'tfs.corp.com': 'azuredevops' } },
   ];
   for (const c of cases) {
     assert.equal(detectProvider(c.url, c.hosts ?? NO_HOSTS).name, c.expect, c.url);
   }
 });
 
-test('detectProvider — unrecognized host without a PR-shaped path names the hosts: config fix', () => {
+test('detectProvider — an unmapped host is rejected even when its path is perfectly PR-shaped (no credential exfiltration via crafted URLs)', () => {
+  assert.throws(() => detectProvider('https://attacker.example/o/r/pull/1', NO_HOSTS), /hosts:/);
+  assert.throws(() => detectProvider('https://attacker.example/col/proj/_git/r/pullrequest/1', NO_HOSTS), /hosts:/);
   assert.throws(() => detectProvider('https://scm.corp.com/weird/shape', NO_HOSTS), /hosts:/);
 });
 
@@ -76,7 +77,7 @@ test('AzureDevOpsProvider.parseUrl — every accepted shape', () => {
   const cases: Array<{
     url: string;
     organization: string;
-    project: string;
+    project: string | undefined;
     repo: string;
     number: number;
     baseUrl: string;
@@ -87,9 +88,10 @@ test('AzureDevOpsProvider.parseUrl — every accepted shape', () => {
       baseUrl: 'https://dev.azure.com/org',
     },
     {
-      // Project-omitted form (project == repo).
+      // Project-omitted form: project stays undefined (the API resolves the
+      // PR org-wide by id — a guessed project could route to the wrong one).
       url: 'https://dev.azure.com/org/_git/repo/pullrequest/9',
-      organization: 'org', project: 'repo', repo: 'repo', number: 9,
+      organization: 'org', project: undefined, repo: 'repo', number: 9,
       baseUrl: 'https://dev.azure.com/org',
     },
     {
@@ -105,12 +107,12 @@ test('AzureDevOpsProvider.parseUrl — every accepted shape', () => {
     },
     {
       url: 'https://org.visualstudio.com/_git/repo/pullrequest/3',
-      organization: 'org', project: 'repo', repo: 'repo', number: 3,
+      organization: 'org', project: undefined, repo: 'repo', number: 3,
       baseUrl: 'https://org.visualstudio.com',
     },
     {
       url: 'https://org.visualstudio.com/DefaultCollection/_git/repo/pullrequest/3',
-      organization: 'org', project: 'repo', repo: 'repo', number: 3,
+      organization: 'org', project: undefined, repo: 'repo', number: 3,
       baseUrl: 'https://org.visualstudio.com',
     },
     {
@@ -144,6 +146,40 @@ test('AzureDevOpsProvider.parseUrl — rejects malformed shapes', () => {
   assert.equal(p.parseUrl('https://dev.azure.com/a/b/c/_git/repo/pullrequest/1'), null);
   // On-prem needs at least collection + project before _git.
   assert.equal(p.parseUrl('https://tfs.corp.com/Proj/_git/repo/pullrequest/1'), null);
+});
+
+// new URL() accepts malformed percent-escapes; parseUrl must not let the
+// decode throw a URIError out of a function contracted to return null.
+test('parseUrl — malformed percent-escapes never throw; the raw segment is kept', () => {
+  const ado = new AzureDevOpsProvider().parseUrl('https://dev.azure.com/org/pro%zz/_git/re%zzpo/pullrequest/9');
+  assert.ok(ado, 'parses instead of throwing URIError');
+  assert.equal(ado.project, 'pro%zz');
+  assert.equal(ado.repo, 're%zzpo');
+  assert.equal(new GitHubProvider().parseUrl('https://github.com/o%zz/r/pull/1')?.owner, 'o%zz');
+});
+
+// parseUrl always sets baseUrl, but old serialized refs (pre-0.5.0 caches
+// replayed by --resume) lack it. The fallback must re-derive from ref.url —
+// a hardcoded cloud form would send legacy/on-prem refs to the wrong host.
+test('orgUrlFor / apiBaseFor — refs without baseUrl re-derive from ref.url, cloud as last resort', () => {
+  const legacy = new AzureDevOpsProvider().parseUrl(LEGACY_ADO_URL)!;
+  delete legacy.baseUrl;
+  assert.equal(orgUrlFor(legacy), 'https://microsoft.visualstudio.com');
+  const onprem = new AzureDevOpsProvider().parseUrl('https://tfs.corp.com/tfs/DC/Proj/_git/repo/pullrequest/1')!;
+  delete onprem.baseUrl;
+  assert.equal(orgUrlFor(onprem), 'https://tfs.corp.com/tfs/DC');
+  // Hand-built ref whose url is unparseable → cloud form.
+  assert.equal(
+    orgUrlFor({ provider: 'azuredevops', url: 'x', owner: 'o', organization: 'o', repo: 'r', number: 1 }),
+    'https://dev.azure.com/o',
+  );
+  const ghes = new GitHubProvider().parseUrl('https://github.mycorp.com/o/r/pull/5')!;
+  delete ghes.baseUrl;
+  assert.equal(apiBaseFor(ghes), 'https://github.mycorp.com/api/v3');
+  assert.equal(
+    apiBaseFor({ provider: 'github', url: 'x', owner: 'o', repo: 'r', number: 1 }),
+    'https://api.github.com',
+  );
 });
 
 test('resolvePr — the field-report URL resolves end to end', () => {

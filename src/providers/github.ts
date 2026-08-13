@@ -4,6 +4,7 @@ import type { ChangedFile, ExistingComment, Finding, PrMetadata, PrRef } from '.
 import type { BatchComment, PrProvider } from './types.js';
 import { withRetry } from '../util/retry.js';
 import { execErrorDetail } from '../util/exec-error.js';
+import { parseHttpUrl } from '../util/url.js';
 
 const CLOUD_API = 'https://api.github.com';
 
@@ -11,18 +12,30 @@ function isCloudHost(host: string): boolean {
   return host === 'github.com' || host === 'www.github.com';
 }
 
-function resolveToken(host?: string): string {
-  const fromEnv = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? process.env.COPILOT_GITHUB_TOKEN;
+/**
+ * Token resolution is host-scoped. github.com uses the usual env vars; a GHES
+ * host deliberately does NOT fall back to them — a github.com token sent to an
+ * enterprise host is the silent-wrong-token bug, and worse, the --detach
+ * pre-flight would vouch for that credential in the foreground only for the
+ * detached child to die on `401 Bad credentials` minutes later. GHES follows
+ * gh's own convention: GH_ENTERPRISE_TOKEN / GITHUB_ENTERPRISE_TOKEN, then
+ * `gh auth token --hostname <host>` (gh stores per-hostname tokens; without
+ * --hostname it hands back the github.com one). Exported for tests; `exec` is
+ * the subprocess seam.
+ */
+export function resolveToken(host: string, exec: typeof execFileSync = execFileSync): string {
+  const cloud = isCloudHost(host);
+  const fromEnv = cloud
+    ? (process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? process.env.COPILOT_GITHUB_TOKEN)
+    : (process.env.GH_ENTERPRISE_TOKEN ?? process.env.GITHUB_ENTERPRISE_TOKEN);
   if (fromEnv) return fromEnv;
   let detail: string;
   try {
-    // On a GHES host, gh stores a per-hostname token; without --hostname it
-    // would silently hand back the github.com one.
-    const args = host && !isCloudHost(host) ? ['auth', 'token', '--hostname', host] : ['auth', 'token'];
-    const token = execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    const args = cloud ? ['auth', 'token'] : ['auth', 'token', '--hostname', host];
+    const token = exec('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
     // Guard the empty-but-exit-0 case (broken keyring/hosts.yml state): an
     // empty token must throw here — returning '' would make authEnv() inject
-    // GITHUB_TOKEN='' and the detached child would silently fall through to
+    // an empty token and the detached child would silently fall through to
     // this same flaky CLI fallback the pre-flight exists to avoid.
     if (token) return token;
     detail = '`gh auth token` printed an empty token';
@@ -30,7 +43,9 @@ function resolveToken(host?: string): string {
     detail = `\`gh auth token\` failed: ${execErrorDetail(e)}`;
   }
   throw new Error(
-    `No GitHub auth token available (${detail}). Set GITHUB_TOKEN env var or run \`gh auth login\`.`,
+    cloud
+      ? `No GitHub auth token available (${detail}). Set GITHUB_TOKEN env var or run \`gh auth login\`.`
+      : `No GitHub token for ${host} (${detail}). Set GH_ENTERPRISE_TOKEN or run \`gh auth login --hostname ${host}\` — github.com env tokens are deliberately not sent to enterprise hosts.`,
   );
 }
 
@@ -58,16 +73,45 @@ export function isTransientGitHubError(err: Error): boolean {
   return false;
 }
 
+export function parseGitHubUrl(url: string): PrRef | null {
+  const u = parseHttpUrl(url);
+  if (!u) return null;
+  const seg = u.pathname.split('/').filter(Boolean);
+  if (seg.length < 4 || seg[2]!.toLowerCase() !== 'pull' || !/^\d+$/.test(seg[3]!)) return null;
+  return {
+    provider: 'github',
+    url,
+    owner: seg[0]!,
+    repo: seg[1]!,
+    number: parseInt(seg[3]!, 10),
+    // GHES serves its REST API under /api/v3 (cloud uses api.github.com).
+    baseUrl: isCloudHost(u.hostname) ? CLOUD_API : `${u.protocol}//${u.host}/api/v3`,
+  };
+}
+
+/**
+ * API base for a ref: parseUrl always sets baseUrl, but old serialized refs
+ * (pre-0.5.0 caches replayed by --resume) lack it — re-derive from ref.url,
+ * with the cloud API as the last resort for hand-built refs. Exported for tests.
+ */
+export function apiBaseFor(ref: PrRef): string {
+  return ref.baseUrl ?? parseGitHubUrl(ref.url)?.baseUrl ?? CLOUD_API;
+}
+
 export class GitHubProvider implements PrProvider {
   readonly name = 'github' as const;
   private clients: Map<string, Octokit> = new Map();
 
-  authEnv(ref?: PrRef): Record<string, string> {
-    return { GITHUB_TOKEN: resolveToken(ref ? new URL(ref.url).hostname : undefined) };
+  authEnv(ref: PrRef): Record<string, string> {
+    const host = new URL(ref.url).hostname;
+    const token = resolveToken(host);
+    // The round-trip var must match what resolveToken reads back for this
+    // host class, so the detached child re-resolves the same credential.
+    return isCloudHost(host) ? { GITHUB_TOKEN: token } : { GH_ENTERPRISE_TOKEN: token };
   }
 
   private client(ref: PrRef): Octokit {
-    const baseUrl = ref.baseUrl ?? CLOUD_API;
+    const baseUrl = apiBaseFor(ref);
     let octokit = this.clients.get(baseUrl);
     if (!octokit) {
       octokit = new Octokit({ auth: resolveToken(new URL(ref.url).hostname), baseUrl });
@@ -77,25 +121,7 @@ export class GitHubProvider implements PrProvider {
   }
 
   parseUrl(url: string): PrRef | null {
-    let u: URL;
-    try {
-      u = new URL(url);
-    } catch {
-      return null;
-    }
-    if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
-    const seg = u.pathname.split('/').filter(Boolean);
-    if (seg.length < 4 || seg[2]!.toLowerCase() !== 'pull' || !/^\d+$/.test(seg[3]!)) return null;
-    const host = u.hostname.toLowerCase();
-    return {
-      provider: 'github',
-      url,
-      owner: seg[0]!,
-      repo: seg[1]!,
-      number: parseInt(seg[3]!, 10),
-      // GHES serves its REST API under /api/v3 (cloud uses api.github.com).
-      baseUrl: isCloudHost(host) ? CLOUD_API : `${u.protocol}//${u.host}/api/v3`,
-    };
+    return parseGitHubUrl(url);
   }
 
   async fetchMetadata(ref: PrRef): Promise<PrMetadata> {

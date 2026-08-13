@@ -17,7 +17,7 @@ https://<org>.visualstudio.com/[<collection>/][<project>/]_git/<repo>/pullreques
 https://<server>/<collection>/<project>/_git/<repo>/pullrequest/<id>                 # Azure DevOps Server (best-effort)
 ```
 
-Trailing paths, query strings, and fragments are ignored (`…/pull/42/files?diff=split` works). Self-hosted hosts are auto-detected from the path shape; if a host's URLs prove nothing, map it explicitly in config:
+Trailing paths, query strings, and fragments are ignored (`…/pull/42/files?diff=split` works). Self-hosted hosts must be mapped explicitly in config — a credential is only ever sent to a host you named (the unrecognized-URL error prints the exact yaml to add):
 
 ```yaml
 # ~/.pr-review/config.yaml or .pr-review.yaml
@@ -79,6 +79,7 @@ npm install && npm run build
 | Provider | Env var | Fallback |
 |---|---|---|
 | GitHub | `GITHUB_TOKEN` / `GH_TOKEN` / `COPILOT_GITHUB_TOKEN` | `gh auth token` |
+| GitHub Enterprise Server | `GH_ENTERPRISE_TOKEN` / `GITHUB_ENTERPRISE_TOKEN` (github.com tokens are never sent to a GHES host) | `gh auth token --hostname <host>` |
 | Azure DevOps | `AZURE_DEVOPS_PAT` / `SYSTEM_ACCESSTOKEN` / `AZURE_DEVOPS_EXT_PAT` (PAT), `AZURE_DEVOPS_BEARER` (bearer) | `az account get-access-token` |
 
 `--detach` resolves the credential in the foreground and injects it into the background child's env, so the CLI/keyring fallbacks never have to run detached — a missing credential fails the launch immediately.

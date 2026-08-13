@@ -41,7 +41,7 @@ From inside a `copilot` or `claude` session in any repo:
 /pr-review https://gitlab.com/<group>/<project>/-/merge_requests/<iid>
 ```
 
-Also accepted: legacy `https://<org>.visualstudio.com/[<collection>/][<proj>/]_git/<repo>/pullrequest/<id>`, GitHub Enterprise Server hosts, on-prem Azure DevOps Server (`https://<server>/<collection>/<proj>/_git/…`), and self-managed GitLab. Trailing paths/query strings are ignored. Self-hosted hosts auto-detect from the path shape, or map them in config with `hosts: {<hostname>: github|azuredevops|gitlab}`.
+Also accepted: legacy `https://<org>.visualstudio.com/[<collection>/][<proj>/]_git/<repo>/pullrequest/<id>`, GitHub Enterprise Server hosts, on-prem Azure DevOps Server (`https://<server>/<collection>/<proj>/_git/…`), and self-managed GitLab. Trailing paths/query strings are ignored. Self-hosted hosts must be mapped in config with `hosts: {<hostname>: github|azuredevops|gitlab}` — credentials only go to hosts you named. GHES auth uses `GH_ENTERPRISE_TOKEN`/`GITHUB_ENTERPRISE_TOKEN` or `gh auth login --hostname <host>` (github.com tokens are never sent to enterprise hosts).
 
 Under Claude Code the plugin command is namespaced: `/pr-review:pr-review <url>`. For a bare `/pr-review` there too, add the personal alias described in the README install section.
 

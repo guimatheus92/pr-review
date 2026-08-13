@@ -6,6 +6,7 @@ import type { ChangedFile, ExistingComment, Finding, PrMetadata, PrRef } from '.
 import type { PrProvider } from './types.js';
 import { withRetry } from '../util/retry.js';
 import { execErrorDetail } from '../util/exec-error.js';
+import { parseHttpUrl, safeDecode } from '../util/url.js';
 
 const ADO_AZURE_AD_RESOURCE_ID = '499b84ac-1321-427f-aa17-267ca6975798';
 
@@ -69,6 +70,70 @@ function classifyAuthor(displayName: string, uniqueName?: string): ExistingComme
   if (haystack.includes('copilot')) return 'copilot';
   if (haystack.includes('bot') || haystack.includes('build') || haystack.includes('agent')) return 'bot';
   return 'human';
+}
+
+/**
+ * Accepts every ADO URL shape, anchored on the `_git` path segment:
+ *   https://dev.azure.com/<org>[/<project>]/_git/<repo>/pullrequest/<id>
+ *   https://<org>.visualstudio.com/[<collection>/][<project>/]_git/<repo>/pullrequest/<id>
+ *   https://<server>/<virtualdir…>/<collection>/<project>/_git/<repo>/pullrequest/<id>  (ADO Server/TFS)
+ * Project-omitted forms leave `project` undefined — the API resolves the PR
+ * org-wide by id, so a guessed project can never route calls to the wrong one.
+ * Trailing paths/query/fragment are ignored.
+ */
+export function parseAdoUrl(url: string): PrRef | null {
+  const u = parseHttpUrl(url);
+  if (!u) return null;
+  const seg = u.pathname.split('/').filter(Boolean).map(safeDecode);
+  const lower = seg.map((s) => s.toLowerCase());
+  const gi = lower.indexOf('_git');
+  if (gi < 0 || lower[gi + 2] !== 'pullrequest' || !/^\d+$/.test(seg[gi + 3] ?? '')) return null;
+  const repo = seg[gi + 1]!;
+  const number = parseInt(seg[gi + 3]!, 10);
+  const before = seg.slice(0, gi);
+  const host = u.hostname;
+  let organization: string;
+  let project: string | undefined;
+  let baseUrl: string;
+  if (host === 'dev.azure.com') {
+    if (before.length < 1 || before.length > 2) return null;
+    organization = before[0]!;
+    project = before[1];
+    baseUrl = `https://dev.azure.com/${organization}`;
+  } else if (host.endsWith('.visualstudio.com')) {
+    organization = host.slice(0, -'.visualstudio.com'.length);
+    // Legacy URLs may carry a collection segment (usually DefaultCollection)
+    // before the project; the org URL keeps it implicit.
+    const rest =
+      before.length === 2 || (before.length === 1 && lower[0] === 'defaultcollection')
+        ? before.slice(1)
+        : before;
+    if (rest.length > 1) return null;
+    project = rest[0];
+    baseUrl = `https://${organization}.visualstudio.com`;
+  } else {
+    // On-prem ADO Server/TFS: /<virtualdir…>/<collection>/<project>/_git/…
+    // — the collection URL is everything up to (excluding) the project.
+    // Known ambiguity: a project-omitted on-prem URL (…/<vdir>/<collection>/_git/…)
+    // is indistinguishable from <collection>/<project> and parses as it; those
+    // URLs need the full form. Rejecting 2 segments instead would break the
+    // documented <server>/<collection>/<project> shape, which also has 2.
+    if (before.length < 2) return null;
+    project = before[before.length - 1]!;
+    organization = before[before.length - 2]!;
+    baseUrl = `${u.protocol}//${u.host}/${before.slice(0, -1).map(encodeURIComponent).join('/')}`;
+  }
+  return { provider: 'azuredevops', url, organization, project, owner: organization, repo, number, baseUrl };
+}
+
+/**
+ * Org/collection API URL for a ref: parseUrl always sets baseUrl, but old
+ * serialized refs (pre-0.5.0 caches replayed by --resume) lack it — re-derive
+ * from ref.url so legacy/on-prem hosts still resolve correctly, with the
+ * cloud form as the last resort for hand-built refs. Exported for tests.
+ */
+export function orgUrlFor(ref: PrRef): string {
+  return ref.baseUrl ?? parseAdoUrl(ref.url)?.baseUrl ?? `https://dev.azure.com/${ref.organization}`;
 }
 
 /** Exported for tests. azure-devops-node-api surfaces HTTP codes as `statusCode`; check `status` too so a library change cannot silently kill retries. */
@@ -201,14 +266,9 @@ export class AzureDevOpsProvider implements PrProvider {
   private gitApis: Map<string, Promise<GitApi>> = new Map();
   private prCache: Map<string, Promise<GitPullRequest>> = new Map();
 
-  authEnv(_ref?: PrRef): Record<string, string> {
+  authEnv(_ref: PrRef): Record<string, string> {
     const cred = resolveCredential();
     return cred.kind === 'bearer' ? { AZURE_DEVOPS_BEARER: cred.token } : { AZURE_DEVOPS_PAT: cred.token };
-  }
-
-  /** Org/collection API URL: from parseUrl's baseUrl; hand-built refs fall back to the cloud form. */
-  private orgUrl(ref: PrRef): string {
-    return ref.baseUrl ?? `https://dev.azure.com/${ref.organization}`;
   }
 
   private connection(orgUrl: string): azdev.WebApi {
@@ -225,7 +285,7 @@ export class AzureDevOpsProvider implements PrProvider {
   }
 
   private gitApi(ref: PrRef): Promise<GitApi> {
-    const orgUrl = this.orgUrl(ref);
+    const orgUrl = orgUrlFor(ref);
     let api = this.gitApis.get(orgUrl);
     if (!api) {
       api = this.connection(orgUrl).getGitApi();
@@ -234,62 +294,13 @@ export class AzureDevOpsProvider implements PrProvider {
     return api;
   }
 
-  /**
-   * Accepts every ADO URL shape, anchored on the `_git` path segment:
-   *   https://dev.azure.com/<org>[/<project>]/_git/<repo>/pullrequest/<id>
-   *   https://<org>.visualstudio.com/[<collection>/][<project>/]_git/<repo>/pullrequest/<id>
-   *   https://<server>/<virtualdir…>/<collection>/<project>/_git/<repo>/pullrequest/<id>  (ADO Server/TFS)
-   * Project-omitted forms mean project == repo. Trailing paths/query/fragment are ignored.
-   */
   parseUrl(url: string): PrRef | null {
-    let u: URL;
-    try {
-      u = new URL(url);
-    } catch {
-      return null;
-    }
-    if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
-    const seg = u.pathname.split('/').filter(Boolean).map(decodeURIComponent);
-    const lower = seg.map((s) => s.toLowerCase());
-    const gi = lower.indexOf('_git');
-    if (gi < 0 || lower[gi + 2] !== 'pullrequest' || !/^\d+$/.test(seg[gi + 3] ?? '')) return null;
-    const repo = seg[gi + 1]!;
-    const number = parseInt(seg[gi + 3]!, 10);
-    const before = seg.slice(0, gi);
-    const host = u.hostname;
-    let organization: string;
-    let project: string;
-    let baseUrl: string;
-    if (host === 'dev.azure.com') {
-      if (before.length < 1 || before.length > 2) return null;
-      organization = before[0]!;
-      project = before[1] ?? repo;
-      baseUrl = `https://dev.azure.com/${organization}`;
-    } else if (host.endsWith('.visualstudio.com')) {
-      organization = host.slice(0, -'.visualstudio.com'.length);
-      // Legacy URLs may carry a collection segment (usually DefaultCollection)
-      // before the project; the org URL keeps it implicit.
-      const rest =
-        before.length === 2 || (before.length === 1 && lower[0] === 'defaultcollection')
-          ? before.slice(1)
-          : before;
-      if (rest.length > 1) return null;
-      project = rest[0] ?? repo;
-      baseUrl = `https://${organization}.visualstudio.com`;
-    } else {
-      // On-prem ADO Server/TFS: /<virtualdir…>/<collection>/<project>/_git/…
-      // — the collection URL is everything up to (excluding) the project.
-      if (before.length < 2) return null;
-      project = before[before.length - 1]!;
-      organization = before[before.length - 2]!;
-      baseUrl = `${u.protocol}//${u.host}/${before.slice(0, -1).map(encodeURIComponent).join('/')}`;
-    }
-    return { provider: 'azuredevops', url, organization, project, owner: organization, repo, number, baseUrl };
+    return parseAdoUrl(url);
   }
 
   /** One PR fetch per (url, number) for the provider instance's lifetime — posting N findings must not re-fetch N times. */
   private getPr(ref: PrRef): Promise<GitPullRequest> {
-    const key = `${this.orgUrl(ref)}#${ref.project}#${ref.number}`;
+    const key = `${orgUrlFor(ref)}#${ref.project ?? ''}#${ref.number}`;
     let pr = this.prCache.get(key);
     if (!pr) {
       pr = this.gitApi(ref).then((git) => git.getPullRequestById(ref.number, ref.project));
@@ -360,9 +371,9 @@ export class AzureDevOpsProvider implements PrProvider {
           let patch: string | undefined;
           if (status !== 'deleted' && headSha) {
             const [headContent, baseContent] = await Promise.all([
-              this.fetchFileText(git, repoId, ref.project!, path, headSha),
+              this.fetchFileText(git, repoId, ref.project, path, headSha),
               baseSha && status !== 'added'
-                ? this.fetchFileText(git, repoId, ref.project!, basePath, baseSha)
+                ? this.fetchFileText(git, repoId, ref.project, basePath, baseSha)
                 : Promise.resolve(null),
             ]);
             patch = synthesizePatch(path, baseContent, headContent, baseSha ?? '', headSha);
@@ -385,7 +396,7 @@ export class AzureDevOpsProvider implements PrProvider {
   private async fetchFileText(
     git: GitApi,
     repoId: string,
-    project: string,
+    project: string | undefined,
     path: string,
     sha: string,
   ): Promise<string | null> {

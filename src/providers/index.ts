@@ -2,6 +2,7 @@ import { GitHubProvider } from './github.js';
 import { AzureDevOpsProvider } from './azuredevops.js';
 import { GitLabProvider } from './gitlab.js';
 import { loadConfig } from '../config.js';
+import { parseHttpUrl } from '../util/url.js';
 import type { Provider, PrRef } from '../types.js';
 import type { PrProvider } from './types.js';
 
@@ -33,45 +34,43 @@ function hostsTip(hostname: string): string {
   ].join('\n');
 }
 
+// Exhaustive over the Provider union: a new PROVIDERS member that misses a
+// case here is a compile error (no default), not a silent misroute to ADO.
 function makeProvider(name: Provider): PrProvider {
-  if (name === 'github') return new GitHubProvider();
-  if (name === 'gitlab') return new GitLabProvider();
-  return new AzureDevOpsProvider();
+  switch (name) {
+    case 'github':
+      return new GitHubProvider();
+    case 'gitlab':
+      return new GitLabProvider();
+    case 'azuredevops':
+      return new AzureDevOpsProvider();
+  }
 }
 
 /**
- * Three detection tiers: known cloud hostnames, then the user's `hosts:`
- * config map, then a path-shape heuristic for self-hosted servers (the PR
- * path shapes are disjoint across providers). `hosts` is a test seam;
- * production reads the config.
+ * Two detection tiers: known cloud hostnames, then the user's `hosts:` config
+ * map. Self-hosted hosts resolve ONLY through that explicit allowlist — there
+ * is deliberately no path-shape guessing for unknown hosts, because detection
+ * is what decides where the caller's credential gets sent: auto-trusting any
+ * host whose path merely looks PR-shaped would let a crafted URL
+ * (https://attacker.example/o/r/pull/1) exfiltrate the token. `hosts` is a
+ * test seam; production reads the config.
  */
 export function detectProvider(url: string, hosts?: Record<string, Provider>): PrProvider {
-  let u: URL;
-  try {
-    u = new URL(url);
-  } catch {
-    throw new Error(`Not a valid URL: ${url}\nExpected one of:\n${shapesHelp()}`);
-  }
-  const host = u.hostname.toLowerCase();
+  const u = parseHttpUrl(url);
+  if (!u) throw new Error(`Not a valid URL: ${url}\nExpected one of:\n${shapesHelp()}`);
+  const host = u.hostname;
   if (host === 'github.com' || host === 'www.github.com') return makeProvider('github');
   if (host === 'dev.azure.com' || host.endsWith('.visualstudio.com')) return makeProvider('azuredevops');
   if (host === 'gitlab.com' || host === 'www.gitlab.com') return makeProvider('gitlab');
   const mapped = (hosts ?? loadConfig().config.hosts)[host];
   if (mapped) return makeProvider(mapped);
-  const seg = u.pathname.split('/').filter(Boolean).map((s) => s.toLowerCase());
-  const gi = seg.indexOf('_git');
-  if (gi >= 0 && seg[gi + 2] === 'pullrequest') return makeProvider('azuredevops');
-  if (seg[2] === 'pull' && /^\d+$/.test(seg[3] ?? '')) return makeProvider('github');
-  // /-/merge_requests/<iid> is unambiguously GitLab; the legacy no-/-/ form
-  // on a self-hosted host is too weak a signal — that one needs the hosts: map.
-  const di = seg.indexOf('-');
-  if (di >= 0 && seg[di + 1] === 'merge_requests' && /^\d+$/.test(seg[di + 2] ?? '')) return makeProvider('gitlab');
   throw new Error(`Unrecognized PR URL: ${url}\nExpected one of:\n${shapesHelp()}\n${hostsTip(host)}`);
 }
 
 export function unparsablePrUrlMessage(name: Provider, url: string): string {
   let msg = `Failed to parse PR URL: ${url}\nExpected one of:\n${shapesHelp([name])}`;
-  if (name === 'azuredevops' && url.toLowerCase().includes('visualstudio.com')) {
+  if (name === 'azuredevops' && parseHttpUrl(url)?.hostname.endsWith('.visualstudio.com')) {
     msg += '\nTip: legacy URLs usually map to https://dev.azure.com/<org>/<project>/_git/<repo>/pullrequest/<id>';
   }
   return msg;
@@ -80,12 +79,18 @@ export function unparsablePrUrlMessage(name: Provider, url: string): string {
 /**
  * Detect + parse in one step. Throws (never returns null) so a bad URL fails
  * where it is typed — in the foreground, before --detach spawns anything.
+ * `provider` lets callers with an injected test-seam provider still route
+ * through the same parse-and-throw path instead of open-coding it.
  */
-export function resolvePr(url: string, hosts?: Record<string, Provider>): { provider: PrProvider; ref: PrRef } {
-  const provider = detectProvider(url, hosts);
-  const ref = provider.parseUrl(url);
-  if (!ref) throw new Error(unparsablePrUrlMessage(provider.name, url));
-  return { provider, ref };
+export function resolvePr(
+  url: string,
+  hosts?: Record<string, Provider>,
+  provider?: PrProvider,
+): { provider: PrProvider; ref: PrRef } {
+  const p = provider ?? detectProvider(url, hosts);
+  const ref = p.parseUrl(url);
+  if (!ref) throw new Error(unparsablePrUrlMessage(p.name, url));
+  return { provider: p, ref };
 }
 
 export type { PrProvider } from './types.js';

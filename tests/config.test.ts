@@ -54,6 +54,22 @@ test('loadConfig — CLI flag overrides everything', () => {
   }
 });
 
+test('loadConfig — hosts: keys are lowercased (detectProvider looks up lowercase hostnames) and unknown providers are warned and skipped', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'pr-review-cfg-'));
+  const home = mkdtempSync(join(tmpdir(), 'pr-review-home-'));
+  try {
+    writeFileSync(join(tmp, '.pr-review.yaml'), 'hosts:\n  GitHub.Corp.COM: github\n  tfs.corp.com: azuredevops\n  bad.com: bitbucket\n');
+    const { config } = loadConfig({ cwd: tmp, homeOverride: home });
+    assert.equal(config.hosts['github.corp.com'], 'github', 'mixed-case yaml key normalized to lowercase');
+    assert.equal(config.hosts['GitHub.Corp.COM'], undefined, 'raw mixed-case key is not kept');
+    assert.equal(config.hosts['tfs.corp.com'], 'azuredevops');
+    assert.equal(config.hosts['bad.com'], undefined, 'unknown provider value dropped, not accepted');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('loadConfig — env var overrides defaults', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'pr-review-cfg-'));
   const home = mkdtempSync(join(tmpdir(), 'pr-review-home-'));

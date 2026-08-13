@@ -75,9 +75,11 @@ test('detachReview — an unparsable PR URL throws in the foreground, before aut
     return { on() { return this; }, unref() {} };
   }) as unknown as typeof import('node:child_process').spawn;
 
-  // Legacy-shaped ADO URL that detection accepts but with a malformed tail —
-  // before the fail-fast reorder this minted an adhoc run dir and died in the child.
-  const url = 'https://github.com/o/r/issues/7';
+  // Detection accepts the visualstudio.com host, but the extra path segments
+  // fail the ADO parse — the detection-accepted-then-parse-rejected shape of
+  // the field incident. Before the fail-fast reorder this minted an adhoc run
+  // dir and died inside the detached child (status exit 22).
+  const url = 'https://microsoft.visualstudio.com/a/b/c/_git/r/pullrequest/1';
   assert.throws(
     () =>
       detachReview(url, ['review', url, '--detach'], fakeSpawn, () => {

@@ -3,18 +3,26 @@ import type { ChangedFile, ExistingComment, Finding, PrMetadata, PrRef } from '.
 import type { PrProvider } from './types.js';
 import { withRetry } from '../util/retry.js';
 import { execErrorDetail } from '../util/exec-error.js';
+import { safeDecode } from '../util/url.js';
+import { diffLines } from '../util/diff-lines.js';
 
 // Modern (/-/merge_requests/) and legacy (no /-/) forms, any host, nested
 // namespaces (group/subgroup/project). Trailing /diffs, query, #note_x fall
 // off after the iid digits.
 const URL_RE = /^https?:\/\/[^\/]+\/(.+?)\/(?:-\/)?merge_requests\/(\d+)/i;
 
-function resolveToken(host: string): string {
+/**
+ * Exported for tests; `exec` is the subprocess seam. Env tokens are only ever
+ * sent to gitlab.com or a host the user explicitly named in the `hosts:`
+ * allowlist — detectProvider refuses unknown hosts, so no crafted URL can
+ * route this token elsewhere.
+ */
+export function resolveToken(host: string, exec: typeof execFileSync = execFileSync): string {
   const fromEnv = process.env.GITLAB_TOKEN ?? process.env.GITLAB_ACCESS_TOKEN;
   if (fromEnv) return fromEnv;
   let detail: string;
   try {
-    const token = execFileSync('glab', ['config', 'get', 'token', '-h', host], {
+    const token = exec('glab', ['config', 'get', 'token', '-h', host], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
@@ -91,9 +99,12 @@ interface GitLabNote {
 export function mapDiff(d: GitLabDiff): ChangedFile {
   let additions = 0;
   let deletions = 0;
-  for (const ln of (d.diff ?? '').split('\n')) {
-    if (ln.startsWith('+') && !ln.startsWith('+++')) additions++;
-    else if (ln.startsWith('-') && !ln.startsWith('---')) deletions++;
+  // diffLines strips only the pre-content file headers — a `+++…` line inside
+  // a hunk is real added content (text beginning `++`) and must be counted.
+  for (const ln of diffLines(d.diff ?? '')) {
+    if (ln.startsWith('@@')) continue;
+    if (ln.startsWith('+')) additions++;
+    else if (ln.startsWith('-')) deletions++;
   }
   return {
     path: d.new_path,
@@ -127,14 +138,15 @@ export function buildFullDiff(diffs: GitLabDiff[]): string {
 export function positionForLine(patch: string, target: number): { newLine: number; oldLine?: number } | null {
   let oldLine = 0;
   let newLine = 0;
-  for (const ln of patch.split('\n')) {
+  // diffLines strips only the pre-content file headers — an added line whose
+  // text begins `++` (yielded as `+++…`) advances the NEW cursor like any `+`.
+  for (const ln of diffLines(patch)) {
     const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(ln);
     if (m) {
       oldLine = parseInt(m[1]!, 10) - 1;
       newLine = parseInt(m[2]!, 10) - 1;
       continue;
     }
-    if (ln.startsWith('+++') || ln.startsWith('---') || ln.startsWith('\\')) continue;
     if (ln.startsWith('+')) {
       newLine++;
       if (newLine === target) return { newLine: target };
@@ -149,21 +161,114 @@ export function positionForLine(patch: string, target: number): { newLine: numbe
   return null;
 }
 
+/** The discussion position GitLab accepts. Required fields are compiler-checked — a missing SHA or path here IS the 400 "position is invalid". */
+export interface DiscussionPosition {
+  position_type: 'text';
+  base_sha: string;
+  start_sha: string;
+  head_sha: string;
+  old_path: string;
+  new_path: string;
+  new_line: number;
+  old_line?: number;
+}
+
+/**
+ * Build the position for an inline discussion, or throw a descriptive error —
+ * GitLab's own rejection is an opaque 400, so anchoring problems must be named
+ * locally. Pure; exported for tests (this assembly is the highest-risk logic
+ * in the provider). `diff` undefined = file not in the MR diffs; a diff with
+ * an empty patch (collapsed/oversized) posts new_line-only and lets the API
+ * answer, since there is nothing to compute a position from.
+ */
+export function buildDiscussionPosition(
+  diff: GitLabDiff | undefined,
+  finding: { file: string; line: number },
+  diffRefs: { base_sha: string; head_sha: string; start_sha: string },
+): DiscussionPosition {
+  if (!diff) {
+    throw new Error(`cannot anchor ${finding.file}:${finding.line} — ${finding.file} is not in the MR diffs`);
+  }
+  const pos = diff.diff ? positionForLine(diff.diff, finding.line) : null;
+  if (diff.diff && !pos) {
+    throw new Error(
+      `cannot anchor ${finding.file}:${finding.line} — line ${finding.line} is not in the MR diff for that file`,
+    );
+  }
+  const position: DiscussionPosition = {
+    position_type: 'text',
+    base_sha: diffRefs.base_sha,
+    start_sha: diffRefs.start_sha,
+    head_sha: diffRefs.head_sha,
+    // old_path is required even for new-side comments; on a rename it must
+    // be the real old path or the API 400s.
+    old_path: diff.renamed_file ? diff.old_path : finding.file,
+    new_path: finding.file,
+    new_line: pos?.newLine ?? finding.line,
+  };
+  // A context line must also carry old_line or GitLab rejects the position.
+  if (pos?.oldLine !== undefined) position.old_line = pos.oldLine;
+  return position;
+}
+
+/** Exported for tests: the branch-y MR → PrMetadata mapping (state collapse, draft alias, SHA fallbacks). */
+export function mapMrMetadata(mr: GitLabMr, linkedItems: PrMetadata['linkedItems']): PrMetadata {
+  return {
+    title: mr.title,
+    description: mr.description ?? '',
+    author: mr.author?.username ?? '<unknown>',
+    headSha: mr.diff_refs?.head_sha ?? mr.sha,
+    baseSha: mr.diff_refs?.base_sha ?? '',
+    headBranch: mr.source_branch,
+    baseBranch: mr.target_branch,
+    labels: mr.labels ?? [],
+    linkedItems,
+    createdAt: mr.created_at,
+    updatedAt: mr.updated_at,
+    isDraft: mr.draft ?? mr.work_in_progress ?? false,
+    state: mr.state === 'merged' ? 'merged' : mr.state === 'closed' ? 'closed' : 'open',
+  };
+}
+
+/** Exported for tests: note → ExistingComment mapping (position fallbacks feed dedupe). */
+export function mapNote(n: GitLabNote): ExistingComment {
+  const author = n.author?.username ?? '<unknown>';
+  return {
+    id: String(n.id),
+    author,
+    body: n.body ?? '',
+    file: n.position?.new_path ?? n.position?.old_path ?? undefined,
+    line: n.position?.new_line ?? n.position?.old_line ?? undefined,
+    createdAt: n.created_at,
+    source: classifyAuthor(author),
+  };
+}
+
 export class GitLabProvider implements PrProvider {
   readonly name = 'gitlab' as const;
   /** One MR/diffs fetch per (host, project, iid) for the instance's lifetime — posting N findings must not re-fetch N times. */
   private mrCache: Map<string, Promise<GitLabMr>> = new Map();
   private diffsCache: Map<string, Promise<GitLabDiff[]>> = new Map();
+  /** Token per host — the glab CLI fallback is a blocking subprocess and must not run once per request. */
+  private tokenByHost: Map<string, string> = new Map();
 
-  authEnv(ref?: PrRef): Record<string, string> {
-    const host = ref ? new URL(ref.url).host : 'gitlab.com';
-    return { GITLAB_TOKEN: resolveToken(host) };
+  authEnv(ref: PrRef): Record<string, string> {
+    return { GITLAB_TOKEN: this.token(new URL(ref.url).host) };
+  }
+
+  private token(host: string): string {
+    let t = this.tokenByHost.get(host);
+    if (!t) {
+      t = resolveToken(host);
+      this.tokenByHost.set(host, t);
+    }
+    return t;
   }
 
   parseUrl(url: string): PrRef | null {
     const m = url.match(URL_RE);
     if (!m) return null;
-    const parts = m[1]!.split('/').filter(Boolean).map(decodeURIComponent);
+    const parts = m[1]!.split('/').filter(Boolean).map(safeDecode);
     if (parts.length < 2) return null;
     return {
       provider: 'gitlab',
@@ -187,7 +292,7 @@ export class GitLabProvider implements PrProvider {
   }
 
   private async rawFetch(ref: PrRef, url: string, init?: { method?: string; body?: unknown }): Promise<Response> {
-    const token = resolveToken(new URL(ref.url).host);
+    const token = this.token(new URL(ref.url).host);
     const res = await fetch(url, {
       method: init?.method ?? 'GET',
       headers: {
@@ -213,8 +318,17 @@ export class GitLabProvider implements PrProvider {
     while (page) {
       const sep = path.includes('?') ? '&' : '?';
       const res = await this.rawFetch(ref, `${this.projectBase(ref)}${path}${sep}per_page=100&page=${page}`);
-      out.push(...((await res.json()) as T[]));
+      const items = (await res.json()) as T[];
+      out.push(...items);
       page = res.headers.get('x-next-page') ?? '';
+      // A full page with no next-page header smells like a proxy stripping
+      // pagination headers or an endpoint changing pagination modes — say so
+      // instead of silently truncating the review to the first 100 items.
+      if (!page && items.length === 100) {
+        process.stderr.write(
+          `[gitlab] ${path}: got a full page with no x-next-page header — results may be truncated at ${out.length}\n`,
+        );
+      }
     }
     return out;
   }
@@ -223,11 +337,24 @@ export class GitLabProvider implements PrProvider {
     return `${new URL(ref.url).origin}#${ref.owner}/${ref.repo}#${ref.number}`;
   }
 
+  /**
+   * Both caches memoize the request PROMISE and evict on rejection —
+   * otherwise one transient 5xx would stay cached and fail every later
+   * caller with the same stale error. The fetch itself retries: these GETs
+   * back every provider method, including the per-finding posting loop.
+   */
   private getMr(ref: PrRef): Promise<GitLabMr> {
     const key = this.cacheKey(ref);
     let mr = this.mrCache.get(key);
     if (!mr) {
-      mr = this.api<GitLabMr>(ref, `/merge_requests/${ref.number}`);
+      mr = withRetry(
+        () => this.api<GitLabMr>(ref, `/merge_requests/${ref.number}`),
+        isTransientGitLabError,
+        `MR !${ref.number}`,
+      ).catch((err) => {
+        this.mrCache.delete(key);
+        throw err;
+      });
       this.mrCache.set(key, mr);
     }
     return mr;
@@ -237,7 +364,14 @@ export class GitLabProvider implements PrProvider {
     const key = this.cacheKey(ref);
     let diffs = this.diffsCache.get(key);
     if (!diffs) {
-      diffs = this.apiAll<GitLabDiff>(ref, `/merge_requests/${ref.number}/diffs`);
+      diffs = withRetry(
+        () => this.apiAll<GitLabDiff>(ref, `/merge_requests/${ref.number}/diffs`),
+        isTransientGitLabError,
+        `MR !${ref.number} diffs`,
+      ).catch((err) => {
+        this.diffsCache.delete(key);
+        throw err;
+      });
       this.diffsCache.set(key, diffs);
     }
     return diffs;
@@ -260,21 +394,7 @@ export class GitLabProvider implements PrProvider {
         `[gather] could not fetch linked issues: ${(err as Error).message.split('\n')[0]}\n`,
       );
     }
-    return {
-      title: mr.title,
-      description: mr.description ?? '',
-      author: mr.author?.username ?? '<unknown>',
-      headSha: mr.diff_refs?.head_sha ?? mr.sha,
-      baseSha: mr.diff_refs?.base_sha ?? '',
-      headBranch: mr.source_branch,
-      baseBranch: mr.target_branch,
-      labels: mr.labels ?? [],
-      linkedItems,
-      createdAt: mr.created_at,
-      updatedAt: mr.updated_at,
-      isDraft: mr.draft ?? mr.work_in_progress ?? false,
-      state: mr.state === 'merged' ? 'merged' : mr.state === 'closed' ? 'closed' : 'open',
-    };
+    return mapMrMetadata(mr, linkedItems);
   }
 
   async fetchChangedFiles(ref: PrRef): Promise<ChangedFile[]> {
@@ -287,20 +407,7 @@ export class GitLabProvider implements PrProvider {
 
   async fetchExistingComments(ref: PrRef): Promise<ExistingComment[]> {
     const notes = await this.apiAll<GitLabNote>(ref, `/merge_requests/${ref.number}/notes`);
-    return notes
-      .filter((n) => !n.system)
-      .map((n) => {
-        const author = n.author?.username ?? '<unknown>';
-        return {
-          id: String(n.id),
-          author,
-          body: n.body ?? '',
-          file: n.position?.new_path ?? n.position?.old_path ?? undefined,
-          line: n.position?.new_line ?? n.position?.old_line ?? undefined,
-          createdAt: n.created_at,
-          source: classifyAuthor(author),
-        };
-      });
+    return notes.filter((n) => !n.system).map(mapNote);
   }
 
   async postLineComment(ref: PrRef, finding: Finding, _headSha?: string): Promise<{ id: string } | null> {
@@ -312,20 +419,7 @@ export class GitLabProvider implements PrProvider {
       throw new Error(`MR !${ref.number} has no diff_refs — cannot anchor an inline discussion`);
     }
     const diff = (await this.getDiffs(ref)).find((d) => d.new_path === finding.file);
-    const pos = diff?.diff ? positionForLine(diff.diff, finding.line) : null;
-    const position: Record<string, unknown> = {
-      position_type: 'text',
-      base_sha: mr.diff_refs.base_sha,
-      start_sha: mr.diff_refs.start_sha,
-      head_sha: mr.diff_refs.head_sha,
-      // old_path is required even for new-side comments; on a rename it must
-      // be the real old path or the API 400s.
-      old_path: diff?.renamed_file ? diff.old_path : finding.file,
-      new_path: finding.file,
-      new_line: pos?.newLine ?? finding.line,
-    };
-    // A context line must also carry old_line or GitLab rejects the position.
-    if (pos?.oldLine !== undefined) position.old_line = pos.oldLine;
+    const position = buildDiscussionPosition(diff, { file: finding.file, line: finding.line }, mr.diff_refs);
     const body = finding.body.trim();
     // No top-level note fallback: findings must land as resolvable inline
     // discussions. An unanchorable finding surfaces as an error instead.

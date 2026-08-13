@@ -1,4 +1,5 @@
 import type { ChangedFile } from '../types.js';
+import { diffLines } from '../util/diff-lines.js';
 
 /**
  * Valid NEW-side line numbers for one unified-diff patch: added (`+`) and
@@ -8,14 +9,14 @@ import type { ChangedFile } from '../types.js';
 export function validLinesFromPatch(patch: string): Set<number> {
   const valid = new Set<number>();
   let newLine = 0;
-  for (const ln of patch.split('\n')) {
+  // diffLines strips the file-header preamble; a `+++…` line it yields is
+  // real added content (text beginning `++`), counted like any `+` line.
+  for (const ln of diffLines(patch)) {
     const m = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(ln);
     if (m) {
       newLine = parseInt(m[1]!, 10) - 1;
       continue;
     }
-    if (ln.startsWith('+++') || ln.startsWith('---')) continue;
-    if (ln.startsWith('\\')) continue; // "\ No newline at end of file"
     if (ln.startsWith('+')) {
       newLine++;
       valid.add(newLine);

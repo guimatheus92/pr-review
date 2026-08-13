@@ -26,6 +26,7 @@ Trailing paths, query strings, and fragments are ignored (`…/pull/42/files?dif
 hosts:
   github.mycorp.com: github
   tfs.corp.com: azuredevops
+  git.mycorp.com: gitlab
 ```
 
 ## Why a CLI, not just a skill

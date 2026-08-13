@@ -80,9 +80,11 @@ test('AzureDevOpsProvider.authEnv — PAT round-trips as AZURE_DEVOPS_PAT', () =
   );
 });
 
+const glRef = new GitLabProvider().parseUrl('https://gitlab.com/group/proj/-/merge_requests/42')!;
+
 test('GitLabProvider.authEnv — env token round-trips as GITLAB_TOKEN, no subprocess', () => {
   withEnv({ GITLAB_TOKEN: 'glt', GITLAB_ACCESS_TOKEN: undefined }, () => {
-    assert.deepEqual(new GitLabProvider().authEnv(), { GITLAB_TOKEN: 'glt' });
+    assert.deepEqual(new GitLabProvider().authEnv(glRef), { GITLAB_TOKEN: 'glt' });
   });
 });
 

@@ -7,6 +7,7 @@ import type { PrProvider } from './types.js';
 import { withRetry } from '../util/retry.js';
 import { execErrorDetail } from '../util/exec-error.js';
 import { parseHttpUrl, safeDecode } from '../util/url.js';
+import { diffLines } from '../util/diff-lines.js';
 
 const ADO_AZURE_AD_RESOURCE_ID = '499b84ac-1321-427f-aa17-267ca6975798';
 
@@ -381,9 +382,12 @@ export class AzureDevOpsProvider implements PrProvider {
           let additions = 0;
           let deletions = 0;
           if (patch) {
-            for (const line of patch.split('\n')) {
-              if (line.startsWith('+') && !line.startsWith('+++')) additions++;
-              else if (line.startsWith('-') && !line.startsWith('---')) deletions++;
+            // diffLines strips only the file-header preamble — `+++…` inside
+            // content is a real added line (text beginning `++`) and counts.
+            for (const line of diffLines(patch)) {
+              if (line.startsWith('@@')) continue;
+              if (line.startsWith('+')) additions++;
+              else if (line.startsWith('-')) deletions++;
             }
           }
           return { path, status, additions, deletions, patch };

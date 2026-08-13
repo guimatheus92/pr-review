@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { safeOwner, safeSegment } from '../util/tmp.js';
 import type { GatherOutput, PrRef } from '../types.js';
 
 export const CACHE_ROOT = join(homedir(), '.pr-review', 'cache');
@@ -12,7 +13,7 @@ export function gatherCachePath(ref: PrRef, headSha: string, lastCommentId: stri
   return join(
     CACHE_ROOT,
     ref.provider,
-    `${ref.owner}__${ref.repo}`,
+    `${safeOwner(ref)}__${safeSegment(ref.repo)}`,
     String(ref.number),
     `${headSha.slice(0, 12)}-${lastCommentId}.json`,
   );

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { GitHubProvider, resolveToken } from '../src/providers/github.js';
 import { AzureDevOpsProvider } from '../src/providers/azuredevops.js';
+import { GitLabProvider } from '../src/providers/gitlab.js';
 
 const gh = new GitHubProvider();
 const ado = new AzureDevOpsProvider();
@@ -77,6 +78,14 @@ test('AzureDevOpsProvider.authEnv — PAT round-trips as AZURE_DEVOPS_PAT', () =
       assert.deepEqual(ado.authEnv(adoRef), { AZURE_DEVOPS_PAT: 'pat' });
     },
   );
+});
+
+const glRef = new GitLabProvider().parseUrl('https://gitlab.com/group/proj/-/merge_requests/42')!;
+
+test('GitLabProvider.authEnv — env token round-trips as GITLAB_TOKEN, no subprocess', () => {
+  withEnv({ GITLAB_TOKEN: 'glt', GITLAB_ACCESS_TOKEN: undefined }, () => {
+    assert.deepEqual(new GitLabProvider().authEnv(glRef), { GITLAB_TOKEN: 'glt' });
+  });
 });
 
 test('AzureDevOpsProvider.authEnv — bearer round-trips as AZURE_DEVOPS_BEARER, never as a PAT', () => {

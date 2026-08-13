@@ -4,9 +4,10 @@
 import { readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
-const files = readdirSync('tests')
+const files = readdirSync('tests', { recursive: true })
+  .map(String)
   .filter((f) => f.endsWith('.test.ts'))
-  .map((f) => `tests/${f}`);
+  .map((f) => `tests/${f.replaceAll('\\', '/')}`);
 if (files.length === 0) {
   console.error('no test files found under tests/');
   process.exit(1);

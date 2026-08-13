@@ -283,10 +283,26 @@ function writeContextFile(opts: SingleSessionOptions, catalog: SkillDefinition[]
   return contextPath;
 }
 
+/**
+ * Hard rule injected into EVERY dispatched reviewer/companion prompt. The
+ * pr-review CLI is the only thing that ever writes to the PR (inline-only,
+ * deduped, idempotent); a subagent that posts on its own bypasses all of
+ * that. This is not hypothetical: the official `code-review` companion's
+ * command allows `gh pr comment` and its instructions post a top-level
+ * "### Code review / No issues found" verdict — a live run did exactly that
+ * (Preco-Pratico/PrecoPratico-Backend#586) until this directive was added.
+ * A session-context test asserts the directive reaches every dispatch line.
+ */
+export const NO_POSTING_DIRECTIVE =
+  'HARD RULE: do NOT post, comment, review, approve, or write ANYTHING to the pull request or repository — ' +
+  'no `gh pr comment`/`gh pr review`/`gh api` writes, no `glab`/`az repos` writes. Read-only commands are fine. ' +
+  'The pr-review CLI is the only thing that posts; your findings JSON is your entire output.';
+
 function reviewerTaskPrompt(contextPath: string, skillsPath: string | undefined): string {
   return (
     `Read the PR context at \`${contextPath}\`.${skillsRulesSentence(skillsPath)} Apply your review criteria. ` +
-    `Output ONLY a JSON array of findings using the shape: ${OUTPUT_SHAPE}. If you find nothing, output []. No prose. No fences.`
+    `Output ONLY a JSON array of findings using the shape: ${OUTPUT_SHAPE}. If you find nothing, output []. No prose. No fences. ` +
+    NO_POSTING_DIRECTIVE
   );
 }
 
@@ -445,7 +461,7 @@ function buildOrchestratorPrompt(
     for (const c of COMPANION_SLASH) {
       if (!opts.installedCompanions.includes(c.pluginId)) continue;
       companionSlashLines.push(
-        `- ${taskCall(runtime, 'general-purpose', `Invoke the slash command \`${c.command} ${opts.prUrl}\`. Capture its output. Parse any structured findings into a JSON array using shape ${OUTPUT_SHAPE}. If no findings, output []. Output ONLY the JSON array.`)} — record as reviewer name \`companion:${c.pluginId}\``,
+        `- ${taskCall(runtime, 'general-purpose', `Invoke the slash command \`${c.command} ${opts.prUrl}\` in analysis-only mode. ${NO_POSTING_DIRECTIVE} If the command's own instructions tell you to post a comment or review, SKIP that step and return the review content as output instead. Parse any structured findings into a JSON array using shape ${OUTPUT_SHAPE}. If no findings, output []. Output ONLY the JSON array.`)} — record as reviewer name \`companion:${c.pluginId}\``,
       );
     }
   }
@@ -462,6 +478,7 @@ function buildOrchestratorPrompt(
     `## Input`,
     `- PR context: \`${ctx.contextPath}\` (already prepared by the Node CLI; do not refetch or modify)`,
     `- Do NOT read the PR context file yourself — only the subagents read it. Your context must stay lean.`,
+    `- ${NO_POSTING_DIRECTIVE} This binds you AND every subagent you dispatch.`,
     ``,
     `## Phase 1 — Parallel reviewer dispatch`,
     ``,
@@ -501,7 +518,7 @@ function buildOrchestratorPrompt(
       ``,
       `Dispatch the verifier ONLY if at least one Phase 1 finding has severity CRITICAL or HIGH. Otherwise skip it — the files you wrote in Phase 2 are already final (they record reviewer \`verifier\` with an empty findings array).`,
       ``,
-      `- ${taskCall(runtime, VERIFIER_AGENT, `Read the PR context at \`${ctx.contextPath}\` and the Phase 1 findings at \`${ctx.phase1Path}\`.${verifierRules} Output ONLY a JSON array of cross-cutting issues, contradictions, or gaps that the other reviewers missed. Use shape ${OUTPUT_SHAPE}. If nothing to add, output [].`)} — record as reviewer name \`verifier\``,
+      `- ${taskCall(runtime, VERIFIER_AGENT, `Read the PR context at \`${ctx.contextPath}\` and the Phase 1 findings at \`${ctx.phase1Path}\`.${verifierRules} Output ONLY a JSON array of cross-cutting issues, contradictions, or gaps that the other reviewers missed. Use shape ${OUTPUT_SHAPE}. If nothing to add, output []. ${NO_POSTING_DIRECTIVE}`)} — record as reviewer name \`verifier\``,
     );
   }
 

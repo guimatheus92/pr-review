@@ -90,6 +90,42 @@ test('skill routing — inject_into and applies_to filter per reviewer; verifier
   }
 });
 
+// Field incident (Preco-Pratico/PrecoPratico-Backend#586): the official
+// `code-review` companion's slash command allows `gh pr comment` and its own
+// instructions post a top-level "### Code review / No issues found" verdict —
+// so the dispatched subagent posted it, bypassing the CLI's inline-only,
+// deduped, idempotent posting. Every dispatch line (built-ins, companion
+// agents, companion slash commands, verifier, and the orchestrator itself)
+// must carry the no-posting directive. This test is the tripwire: if a new
+// dispatch path forgets the directive, it fails.
+test('no-posting directive — reaches the orchestrator and EVERY dispatch line, including companion slash commands', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const ctx = prepareSessionContext({
+      ...baseOpts(outDir, ['src/app.ts'], []),
+      invokeCompanions: true,
+      installedCompanions: ['pr-review-toolkit', 'code-review'],
+    });
+    const prompt = ctx.orchestratorPrompt;
+    const directive = 'do NOT post, comment, review, approve, or write ANYTHING to the pull request';
+    // Every dispatch bullet is a "- <taskCall>" line; each must carry the directive.
+    const dispatchLines = prompt.split('\n').filter((l) => /^- .*(task|Task)\(/.test(l));
+    assert.ok(dispatchLines.length >= 8, `expected built-ins + companions + verifier, got ${dispatchLines.length}`);
+    for (const line of dispatchLines) {
+      assert.ok(line.includes(directive), `dispatch line missing the no-posting directive: ${line.slice(0, 120)}…`);
+    }
+    // The companion slash command additionally runs in analysis-only mode.
+    const slashLine = dispatchLines.find((l) => l.includes('/code-review:code-review'));
+    assert.ok(slashLine, 'code-review companion slash line present');
+    assert.ok(slashLine.includes('analysis-only'), 'slash companions run analysis-only');
+    assert.ok(slashLine.includes('SKIP that step'), 'posting steps in the command are explicitly skipped');
+    // The orchestrator itself is bound too.
+    assert.ok(prompt.includes(`${directive}`) && prompt.includes('This binds you AND every subagent'), 'orchestrator-level rule present');
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
 test('triage — docs-only PR dispatches only quality', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {

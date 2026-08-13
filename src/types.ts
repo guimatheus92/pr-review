@@ -1,4 +1,4 @@
-export const PROVIDERS = ['github', 'azuredevops'] as const;
+export const PROVIDERS = ['github', 'azuredevops', 'gitlab'] as const;
 export type Provider = (typeof PROVIDERS)[number];
 
 export interface PrRef {

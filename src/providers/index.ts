@@ -1,5 +1,6 @@
 import { GitHubProvider } from './github.js';
 import { AzureDevOpsProvider } from './azuredevops.js';
+import { GitLabProvider } from './gitlab.js';
 import { loadConfig } from '../config.js';
 import { parseHttpUrl } from '../util/url.js';
 import type { Provider, PrRef } from '../types.js';
@@ -15,6 +16,10 @@ const URL_SHAPES: Record<Provider, string[]> = {
     'https://<org>.visualstudio.com/[<collection>/][<project>/]_git/<repo>/pullrequest/<id>',
     'https://<server>/<collection>/<project>/_git/<repo>/pullrequest/<id>  (Azure DevOps Server)',
   ],
+  gitlab: [
+    'https://gitlab.com/<group>[/<subgroup>]/<project>/-/merge_requests/<iid>',
+    'https://<gitlab-host>/<group>/<project>/-/merge_requests/<iid>',
+  ],
 };
 
 function shapesHelp(names: Provider[] = Object.keys(URL_SHAPES) as Provider[]): string {
@@ -25,12 +30,21 @@ function hostsTip(hostname: string): string {
   return [
     'For a self-hosted server, map the host in ~/.pr-review/config.yaml or .pr-review.yaml:',
     '  hosts:',
-    `    ${hostname}: github   # or: azuredevops`,
+    `    ${hostname}: github   # or: azuredevops | gitlab`,
   ].join('\n');
 }
 
+// Exhaustive over the Provider union: a new PROVIDERS member that misses a
+// case here is a compile error (no default), not a silent misroute to ADO.
 function makeProvider(name: Provider): PrProvider {
-  return name === 'github' ? new GitHubProvider() : new AzureDevOpsProvider();
+  switch (name) {
+    case 'github':
+      return new GitHubProvider();
+    case 'gitlab':
+      return new GitLabProvider();
+    case 'azuredevops':
+      return new AzureDevOpsProvider();
+  }
 }
 
 /**
@@ -48,6 +62,7 @@ export function detectProvider(url: string, hosts?: Record<string, Provider>): P
   const host = u.hostname;
   if (host === 'github.com' || host === 'www.github.com') return makeProvider('github');
   if (host === 'dev.azure.com' || host.endsWith('.visualstudio.com')) return makeProvider('azuredevops');
+  if (host === 'gitlab.com' || host === 'www.gitlab.com') return makeProvider('gitlab');
   const mapped = (hosts ?? loadConfig().config.hosts)[host];
   if (mapped) return makeProvider(mapped);
   throw new Error(`Unrecognized PR URL: ${url}\nExpected one of:\n${shapesHelp()}\n${hostsTip(host)}`);

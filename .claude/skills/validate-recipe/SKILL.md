@@ -12,7 +12,7 @@ TypeScript CLI (Node >= 20), esbuild single-file bundle at dist/cli.cjs; tests v
 - `npm run build`            # tsc typecheck + esbuild bundle; no separate lint script exists
 
 ## Tier 2 — tests
-- Full suite: `npm run test`                                   # scripts/test.mjs → node --test --import tsx tests/*.test.ts
+- Full suite: `npm run test`                                   # scripts/test.mjs → node --test --import tsx, recursive over tests/**/*.test.ts
 - One file:   `node --test --import tsx tests/<file>.test.ts`
 
 ## Tier 3 — runtime
@@ -24,4 +24,4 @@ TypeScript CLI (Node >= 20), esbuild single-file bundle at dist/cli.cjs; tests v
 - Provider tests are pure-logic; nothing in tests/ hits the network.
 - Pre-fix regression worktrees need node_modules — junction the repo's own (`cmd /c mklink /j`), don't npm install.
 
-Last verified: 2026-08-12 against 2ce10b6 (branch feat/robust-pr-urls)
+Last verified: 2026-08-12 against 29ce1d8 (branch feat/gitlab-provider)

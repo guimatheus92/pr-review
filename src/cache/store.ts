@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { CACHE_ROOT, gatherCachePath, lastCommentIdFrom } from './keys.js';
+import { safeOwner, safeSegment } from '../util/tmp.js';
 import type { GatherOutput, PrRef } from '../types.js';
 
 function writeJson(path: string, data: unknown): void {
@@ -77,7 +78,7 @@ export function clearCache(opts: { prRef?: PrRef; clearAll?: boolean }): { remov
   if (opts.clearAll) {
     target = CACHE_ROOT;
   } else if (opts.prRef) {
-    target = join(CACHE_ROOT, opts.prRef.provider, `${opts.prRef.owner}__${opts.prRef.repo}`, String(opts.prRef.number));
+    target = join(CACHE_ROOT, opts.prRef.provider, `${safeOwner(opts.prRef)}__${safeSegment(opts.prRef.repo)}`, String(opts.prRef.number));
   } else {
     return { removedFiles: 0 };
   }

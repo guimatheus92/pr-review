@@ -1,6 +1,6 @@
 # pr-review
 
-Generic, plugin-based PR review tool for GitHub and Azure DevOps, packaged as a plugin for Copilot CLI or Claude Code. Orchestrates parallel reviewer agents in a single agent session via the `task` tool (Copilot) / `Task` tool (Claude Code), and posts **every** finding back to the PR as a resolvable inline review thread.
+Generic, plugin-based PR review tool for GitHub, Azure DevOps, and GitLab, packaged as a plugin for Copilot CLI or Claude Code. Orchestrates parallel reviewer agents in a single agent session via the `task` tool (Copilot) / `Task` tool (Claude Code), and posts **every** finding back to the PR as a resolvable inline review thread.
 
 ## Build & test
 
@@ -24,7 +24,7 @@ The bundle at `dist/cli.cjs` is the single-file distribution artifact. The slash
 - `src/util/progress.ts` / `src/util/posted-marker.ts` — the `progress.ndjson` phase/heartbeat live feed and the `posted.marker` re-post guard (refuses re-post only on a fully-completed prior post; fail-closed on a corrupt marker)
 - `src/dispatch/codex.ts` — optional Codex second-opinion reviewer; runs as a sibling process in parallel with the orchestrator session when the `codex` CLI is installed (opt out: `--no-codex`)
 - `src/dispatch/line-snap.ts` — snaps finding line numbers to the nearest valid diff line before posting
-- `src/providers/github.ts` / `azuredevops.ts` — PR data fetchers + comment posters (GitHub inline comments go out as one review batch, with per-comment fallback)
+- `src/providers/github.ts` / `azuredevops.ts` / `gitlab.ts` — PR data fetchers + comment posters (GitHub inline comments go out as one review batch, with per-comment fallback; GitLab posts per-discussion via plain fetch)
 - `src/dispatch/parsers.ts` — JSON / bracketed-markdown / section-header output parsers
 - `src/dedupe.ts` — Jaccard token similarity, strict/loose/off modes
 - `src/config.ts` — 5-level config merge (flags > env > repo yaml > global yaml > defaults)
@@ -38,6 +38,7 @@ The bundle at `dist/cli.cjs` is the single-file distribution artifact. The slash
 - **No repo pollution.** All run artifacts go to `~/.pr-review/runs/<id>/`. Never write files to the user's working directory.
 - **Clean output.** Posted comments contain only the finding body — no severity prefix, no bot chrome. Summary findings also render body-only, separated by `---`.
 - **Inline-only posting, nothing dropped.** On a publish run every finding lands as a resolvable inline review thread (GitHub review comments, ADO threads) — never a top-level issue comment. Lines outside the diff are snapped to the nearest valid diff line; findings that can't anchor where they point (file outside the diff, or no location) are re-anchored to the first valid diff line with the original `file:line` kept in the body. `skipped` exists only for `--dry-run`. Never reintroduce an `issues.createComment` fallback.
+- **The CLI is the ONLY writer — dispatched agents never post.** Every dispatch prompt (built-in reviewers, companion agents, companion slash commands, verifier, and the orchestrator itself) carries `NO_POSTING_DIRECTIVE` from `src/dispatch/single-session.ts`, and a session-context test fails if any dispatch line loses it. This is not theoretical: the official `code-review` companion's command allows `gh pr comment` and instructs posting a top-level "### Code review" verdict — a live run posted one (Preco-Pratico/PrecoPratico-Backend#586) before the directive existed. When adding ANY new dispatch path, thread the directive through it.
 - **Skills, not reviewers.** User-authored review content lives in the standard tool skill dirs (`.claude/`, `.copilot/`, `.github/`, `.agents/`, each under `skills/`); per PR the tool auto-injects the ones relevant to the changed files (matched on `name` + `description`) and catalogs the rest. `applies_to`/`inject_into` frontmatter is optional refinement, not a requirement. Standalone reviewers are the exception, not the default.
 - **Single session.** All reviewers dispatch in one runtime process (copilot or claude) via `task()` / `Task()`. Never spawn N separate sessions. The only sibling process is the optional Codex second-opinion reviewer.
 - **Stack-agnostic built-ins.** The 7 agents in `agents/*.md` must never reference specific frameworks. Stack-specific rules belong in user skills.

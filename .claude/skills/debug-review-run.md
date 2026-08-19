@@ -16,6 +16,7 @@ Every `pr-review review` writes artifacts to `~/.pr-review/runs/<provider>__<own
 | `skills-codex.md` | Skill context routed to the Codex second-opinion reviewer (when it runs) |
 | `orchestrator-prompt.md` | The full orchestrator prompt with task()/Task() dispatch instructions |
 | `codex-output.txt` | Raw output of the Codex second-opinion reviewer (sibling `codex exec` process) |
+| `codex-failure.log` | argv, exit code, timing, and full stdout + stderr when the Codex sibling errored (mirrors `orchestrator-failure.log`). This is the one that exists when `codex-output.txt` does not — an early exit never writes the output file |
 | `phase1-findings.json` | Phase 1 findings; the verifier reads this when it's dispatched (only on CRITICAL/HIGH) |
 | `single-session-findings.json` | Raw consolidated findings from the orchestrator |
 | `raw-<reviewer>.json` | Per-reviewer parsed findings |
@@ -51,7 +52,8 @@ Every `pr-review review` writes artifacts to `~/.pr-review/runs/<provider>__<own
 **Codex reviewer missing or empty:**
 1. Codex runs only when the `codex` CLI is installed (detected via `codex --version`); if not installed it's silently skipped with a stderr note.
 2. Check it wasn't opted out: `--no-codex`, `invoke_codex: false`, `PR_REVIEW_NO_CODEX=1`, or `--skip codex`.
-3. Inspect `codex-output.txt` in the run dir for the raw output; its findings appear under reviewer name `codex`.
+3. Read `codex-failure.log` first — on an early exit (a rejected flag, an unusable run dir) `codex-output.txt` was never written, and the failure log carries the argv, the exit code, and the full stdout/stderr. If the run got far enough to produce output, inspect `codex-output.txt`; its findings appear under reviewer name `codex`.
+4. `codex exec` exiting **0** with no output is reported as an errored reviewer, not as "found nothing" — it is contracted to print `[]` when it finds nothing, so an empty result means the output file was never written.
 
 **Skills not reaching a reviewer:**
 1. Run `pr-review review <url> --context-only` — prints the skill→reviewer routing table without spawning the runtime (the reviewers line shows "+ codex (sibling process)" when codex would run).

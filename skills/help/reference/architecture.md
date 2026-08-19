@@ -31,7 +31,7 @@ Node CLI (deterministic plumbing)
 
 A single agent session (Copilot CLI or Claude Code, selected by `--runtime` / `runtime:` / `PR_REVIEW_RUNTIME`, default `auto`) dispatches all reviewers (built-in agents + companion plugins) via the `task` tool (copilot: `task(agent_type=...)`) or `Task` tool (claude: `Task(subagent_type=...)`) — the orchestrator prompt adapts its tool vocabulary to the runtime. The orchestrator prompt instructs the session to launch the triaged reviewers in parallel, collect their JSON arrays, then write a consolidated findings file — and NOT to read `pr-context.md` itself, keeping the orchestrator's context lean. Existing PR comments inside `pr-context.md` are wrapped in an untrusted-content fence. The verifier is conditional: it is dispatched only when Phase 1 produced at least one CRITICAL/HIGH finding, and it reads `phase1-findings.json` from the run dir rather than inline-spliced JSON. The Node CLI reads the findings file and handles dedupe + posting; if the orchestrator produced no parseable findings the run exits 2 (never a silent 0).
 
-When the `codex` CLI is installed, a Codex second-opinion reviewer runs in parallel with the orchestrator session as a sibling process (`codex exec -s read-only --skip-git-repo-check -C <runDir> -o codex-output.txt`) with an adversarial-review prompt reading the same `pr-context.md`. Its findings merge into the normal dedupe/post pipeline under reviewer name `codex`. Rationale: a different model family catches what the primary model misses. Opt out with `--no-codex`, `invoke_codex: false`, `PR_REVIEW_NO_CODEX=1`, or `--skip codex`; when codex isn't installed it's silently skipped (with a stderr note).
+When the `codex` CLI is installed, a Codex second-opinion reviewer runs in parallel with the orchestrator session as a sibling process (`codex exec -s read-only --skip-git-repo-check -C <runDir> -o codex-output.txt`) with an adversarial-review prompt reading the same `pr-context.md`. Its findings merge into the normal dedupe/post pipeline under reviewer name `codex`. A failed Codex run writes `codex-failure.log` (argv, exit code, full stdout + stderr) to the run dir — `codex-output.txt` is absent on an early exit, so the failure log is the artifact to read. Rationale: a different model family catches what the primary model misses. Opt out with `--no-codex`, `invoke_codex: false`, `PR_REVIEW_NO_CODEX=1`, or `--skip codex`; when codex isn't installed it's silently skipped (with a stderr note).
 
 `prepareSessionContext` is exported so `pr-review review <url> --context-only` can prepare the context files and print the skill→reviewer routing table without spawning the runtime.
 
@@ -46,7 +46,7 @@ src/
 ├── commands/
 │   ├── review.ts            # full pipeline; runReview (+ --resume fast path, finalizeReview tail); exit code (0/1/2)
 │   ├── gather.ts            # fetch PR metadata + comments in parallel → cache → JSON
-│   ├── post.ts              # snapFindingsToDiff (snap + re-anchor: every finding lands inline) + batched posting with retry/backoff
+│   ├── post.ts              # snapFindingsToDiff (snap + re-anchor: every finding lands inline) + batched posting, reconciled against the PR before any retry/fallback
 │   ├── status.ts            # `status <run-id>`: live progress snapshot / summary / resume hint (--detach poll target)
 │   ├── detach.ts            # `review --detach`: spawn a detached background run, return its run-id
 │   ├── init.ts              # scaffold a starter team-rules skill in a repo

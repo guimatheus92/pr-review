@@ -760,11 +760,17 @@ function spawnRuntime(args: {
   return new Promise((resolve) => {
     const argv = runtimeSpawnArgs(args.runtime, args.model, args.addDir);
     const child = spawnCli(args.binary, argv, { stdio: ['pipe', 'pipe', 'pipe'] });
-    child.stdin.write(args.promptBody);
-    child.stdin.end();
 
     let stdout = '';
     let stderr = '';
+    // A runtime that rejected a flag and exited already makes this write EPIPE.
+    // `child.on('error')` covers spawn failures only, so an unhandled stream
+    // error would surface as an uncaught exception and kill the whole review.
+    child.stdin.on('error', (err: Error) => {
+      stderr += `\n[stdin] ${err.message}\n`;
+    });
+    child.stdin.write(args.promptBody);
+    child.stdin.end();
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;

@@ -32,6 +32,7 @@ function fakeProvider() {
     fetchChangedFiles: async () => [],
     fetchFullDiff: async () => '',
     fetchExistingComments: async () => [],
+    isTransientError: () => false,
     postLineComment: async (_ref, f) => {
       if (!f.file || !f.line) return null;
       calls.singles.push(f);
@@ -93,6 +94,121 @@ test('resume — re-reads the PR, so findings the interrupted run already posted
     await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider });
     assert.equal(calls.batches.length, 0, 'nothing to post — the PR already has it');
     assert.equal(calls.singles.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** The comment an interrupted run of this tool already published. */
+const PUBLISHED = {
+  id: '1',
+  author: 'me',
+  body: 'a real finding body',
+  file: 'src/a.ts',
+  line: 11,
+  createdAt: new Date().toISOString(),
+  source: 'human' as const,
+};
+
+test('resume — a DRY-RUN also dedupes against the live PR, not the gather snapshot', async () => {
+  // The dry-run is what a user reads before deciding to resume for real, so
+  // "1 finding to post" when the publish run would post none is the same
+  // miscount, one step earlier.
+  const dir = seedRun(ONE);
+  try {
+    const { provider } = fakeProvider();
+    provider.fetchExistingComments = async () => [PUBLISHED];
+    const r = await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: false, dryRun: true, provider });
+    assert.ok(!r.summary.includes('a real finding body'), 'the already-published finding is not offered again');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resume — the refresh only adopts comments matching a finding this run would post', async () => {
+  // Assigning the whole live list would let any comment on the changed lines
+  // suppress a finding: strict dedupe drops on 0.4 title similarity, so a few
+  // vague inline comments would silently bury the matching security findings.
+  const dir = seedRun(ONE);
+  try {
+    const { provider, calls } = fakeProvider();
+    provider.fetchExistingComments = async () => [
+      { ...PUBLISHED, id: 'human-1', body: 'possible injection risk here, double-check this', author: 'someone-else' },
+    ];
+    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider });
+    assert.equal(calls.batches.length, 1, 'a bystander comment must not suppress the finding');
+    assert.equal(calls.batches[0].length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resume — a publishing resume that cannot re-read the PR fails closed; --force-post overrides', async () => {
+  // Continuing would dedupe against a snapshot known to predate a post attempt
+  // and re-post everything the interrupted run published — and nothing
+  // downstream catches it: runPost reconciles only on an error path, and its
+  // window excludes comments written minutes ago.
+  const dir = seedRun(ONE);
+  try {
+    const { provider, calls } = fakeProvider();
+    provider.fetchExistingComments = async () => {
+      throw new Error('read failed: 500');
+    };
+    await assert.rejects(
+      () => runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider }),
+      /refusing to post/,
+    );
+    assert.equal(calls.batches.length, 0, 'nothing was written');
+
+    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, forcePost: true, provider });
+    assert.equal(calls.batches.length, 1, '--force-post is the documented escape hatch');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resume — a DRY-RUN whose refresh fails degrades to the snapshot instead of aborting', async () => {
+  const dir = seedRun(ONE);
+  try {
+    const { provider } = fakeProvider();
+    provider.fetchExistingComments = async () => {
+      throw new Error('read failed: 500');
+    };
+    const r = await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: false, dryRun: true, provider });
+    assert.match(r.summary, /PR Review Summary/, 'a dry-run has nothing to duplicate');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resume — an UNVERIFIED prior post fails closed, even though it is partial', async () => {
+  // The half of the root cause the first pass missed: gating the marker write
+  // on `posted > 0` left a run with wrong counts no guard at all. Recording the
+  // attempt is what makes "stop rather than re-issue" safe.
+  const dir = seedRun(ONE);
+  try {
+    writePostedMarker(dir, { posted: 0, attempted: 1, verified: false });
+    const { provider, calls } = fakeProvider();
+    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider });
+    assert.equal(calls.batches.length, 0, 'unverified is not a licence to re-post');
+
+    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, forcePost: true, provider });
+    assert.equal(calls.batches.length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resume — a publish attempt that posted nothing still records a marker', async () => {
+  const dir = seedRun(ONE);
+  try {
+    const { provider } = fakeProvider();
+    // No batch poster and an unplaceable finding → nothing posts, but the
+    // attempt happened and must be on record.
+    provider.postLineComment = async () => null;
+    delete (provider as { postBatchComments?: unknown }).postBatchComments;
+    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider });
+    assert.ok(existsSync(join(dir, 'posted.marker')), 'a 0-posted attempt used to leave no guard at all');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

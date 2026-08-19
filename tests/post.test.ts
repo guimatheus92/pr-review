@@ -65,6 +65,7 @@ function fakeProvider(opts: { batchFails?: boolean; hasBatch?: boolean } = {}): 
     fetchChangedFiles: async () => [],
     fetchFullDiff: async () => '',
     fetchExistingComments: async () => [],
+    isTransientError: () => false,
     postLineComment: async (_ref, f) => {
       if (!f.file || !f.line) return null;
       calls.singles.push(f);
@@ -153,9 +154,10 @@ import type { ExistingComment } from '../src/types.js';
 
 type BatchBehavior =
   | { kind: 'ok' }
-  | { kind: 'throwAfterWriting' }
+  /** Write (all, or only the listed indexes) and THEN throw — the lost response. */
+  | { kind: 'throwAfterWriting'; only?: number[] }
   | { kind: 'throwWithoutWriting' }
-  | { kind: 'throwAfterWritingFirst'; n: number }
+  | { kind: 'alwaysTransient' }
   | { kind: 'failThenSucceed' };
 
 interface StatefulFake {
@@ -163,6 +165,7 @@ interface StatefulFake {
   server: ExistingComment[];
   singles: Finding[];
   batchCalls: number;
+  reads: number;
 }
 
 function statefulFake(opts: {
@@ -170,9 +173,10 @@ function statefulFake(opts: {
   transient?: boolean;
   readThrows?: boolean;
   hideServer?: boolean;
+  seed?: ExistingComment[];
 }): StatefulFake {
-  const state: StatefulFake = { provider: null as never, server: [], singles: [], batchCalls: 0 };
-  let nextId = 1;
+  const state: StatefulFake = { provider: null as never, server: [...(opts.seed ?? [])], singles: [], batchCalls: 0, reads: 0 };
+  let nextId = 100;
   const record = (path: string, line: number, body: string): void => {
     state.server.push({
       id: String(nextId++),
@@ -195,10 +199,11 @@ function statefulFake(opts: {
     fetchChangedFiles: async () => [],
     fetchFullDiff: async () => '',
     fetchExistingComments: async () => {
-      if (opts.readThrows) throw new Error('read failed: 500');
+      state.reads++;
+      if (opts.readThrows) throw Object.assign(new Error('read failed: 502'), { status: 502 });
       return opts.hideServer ? [] : state.server.slice();
     },
-    ...(opts.transient ? { isTransientError: () => true } : {}),
+    isTransientError: (e: Error) => (opts.transient ? true : (e as { status?: number }).status === 502),
     postLineComment: async (_ref: PrRef, f: Finding) => {
       if (!f.file || !f.line) return null;
       state.singles.push(f);
@@ -207,22 +212,22 @@ function statefulFake(opts: {
     },
     postBatchComments: async (_ref: PrRef, _sha: string, comments: BatchComment[]) => {
       state.batchCalls++;
-      const writeAll = (): void => comments.forEach((c) => record(c.path, c.line, c.body));
+      const write = (idx: number[]): void => idx.forEach((i) => comments[i] && record(comments[i]!.path, comments[i]!.line, comments[i]!.body));
+      const all = comments.map((_, i) => i);
       switch (behavior.kind) {
         case 'ok':
-          writeAll();
+          write(all);
           return { posted: comments.length };
         case 'throwAfterWriting':
-          writeAll();
+          write(behavior.only ?? all);
           throw timeout();
         case 'throwWithoutWriting':
           throw new Error('422 batch rejected');
-        case 'throwAfterWritingFirst':
-          comments.slice(0, behavior.n).forEach((c) => record(c.path, c.line, c.body));
-          throw timeout();
+        case 'alwaysTransient':
+          throw Object.assign(new Error('boom'), { status: 500 });
         case 'failThenSucceed':
           if (state.batchCalls === 1) throw Object.assign(new Error('boom'), { status: 500 });
-          writeAll();
+          write(all);
           return { posted: comments.length };
       }
     },
@@ -230,9 +235,44 @@ function statefulFake(opts: {
   return state;
 }
 
-// Bodies must differ, or the multiset match cannot tell three comments apart.
+/**
+ * THE invariant: no path may ever leave two comments at the same location with
+ * the same text. Every reconciliation test asserts it, so a regression anywhere
+ * in the retry/fallback/promotion logic fails immediately rather than being
+ * noticed on a live PR — which is how the 112-comment incident was found.
+ */
+function assertNoDuplicateComments(fake: StatefulFake): void {
+  const seen = new Map<string, number>();
+  for (const c of fake.server) {
+    const k = `${c.file}:${c.line}:${c.body.trim()}`;
+    seen.set(k, (seen.get(k) ?? 0) + 1);
+  }
+  const dupes = [...seen].filter(([, n]) => n > 1);
+  assert.deepEqual(dupes, [], `the same review comment was posted more than once: ${JSON.stringify(dupes)}`);
+}
+
+const old = (file: string, line: number, body: string, createdAt: string): ExistingComment => ({
+  id: `seed-${file}-${line}`,
+  author: 'me',
+  body,
+  file,
+  line,
+  createdAt,
+  source: 'human',
+});
+
+// Bodies differ so the multiset can tell the three apart; the same-body case
+// gets its own test below.
 const inlineFindings = (): Finding[] =>
   [11, 12, 13].map((line, i) => ({ ...finding('src/a.ts', line), body: `body ${i}` }));
+
+/** Drive an awaited backoff chain without spending wall-clock on it. */
+async function drainTimers(t: { mock: { timers: { tick(ms: number): void } } }, rounds = 40): Promise<void> {
+  for (let i = 0; i < rounds; i++) {
+    await new Promise((r) => setImmediate(r));
+    t.mock.timers.tick(60_000);
+  }
+}
 
 test('runPost — batch throws AFTER the write landed: reconciliation finds the comments, no fallback, no duplicates', async () => {
   const fake = statefulFake({ batch: { kind: 'throwAfterWriting' } });
@@ -241,8 +281,10 @@ test('runPost — batch throws AFTER the write landed: reconciliation finds the 
   assert.equal(result.posted, 3, 'a lost response is not a failed write');
   assert.equal(result.errors.length, 0, 'the incident reported 56 errors for 56 live comments');
   assert.equal(result.attempted, 3);
+  assert.equal(result.verified, true);
   assert.equal(fake.singles.length, 0, 'the per-comment fallback must not run');
-  assert.equal(fake.server.length, 3, 'nothing was posted twice');
+  assert.equal(fake.server.length, 3);
+  assertNoDuplicateComments(fake);
 });
 
 test('runPost — batch throws having written NOTHING: fallback still runs (the good path is not regressed)', async () => {
@@ -253,11 +295,11 @@ test('runPost — batch throws having written NOTHING: fallback still runs (the 
   assert.equal(result.posted, 3);
   assert.equal(result.attempted, 3, 'a failed batch attempt must not inflate attempted');
   assert.equal(result.errors.length, 0);
-  assert.equal(fake.server.length, 3);
+  assertNoDuplicateComments(fake);
 });
 
 test('runPost — batch partially landed: only the missing findings are re-posted', async () => {
-  const fake = statefulFake({ batch: { kind: 'throwAfterWritingFirst', n: 2 } });
+  const fake = statefulFake({ batch: { kind: 'throwAfterWriting', only: [0, 1] } });
   const result = await runPost({ prUrl: 'u', outputs: wrap(inlineFindings()), publish: true, gather: gatherFixture(), provider: fake.provider });
 
   assert.equal(fake.singles.length, 1, 'only the one that did not land');
@@ -265,6 +307,45 @@ test('runPost — batch partially landed: only the missing findings are re-poste
   assert.equal(result.posted, 3);
   assert.equal(result.errors.length, 0);
   assert.equal(fake.server.length, 3, 'the two that landed were not written again');
+  assertNoDuplicateComments(fake);
+});
+
+test('runPost — the write landed AND the read-back fails: the batch is NOT re-issued', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  // The compound failure the reviewers found: a 504 that committed, plus a read
+  // that fails because it is the same outage. With an empty map standing in for
+  // "nothing landed", the transient 504 retried the whole batch and then fell
+  // through to per-comment — 3 findings became 15 live comments, reported as
+  // `posted 3 / errors 0`. An unverifiable outcome must stop the run, not
+  // restart the write.
+  const fake = statefulFake({ batch: { kind: 'throwAfterWriting' }, readThrows: true, transient: true });
+  const pending = runPost({ prUrl: 'u', outputs: wrap(inlineFindings()), publish: true, gather: gatherFixture(), provider: fake.provider });
+  await drainTimers(t);
+  const result = await pending;
+
+  assert.equal(fake.batchCalls, 1, 'no blind retry when the outcome is unknown');
+  assert.equal(fake.singles.length, 0, 'no blind fallback either');
+  assert.equal(fake.server.length, 3, 'exactly what the first write left');
+  assert.equal(result.verified, false, 'and the run says so');
+  assert.equal(result.errors.length, 3);
+  assert.match(result.errors[0].error, /could not verify/);
+  assertNoDuplicateComments(fake);
+});
+
+test('runPost — an unverifiable batch failure is reported, never re-issued blind', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  // Replaces the old "a failing read never turns into a failed post": falling
+  // back on an unreadable PR is exactly the duplicate this module prevents.
+  const fake = statefulFake({ batch: { kind: 'throwWithoutWriting' }, readThrows: true });
+  const pending = runPost({ prUrl: 'u', outputs: wrap(inlineFindings()), publish: true, gather: gatherFixture(), provider: fake.provider });
+  await drainTimers(t);
+  const result = await pending;
+
+  assert.equal(fake.singles.length, 0);
+  assert.equal(result.posted, 0);
+  assert.equal(result.verified, false);
+  assert.equal(result.errors.length, 3);
+  assertNoDuplicateComments(fake);
 });
 
 test('runPost — a per-comment error whose comment IS on the PR is counted as posted, not as an error', async () => {
@@ -279,6 +360,24 @@ test('runPost — a per-comment error whose comment IS on the PR is counted as p
 
   assert.equal(result.posted, 3, 'the PR is the source of truth, not the POST return');
   assert.equal(result.errors.length, 0);
+  assertNoDuplicateComments(fake);
+});
+
+test('runPost — reconciliation promotes ONLY the errors whose comments are on the PR', async () => {
+  const fake = statefulFake({ batch: { kind: 'throwWithoutWriting' } });
+  const inner = fake.provider.postLineComment;
+  let n = 0;
+  fake.provider.postLineComment = async (ref, f, sha) => {
+    // First two land then report failure; the third genuinely never lands.
+    if (n++ < 2) await inner(ref, f, sha);
+    throw new Error('422 Validation Failed');
+  };
+  const result = await runPost({ prUrl: 'u', outputs: wrap(inlineFindings()), publish: true, gather: gatherFixture(), provider: fake.provider });
+
+  assert.equal(result.posted, 2);
+  assert.equal(result.errors.length, 1);
+  assert.equal(result.errors[0].finding.body, 'body 2', 'the identity, not just the count');
+  assertNoDuplicateComments(fake);
 });
 
 test('runPost — reconciliation never demotes: a posted finding the read cannot see stays posted', async () => {
@@ -293,20 +392,81 @@ test('runPost — reconciliation never demotes: a posted finding the read cannot
   assert.equal(result.errors.length, 1, 'only the genuinely unanchorable finding');
 });
 
-test('runPost — a failing read never turns into a failed post', async () => {
-  const fake = statefulFake({ batch: { kind: 'throwWithoutWriting' }, readThrows: true });
+test('runPost — a comment that predates this run is not mistaken for one we just wrote', async () => {
+  // The mirror image of the incident: claiming a pre-existing comment reports a
+  // finding as posted that was never written, and if that fills the count
+  // posted.marker locks --resume out of recovering it.
+  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  const fake = statefulFake({
+    batch: { kind: 'throwWithoutWriting' },
+    seed: [old('src/a.ts', 11, 'body 0', twoHoursAgo)],
+  });
   const result = await runPost({ prUrl: 'u', outputs: wrap(inlineFindings()), publish: true, gather: gatherFixture(), provider: fake.provider });
 
-  assert.equal(result.posted, 3, 'unverifiable falls back rather than giving up');
+  assert.equal(fake.singles.length, 3, 'all three genuinely re-posted, not two');
+  assert.equal(result.posted, 3);
   assert.equal(result.errors.length, 0);
 });
 
-test('runPost — a transient batch error that landed nothing is retried as a batch, not degraded to per-comment', async () => {
-  const fake = statefulFake({ batch: { kind: 'failThenSucceed' }, transient: true });
+test('runPost — a comment with an unparseable createdAt counts as landed (verification must not go blind)', async () => {
+  const fake = statefulFake({
+    batch: { kind: 'throwWithoutWriting' },
+    seed: [old('src/a.ts', 11, 'body 0', '')],
+  });
   const result = await runPost({ prUrl: 'u', outputs: wrap(inlineFindings()), publish: true, gather: gatherFixture(), provider: fake.provider });
+
+  assert.equal(fake.singles.length, 2, 'the one with an untimed match is treated as already there');
+  assert.equal(result.posted, 3);
+});
+
+test('runPost — two findings sharing a body in different files each need their own comment', async () => {
+  // dedupeWithinBatch never folds across files, so byte-identical bodies reach
+  // the poster. A body-only key hands the wrong finding the wrong comment:
+  // one is silently lost and the other duplicated.
+  const shared = 'the same rule, flagged twice';
+  const input: Finding[] = [
+    { severity: 'MEDIUM', title: 't', body: shared, file: 'src/a.ts', line: 11 },
+    { severity: 'MEDIUM', title: 't', body: shared, file: 'src/b.ts', line: 40 },
+  ];
+  // Only the SECOND one lands, so a body-only match would credit the first.
+  const fake = statefulFake({ batch: { kind: 'throwAfterWriting', only: [1] } });
+  const result = await runPost({ prUrl: 'u', outputs: wrap(input), publish: true, provider: fake.provider });
+
+  assert.equal(fake.singles.length, 1);
+  assert.equal(fake.singles[0].file, 'src/a.ts', 'the one that is genuinely absent');
+  assert.equal(result.posted, 2);
+  assert.equal(result.errors.length, 0);
+  assert.equal(fake.server.length, 2);
+  assertNoDuplicateComments(fake);
+});
+
+test('runPost — a transient batch error that landed nothing is retried as a batch, not degraded to per-comment', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const fake = statefulFake({ batch: { kind: 'failThenSucceed' }, transient: true });
+  const pending = runPost({ prUrl: 'u', outputs: wrap(inlineFindings()), publish: true, gather: gatherFixture(), provider: fake.provider });
+  await drainTimers(t);
+  const result = await pending;
 
   assert.equal(fake.batchCalls, 2);
   assert.equal(result.posted, 3);
   assert.equal(fake.singles.length, 0);
-  assert.equal(fake.server.length, 3, 'the retry did not duplicate');
+  assert.equal(fake.server.length, 3);
+  assertNoDuplicateComments(fake);
+});
+
+test('runPost — a transient error that never clears stops retrying and falls back', async (t) => {
+  // The retry loop's only terminating condition is the attempt bound, and
+  // nothing else exercises exhaustion: a regression there turns a flapping 5xx
+  // into a run that never returns. Timers are mocked so this costs no wall time.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const fake = statefulFake({ batch: { kind: 'alwaysTransient' }, transient: true });
+  const pending = runPost({ prUrl: 'u', outputs: wrap(inlineFindings()), publish: true, gather: gatherFixture(), provider: fake.provider });
+
+  await drainTimers(t);
+  const result = await pending;
+
+  assert.equal(fake.batchCalls, 4, 'one attempt plus RETRY_BACKOFF_MS.length retries, then stop');
+  assert.equal(fake.singles.length, 3, 'and the leftovers go per-comment');
+  assert.equal(result.posted, 3);
+  assertNoDuplicateComments(fake);
 });

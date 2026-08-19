@@ -490,6 +490,11 @@ export class AzureDevOpsProvider implements PrProvider {
     return isTransientAdoError(err);
   }
 
+  /**
+   * ONE attempt: creating a thread is not idempotent, so a 5xx or timeout
+   * arriving after the server committed it must not be re-issued here. runPost
+   * retries only once the PR confirms the thread is genuinely absent.
+   */
   async postLineComment(ref: PrRef, finding: Finding, _headSha?: string): Promise<{ id: string } | null> {
     const git = await this.gitApi(ref);
     const pr = await this.getPr(ref);
@@ -510,11 +515,7 @@ export class AzureDevOpsProvider implements PrProvider {
             comments: [{ parentCommentId: 0, content: body, commentType: 1 } as Comment],
             status: 1,
           };
-    const created = await withRetry(
-      () => git.createThread(thread, repoId, ref.number, ref.project),
-      isTransientAdoError,
-      finding.file ? `${finding.file}:${finding.line ?? '-'}` : 'general comment',
-    );
+    const created = await git.createThread(thread, repoId, ref.number, ref.project);
     return { id: `${created.id}` };
   }
 }

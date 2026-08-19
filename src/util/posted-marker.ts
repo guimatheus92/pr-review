@@ -2,16 +2,27 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
- * Written to the run dir after a publish run posts at least one comment. On a
- * later `--resume`, a marker showing a COMPLETE post (posted === attempted)
- * makes the run refuse to re-post — the retry idempotency guard. A partial
- * post is intentionally NOT treated as complete so resume can recover the
- * un-posted findings.
+ * Written to the run dir after every publish attempt — including one that
+ * posted nothing. On a later `--resume`, a marker showing a COMPLETE post
+ * (posted === attempted) makes the run refuse to re-post — the retry
+ * idempotency guard. A partial post is intentionally NOT treated as complete
+ * so resume can recover the un-posted findings.
+ *
+ * Recording the attempt regardless of outcome is the point: gating the write
+ * on `posted > 0` meant a run whose counts were wrong left no guard at all,
+ * which is exactly how the field incident's `--resume` re-posted 56 comments.
+ * The counts are only as good as the verification behind them, so `verified`
+ * carries that: false means at least one write's outcome is unknown, and the
+ * resume gate treats it like a corrupt marker — fail closed, require
+ * `--force-post`. Without it, "stop rather than re-issue on an unverifiable
+ * write" would just move the duplicate to the next resume.
  */
 export interface PostedMarker {
   postedAt: number;
   posted: number;
   attempted: number;
+  /** Absent on markers written before 0.6.1; treated as verified. */
+  verified?: boolean;
 }
 
 const MARKER_FILE = 'posted.marker';

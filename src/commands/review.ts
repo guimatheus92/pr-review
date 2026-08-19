@@ -435,7 +435,10 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   // managed to publish is invisible to it — which is how an interrupted run's
   // resume posted a second copy of all 56 comments in the field. On a read
   // failure the stale snapshot still applies; posting reconciles either way.
-  if (!!opts.publish && config.dedupeMode !== 'off') {
+  //
+  // Runs on --dry-run too: a dry-run that reports 56 findings to post when the
+  // real run would post none is the same lie, one step earlier.
+  if (config.dedupeMode !== 'off') {
     try {
       const { provider, ref } = resolvePr(opts.prUrl, undefined, opts.provider);
       gather.existingComments = await provider.fetchExistingComments(ref);

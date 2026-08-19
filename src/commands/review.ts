@@ -270,6 +270,8 @@ export async function finalizeReview(a: {
    * and must never mint the done-state summary.
    */
   findingsUnavailable: boolean;
+  /** Re-read the PR's comments before deduping (set by --resume; a fresh run just gathered them). */
+  refreshExisting?: boolean;
   forcePost?: boolean;
   overallStart: number;
   provider?: PrProvider;
@@ -289,7 +291,58 @@ export async function finalizeReview(a: {
 
   const rawFindings = a.outputs.flatMap((o) => o.findings);
   const intraBatch = dedupeWithinBatch(rawFindings, a.dedupeMode);
-  const dedupedAgainstExisting = dedupeAgainstExisting(intraBatch.kept, a.gather.existingComments, a.dedupeMode);
+  // Re-read the PR's comments before deduping. On a --resume the snapshot in
+  // `gather` was taken BEFORE the original run tried to post, so anything that
+  // run managed to publish is invisible to it — which is how an interrupted
+  // run's resume posted a second copy of all 56 comments in the field.
+  //
+  // This lives here, next to the dedupe that depends on it, rather than in the
+  // caller: an invariant installed one level up is one a future caller of
+  // finalizeReview silently loses. Runs on --dry-run too — a dry-run reporting
+  // 56 findings to post when the real run would post none is the same lie, one
+  // step earlier.
+  let existingComments = a.gather.existingComments;
+  if (a.refreshExisting && a.dedupeMode !== 'off') {
+    const { provider, ref } = resolvePr(a.prUrl, undefined, a.provider);
+    try {
+      const refreshed = await withRetry(
+        () => provider.fetchExistingComments(ref),
+        (e) => provider.isTransientError(e),
+        'existing-comment refresh',
+      );
+      // UNION, scoped — never overwrite. Assigning the whole live list would
+      // let any comment posted after the review started suppress a finding:
+      // strict dedupe drops on 0.4 title similarity, so a few vague inline
+      // comments on the changed lines ("double-check this auth path") would
+      // silently bury the matching security findings. The only comments this
+      // refresh needs are the ones an interrupted run of THIS tool wrote, and
+      // those are byte-identical to a finding it was about to post.
+      const ourBodies = new Set(a.outputs.flatMap((o) => o.findings).map((f) => f.body.trim()));
+      const known = new Set(existingComments.map((c) => c.id));
+      const ours = refreshed.filter((c) => !known.has(c.id) && ourBodies.has(c.body.trim()));
+      existingComments = [...existingComments, ...ours];
+      process.stderr.write(
+        `[review] read ${refreshed.length} comment(s) from the PR; ${ours.length} match a finding this run would post
+`,
+      );
+    } catch (err) {
+      // Fail closed when publishing. Continuing would dedupe against a snapshot
+      // known to predate a post attempt and re-post everything it published —
+      // and nothing downstream catches it: runPost reconciles only on an error
+      // path, and its window excludes comments written minutes ago. A dry-run
+      // has nothing to duplicate.
+      const why = `could not re-read the PR's comments (${(err as Error).message})`;
+      if (a.publish && !a.forcePost) {
+        throw new Error(
+          `${why} — refusing to post, because deduping against the pre-post snapshot would duplicate whatever the interrupted run already published. Retry when the API is healthy, or pass --force-post if you have checked the PR by hand.`,
+        );
+      }
+      process.stderr.write(`[review] ${why} — deduping against the gather snapshot
+`);
+    }
+  }
+
+  const dedupedAgainstExisting = dedupeAgainstExisting(intraBatch.kept, existingComments, a.dedupeMode);
   const finalFindings = dedupedAgainstExisting.kept;
   const droppedCount = intraBatch.dropped.length + dedupedAgainstExisting.dropped.length;
   if (droppedCount > 0) {
@@ -450,57 +503,15 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
       process.stderr.write(`[review] resume: skill-routing.json unreadable (${(err as Error).message}) — Skills section omitted\n`);
     }
   }
-  // Re-read the PR's comments before deduping. `gather.existingComments` is a
-  // snapshot taken BEFORE the original run tried to post, so anything that run
-  // managed to publish is invisible to it — which is how an interrupted run's
-  // resume posted a second copy of all 56 comments in the field.
-  //
-  // Runs on --dry-run too: a dry-run reporting 56 findings to post when the
-  // real run would post none is the same lie, one step earlier.
-  const publish = !!opts.publish;
-  if (config.dedupeMode !== 'off') {
-    const { provider, ref } = resolvePr(opts.prUrl, undefined, opts.provider);
-    try {
-      const refreshed = await withRetry(
-        () => provider.fetchExistingComments(ref),
-        (e) => provider.isTransientError(e),
-        'resume comment refresh',
-      );
-      // UNION, scoped — never overwrite. Assigning the whole live list would
-      // let any comment posted after the review started suppress a finding:
-      // strict dedupe drops on 0.4 title similarity, so a few vague inline
-      // comments on the changed lines ("double-check this auth path") would
-      // silently bury the matching security findings. The only comments this
-      // refresh needs are the ones an interrupted run of THIS tool wrote, and
-      // those are byte-identical to a finding it was about to post.
-      const ourBodies = new Set(outputs.flatMap((o) => o.findings).map((f) => f.body.trim()));
-      const known = new Set(gather.existingComments.map((c) => c.id));
-      const ours = refreshed.filter((c) => !known.has(c.id) && ourBodies.has(c.body.trim()));
-      gather.existingComments = [...gather.existingComments, ...ours];
-      process.stderr.write(
-        `[review] resume: read ${refreshed.length} comment(s) from the PR; ${ours.length} match a finding this run would post\n`,
-      );
-    } catch (err) {
-      // Fail closed on a publishing resume. Continuing would dedupe against a
-      // snapshot known to predate a post attempt and re-post everything it
-      // published — and nothing downstream catches it: runPost's reconciliation
-      // only runs on an error path, and its window excludes comments the
-      // earlier run wrote minutes ago. A dry-run has nothing to duplicate.
-      const why = `resume: could not re-read the PR's comments (${(err as Error).message})`;
-      if (publish && !opts.forcePost) {
-        throw new Error(
-          `${why} — refusing to post, because deduping against the pre-post snapshot would duplicate whatever the interrupted run already published. Retry when the API is healthy, or pass --force-post if you have checked the PR by hand.`,
-        );
-      }
-      process.stderr.write(`[review] ${why} — deduping against the gather snapshot\n`);
-    }
-  }
-
   return finalizeReview({
     prUrl: opts.prUrl,
     outDir,
     gather,
     outputs,
+    // The gather snapshot predates the interrupted run's post attempt, so the
+    // comments it managed to publish are invisible to dedupe. finalizeReview
+    // owns the refresh because it owns the dedupe that depends on it.
+    refreshExisting: true,
     dedupeMode: config.dedupeMode,
     publish: !!opts.publish,
     dryRun: opts.dryRun,

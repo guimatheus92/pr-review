@@ -6,7 +6,7 @@ Generic, plugin-based PR review tool for GitHub, Azure DevOps, and GitLab, packa
 
 ```bash
 npm run build          # tsc + esbuild → dist/cli.cjs
-npm run test           # node scripts/test.mjs → node --test over tests/*.test.ts (110 tests, ~600ms)
+npm run test           # node scripts/test.mjs → node --test over tests/**/*.test.ts (246 tests, ~4s)
 npm run build:watch    # tsc watch (re-run `npm run bundle` for esbuild)
 ```
 
@@ -24,7 +24,7 @@ The bundle at `dist/cli.cjs` is the single-file distribution artifact. The slash
 - `src/util/progress.ts` / `src/util/posted-marker.ts` — the `progress.ndjson` phase/heartbeat live feed and the `posted.marker` re-post guard (refuses re-post only on a fully-completed prior post; fail-closed on a corrupt marker)
 - `src/dispatch/codex.ts` — optional Codex second-opinion reviewer; runs as a sibling process in parallel with the orchestrator session when the `codex` CLI is installed (opt out: `--no-codex`)
 - `src/dispatch/line-snap.ts` — snaps finding line numbers to the nearest valid diff line before posting
-- `src/providers/github.ts` / `azuredevops.ts` / `gitlab.ts` — PR data fetchers + comment posters (GitHub inline comments go out as one review batch, with per-comment fallback; GitLab posts per-discussion via plain fetch)
+- `src/providers/github.ts` / `azuredevops.ts` / `gitlab.ts` — PR data fetchers + comment posters (GitHub inline comments go out as one review batch — ONE attempt, `runPost` owns retry because only it can reconcile — with per-comment fallback; GitLab posts per-discussion via plain fetch)
 - `src/dispatch/parsers.ts` — JSON / bracketed-markdown / section-header output parsers
 - `src/dedupe.ts` — Jaccard token similarity, strict/loose/off modes
 - `src/config.ts` — 5-level config merge (flags > env > repo yaml > global yaml > defaults)
@@ -38,6 +38,7 @@ The bundle at `dist/cli.cjs` is the single-file distribution artifact. The slash
 - **No repo pollution.** All run artifacts go to `~/.pr-review/runs/<id>/`. Never write files to the user's working directory.
 - **Clean output.** Posted comments contain only the finding body — no severity prefix, no bot chrome. Summary findings also render body-only, separated by `---`.
 - **Inline-only posting, nothing dropped.** On a publish run every finding lands as a resolvable inline review thread (GitHub review comments, ADO threads) — never a top-level issue comment. Lines outside the diff are snapped to the nearest valid diff line; findings that can't anchor where they point (file outside the diff, or no location) are re-anchored to the first valid diff line with the original `file:line` kept in the body. `skipped` exists only for `--dry-run`. Never reintroduce an `issues.createComment` fallback.
+- **A failed write is not proof that nothing was written.** POSTing comments is not idempotent, so a 5xx/timeout means *unknown*: the server can commit and lose the response. Before `runPost` retries a batch, falls back to per-comment, or reports a count, it reads the PR back with `fetchExistingComments` and posts only what is genuinely missing (`landedBodies`/`claim` in `src/commands/post.ts`). Reconciliation is **one-way** — errors may be promoted to posted, never the reverse; demoting on a stale read would mark a live comment un-posted and make the next `--resume` write it twice. `--resume` re-reads the PR before deduping for the same reason. This is not theoretical: a 504-after-commit turned 56 findings into 112 comments while the run reported `posted 0 / errors 56`.
 - **The CLI is the ONLY writer — dispatched agents never post.** Every dispatch prompt (built-in reviewers, companion agents, companion slash commands, verifier, and the orchestrator itself) carries `NO_POSTING_DIRECTIVE` from `src/dispatch/single-session.ts`, and a session-context test fails if any dispatch line loses it. This is not theoretical: the official `code-review` companion's command allows `gh pr comment` and instructs posting a top-level "### Code review" verdict — a live run posted one (Preco-Pratico/PrecoPratico-Backend#586) before the directive existed. When adding ANY new dispatch path, thread the directive through it.
 - **Skills, not reviewers.** User-authored review content lives in the standard tool skill dirs (`.claude/`, `.copilot/`, `.github/`, `.agents/`, each under `skills/`); per PR the tool auto-injects the ones relevant to the changed files (matched on `name` + `description`) and catalogs the rest. `applies_to`/`inject_into` frontmatter is optional refinement, not a requirement. Standalone reviewers are the exception, not the default.
 - **Single session.** All reviewers dispatch in one runtime process (copilot or claude) via `task()` / `Task()`. Never spawn N separate sessions. The only sibling process is the optional Codex second-opinion reviewer.

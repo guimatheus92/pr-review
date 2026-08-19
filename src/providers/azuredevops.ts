@@ -486,6 +486,10 @@ export class AzureDevOpsProvider implements PrProvider {
     return out;
   }
 
+  isTransientError(err: Error): boolean {
+    return isTransientAdoError(err);
+  }
+
   async postLineComment(ref: PrRef, finding: Finding, _headSha?: string): Promise<{ id: string } | null> {
     const git = await this.gitApi(ref);
     const pr = await this.getPr(ref);

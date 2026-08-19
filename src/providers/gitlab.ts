@@ -410,6 +410,10 @@ export class GitLabProvider implements PrProvider {
     return notes.filter((n) => !n.system).map(mapNote);
   }
 
+  isTransientError(err: Error): boolean {
+    return isTransientGitLabError(err);
+  }
+
   async postLineComment(ref: PrRef, finding: Finding, _headSha?: string): Promise<{ id: string } | null> {
     if (!finding.file || !finding.line) return null;
     // Position SHAs must match the MR's recorded diff version, so the gather

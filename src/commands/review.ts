@@ -430,6 +430,23 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
       process.stderr.write(`[review] resume: skill-routing.json unreadable (${(err as Error).message}) — Skills section omitted\n`);
     }
   }
+  // Re-read the PR's comments before deduping. `gather.existingComments` is a
+  // snapshot taken BEFORE the original run tried to post, so anything that run
+  // managed to publish is invisible to it — which is how an interrupted run's
+  // resume posted a second copy of all 56 comments in the field. On a read
+  // failure the stale snapshot still applies; posting reconciles either way.
+  if (!!opts.publish && config.dedupeMode !== 'off') {
+    try {
+      const { provider, ref } = resolvePr(opts.prUrl, undefined, opts.provider);
+      gather.existingComments = await provider.fetchExistingComments(ref);
+      process.stderr.write(`[review] resume: refreshed ${gather.existingComments.length} existing comment(s) from the PR\n`);
+    } catch (err) {
+      process.stderr.write(
+        `[review] resume: could not refresh existing comments (${(err as Error).message}) — deduping against the gather snapshot\n`,
+      );
+    }
+  }
+
   return finalizeReview({
     prUrl: opts.prUrl,
     outDir,
@@ -605,14 +622,28 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   appendProgress(outDir, 'dispatch', `${sessionCtx.dispatchedReviewers.length} reviewers · ${skills.brief}`);
 
   // Codex runs as a sibling process, in parallel with the orchestrator session.
-  // runCodexReviewer resolves on every failure path (spawn error, timeout,
-  // unreadable output) with `error` set — no catch wrapper needed.
+  // runCodexReviewer resolves on every *post-spawn* failure path (nonzero exit,
+  // timeout, unreadable output) with `error` set. The catch covers the one path
+  // it cannot: spawnCli validates argv synchronously, so an out-of-charset run
+  // dir throws inside the promise executor — an unhandled rejection that would
+  // kill the whole review instead of costing one reviewer.
   let codexPromise: Promise<ReviewerOutput> | null = null;
   if (includeCodex) {
     codexPromise = runCodexReviewer({
       contextPath: sessionCtx.contextPath,
       skillsPath: sessionCtx.skillsFiles['codex'],
       outDir,
+    }).catch((err: Error) => {
+      process.stderr.write(`[codex] could not start: ${err.message}\n`);
+      return {
+        reviewerName: 'codex',
+        model: 'codex',
+        findings: [],
+        rawOutput: '',
+        durationMs: 0,
+        exitCode: -1,
+        error: `codex could not start: ${err.message}`,
+      } satisfies ReviewerOutput;
     });
   }
 

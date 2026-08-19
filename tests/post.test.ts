@@ -140,3 +140,173 @@ test('runPost — on publish, a finding the provider cannot place inline becomes
   assert.equal(result.errors.length, 1);
   assert.match(result.errors[0].error, /inline/);
 });
+
+// ---- reconciliation: the write landed but the response was lost ----
+//
+// These use a fake with SERVER STATE. The fake above decides ground truth by
+// throwing, so it cannot express "I threw AND I wrote" — which is the whole
+// incident: a 504 arriving after GitHub committed the review, retried blind
+// into a secondary rate limit, reported as `posted 0 / errors 56` while all 56
+// comments were live, then duplicated by --resume.
+
+import type { ExistingComment } from '../src/types.js';
+
+type BatchBehavior =
+  | { kind: 'ok' }
+  | { kind: 'throwAfterWriting' }
+  | { kind: 'throwWithoutWriting' }
+  | { kind: 'throwAfterWritingFirst'; n: number }
+  | { kind: 'failThenSucceed' };
+
+interface StatefulFake {
+  provider: PrProvider;
+  server: ExistingComment[];
+  singles: Finding[];
+  batchCalls: number;
+}
+
+function statefulFake(opts: {
+  batch?: BatchBehavior;
+  transient?: boolean;
+  readThrows?: boolean;
+  hideServer?: boolean;
+}): StatefulFake {
+  const state: StatefulFake = { provider: null as never, server: [], singles: [], batchCalls: 0 };
+  let nextId = 1;
+  const record = (path: string, line: number, body: string): void => {
+    state.server.push({
+      id: String(nextId++),
+      author: 'me',
+      body,
+      file: path,
+      line,
+      createdAt: new Date().toISOString(),
+      source: 'human',
+    });
+  };
+  const timeout = (): Error => Object.assign(new Error('gateway timeout'), { status: 504 });
+  const behavior: BatchBehavior = opts.batch ?? { kind: 'ok' };
+
+  state.provider = {
+    name: 'github',
+    authEnv: () => ({}),
+    parseUrl: (url: string): PrRef | null => ({ provider: 'github', url, owner: 'o', repo: 'r', number: 1 }),
+    fetchMetadata: async () => gatherFixture().metadata,
+    fetchChangedFiles: async () => [],
+    fetchFullDiff: async () => '',
+    fetchExistingComments: async () => {
+      if (opts.readThrows) throw new Error('read failed: 500');
+      return opts.hideServer ? [] : state.server.slice();
+    },
+    ...(opts.transient ? { isTransientError: () => true } : {}),
+    postLineComment: async (_ref: PrRef, f: Finding) => {
+      if (!f.file || !f.line) return null;
+      state.singles.push(f);
+      record(f.file, f.line, f.body.trim());
+      return { id: 'x' };
+    },
+    postBatchComments: async (_ref: PrRef, _sha: string, comments: BatchComment[]) => {
+      state.batchCalls++;
+      const writeAll = (): void => comments.forEach((c) => record(c.path, c.line, c.body));
+      switch (behavior.kind) {
+        case 'ok':
+          writeAll();
+          return { posted: comments.length };
+        case 'throwAfterWriting':
+          writeAll();
+          throw timeout();
+        case 'throwWithoutWriting':
+          throw new Error('422 batch rejected');
+        case 'throwAfterWritingFirst':
+          comments.slice(0, behavior.n).forEach((c) => record(c.path, c.line, c.body));
+          throw timeout();
+        case 'failThenSucceed':
+          if (state.batchCalls === 1) throw Object.assign(new Error('boom'), { status: 500 });
+          writeAll();
+          return { posted: comments.length };
+      }
+    },
+  } as unknown as PrProvider;
+  return state;
+}
+
+// Bodies must differ, or the multiset match cannot tell three comments apart.
+const inlineFindings = (): Finding[] =>
+  [11, 12, 13].map((line, i) => ({ ...finding('src/a.ts', line), body: `body ${i}` }));
+
+test('runPost — batch throws AFTER the write landed: reconciliation finds the comments, no fallback, no duplicates', async () => {
+  const fake = statefulFake({ batch: { kind: 'throwAfterWriting' } });
+  const result = await runPost({ prUrl: 'u', outputs: wrap(inlineFindings()), publish: true, gather: gatherFixture(), provider: fake.provider });
+
+  assert.equal(result.posted, 3, 'a lost response is not a failed write');
+  assert.equal(result.errors.length, 0, 'the incident reported 56 errors for 56 live comments');
+  assert.equal(result.attempted, 3);
+  assert.equal(fake.singles.length, 0, 'the per-comment fallback must not run');
+  assert.equal(fake.server.length, 3, 'nothing was posted twice');
+});
+
+test('runPost — batch throws having written NOTHING: fallback still runs (the good path is not regressed)', async () => {
+  const fake = statefulFake({ batch: { kind: 'throwWithoutWriting' } });
+  const result = await runPost({ prUrl: 'u', outputs: wrap(inlineFindings()), publish: true, gather: gatherFixture(), provider: fake.provider });
+
+  assert.equal(fake.singles.length, 3, 'all three re-attempted per-comment');
+  assert.equal(result.posted, 3);
+  assert.equal(result.attempted, 3, 'a failed batch attempt must not inflate attempted');
+  assert.equal(result.errors.length, 0);
+  assert.equal(fake.server.length, 3);
+});
+
+test('runPost — batch partially landed: only the missing findings are re-posted', async () => {
+  const fake = statefulFake({ batch: { kind: 'throwAfterWritingFirst', n: 2 } });
+  const result = await runPost({ prUrl: 'u', outputs: wrap(inlineFindings()), publish: true, gather: gatherFixture(), provider: fake.provider });
+
+  assert.equal(fake.singles.length, 1, 'only the one that did not land');
+  assert.equal(fake.singles[0].body, 'body 2');
+  assert.equal(result.posted, 3);
+  assert.equal(result.errors.length, 0);
+  assert.equal(fake.server.length, 3, 'the two that landed were not written again');
+});
+
+test('runPost — a per-comment error whose comment IS on the PR is counted as posted, not as an error', async () => {
+  const fake = statefulFake({ batch: { kind: 'throwWithoutWriting' } });
+  // Record, then report failure — the lost-response shape, one comment at a time.
+  const inner = fake.provider.postLineComment;
+  fake.provider.postLineComment = async (ref, f, sha) => {
+    await inner(ref, f, sha);
+    throw new Error('422 Validation Failed');
+  };
+  const result = await runPost({ prUrl: 'u', outputs: wrap(inlineFindings()), publish: true, gather: gatherFixture(), provider: fake.provider });
+
+  assert.equal(result.posted, 3, 'the PR is the source of truth, not the POST return');
+  assert.equal(result.errors.length, 0);
+});
+
+test('runPost — reconciliation never demotes: a posted finding the read cannot see stays posted', async () => {
+  // hideServer makes every read come back empty — the stale/eventually-consistent
+  // case. Demoting here would mark live comments un-posted and send the next
+  // --resume out to write them a second time.
+  const fake = statefulFake({ batch: { kind: 'ok' }, hideServer: true });
+  const input = [...inlineFindings(), finding()]; // the last one cannot anchor
+  const result = await runPost({ prUrl: 'u', outputs: wrap(input), publish: true, provider: fake.provider });
+
+  assert.equal(result.posted, 3, 'the successful batch is not undone by an empty read');
+  assert.equal(result.errors.length, 1, 'only the genuinely unanchorable finding');
+});
+
+test('runPost — a failing read never turns into a failed post', async () => {
+  const fake = statefulFake({ batch: { kind: 'throwWithoutWriting' }, readThrows: true });
+  const result = await runPost({ prUrl: 'u', outputs: wrap(inlineFindings()), publish: true, gather: gatherFixture(), provider: fake.provider });
+
+  assert.equal(result.posted, 3, 'unverifiable falls back rather than giving up');
+  assert.equal(result.errors.length, 0);
+});
+
+test('runPost — a transient batch error that landed nothing is retried as a batch, not degraded to per-comment', async () => {
+  const fake = statefulFake({ batch: { kind: 'failThenSucceed' }, transient: true });
+  const result = await runPost({ prUrl: 'u', outputs: wrap(inlineFindings()), publish: true, gather: gatherFixture(), provider: fake.provider });
+
+  assert.equal(fake.batchCalls, 2);
+  assert.equal(result.posted, 3);
+  assert.equal(fake.singles.length, 0);
+  assert.equal(fake.server.length, 3, 'the retry did not duplicate');
+});

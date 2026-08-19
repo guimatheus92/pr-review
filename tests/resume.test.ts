@@ -71,6 +71,33 @@ test('resume — reuses on-disk reviewer outputs, posts them, and writes posted.
   }
 });
 
+test('resume — re-reads the PR, so findings the interrupted run already posted are not posted again', async () => {
+  // The killer detail from the field incident: gather.existingComments is a
+  // snapshot taken BEFORE the first post attempt, so the comments that run
+  // managed to publish are invisible to dedupe. Without the refresh this
+  // resume posts a second copy of every finding.
+  const dir = seedRun(ONE);
+  try {
+    const { provider, calls } = fakeProvider();
+    provider.fetchExistingComments = async () => [
+      {
+        id: '1',
+        author: 'me',
+        body: 'a real finding body',
+        file: 'src/a.ts',
+        line: 11,
+        createdAt: new Date().toISOString(),
+        source: 'human' as const,
+      },
+    ];
+    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider });
+    assert.equal(calls.batches.length, 0, 'nothing to post — the PR already has it');
+    assert.equal(calls.singles.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('resume — a second resume refuses to re-post while the marker exists; --force-post overrides', async () => {
   const dir = seedRun(ONE);
   try {

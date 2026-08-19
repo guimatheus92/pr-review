@@ -26,7 +26,15 @@ export interface PrProvider {
   /**
    * Post many inline comments in one API call (one review). Optional —
    * providers without a batch endpoint omit it and the poster falls back to
-   * per-comment posting. Throws on batch failure; caller falls back.
+   * per-comment posting. Makes ONE attempt and throws on failure: retrying a
+   * non-idempotent write is only safe after reconciling against the PR, which
+   * the caller does and the provider cannot.
    */
   postBatchComments?(ref: PrRef, headSha: string, comments: BatchComment[]): Promise<{ posted: number }>;
+  /**
+   * Is this error worth another attempt? Exposes each provider's existing
+   * transient-error predicate so the poster can decide whether to re-issue a
+   * batch, instead of guessing from an opaque Error.
+   */
+  isTransientError?(err: Error): boolean;
 }

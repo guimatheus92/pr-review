@@ -1,12 +1,13 @@
 import { exec } from 'node:child_process';
 import { spawnCli } from '../util/spawn.js';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ReviewerOutput } from '../types.js';
 import { parseReviewerOutput } from './parsers.js';
 import { OUTPUT_SHAPE, skillsRulesSentence } from './single-session.js';
 
 const CODEX_TIMEOUT_MS = 15 * 60 * 1000;
+export const CODEX_FAILURE_LOG = 'codex-failure.log';
 
 export function detectCodex(binary = 'codex'): Promise<boolean> {
   return new Promise((res) => {
@@ -83,11 +84,15 @@ export async function runCodexReviewer(opts: CodexReviewOptions): Promise<Review
     '-',
   ];
 
-  const result = await new Promise<{ exitCode: number; timedOut: boolean; stderr: string }>((res) => {
-    const child = spawnCli(opts.binary ?? 'codex', argv, { stdio: ['pipe', 'ignore', 'pipe'] });
+  const result = await new Promise<{ exitCode: number; timedOut: boolean; stderr: string; stdout: string }>((res) => {
+    // stdout is captured, not ignored: a usage/flag error from `codex exec`
+    // prints there and exits before any output file is written, which is the
+    // one failure mode that leaves nothing at all to diagnose.
+    const child = spawnCli(opts.binary ?? 'codex', argv, { stdio: ['pipe', 'pipe', 'pipe'] });
     child.stdin.write(prompt);
     child.stdin.end();
     let stderr = '';
+    let stdout = '';
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -100,13 +105,16 @@ export async function runCodexReviewer(opts: CodexReviewOptions): Promise<Review
     child.stderr.on('data', (c: Buffer) => {
       stderr += c.toString('utf8');
     });
+    child.stdout.on('data', (c: Buffer) => {
+      stdout += c.toString('utf8');
+    });
     child.on('error', (err) => {
       clearTimeout(timer);
-      res({ exitCode: -1, timedOut, stderr: stderr + '\n' + err.message });
+      res({ exitCode: -1, timedOut, stderr: stderr + '\n' + err.message, stdout });
     });
     child.on('close', (code) => {
       clearTimeout(timer);
-      res({ exitCode: code ?? -1, timedOut, stderr });
+      res({ exitCode: code ?? -1, timedOut, stderr, stdout });
     });
   });
 
@@ -123,7 +131,32 @@ export async function runCodexReviewer(opts: CodexReviewOptions): Promise<Review
     durationMs: Date.now() - start,
   });
   if (output.error) {
+    // Persist the whole thing, the way the orchestrator gets
+    // orchestrator-failure.log. The 300-char stderr echo below scrolls past in
+    // a detached run, and on an early exit `codex-output.txt` — the file the
+    // debug skill points at — was never written at all.
+    const logPath = resolve(opts.outDir, CODEX_FAILURE_LOG);
+    try {
+      writeFileSync(
+        logPath,
+        [
+          `${output.error}`,
+          `argv: ${JSON.stringify([opts.binary ?? 'codex', ...argv])}`,
+          `exit: ${result.exitCode}  timedOut: ${result.timedOut}  durationMs: ${output.durationMs}`,
+          ``,
+          `--- stderr ---`,
+          result.stderr,
+          ``,
+          `--- stdout ---`,
+          result.stdout,
+        ].join('\n'),
+        'utf8',
+      );
+    } catch {
+      // best-effort — never let a logging failure mask the reviewer's own
+    }
     process.stderr.write(`[codex] ${output.error}: ${result.stderr.trim().slice(0, 300)}\n`);
+    process.stderr.write(`[codex] full output → ${logPath}\n`);
   }
   return output;
 }

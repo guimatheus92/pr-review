@@ -278,29 +278,35 @@ export class GitHubProvider implements PrProvider {
     return data.head.sha;
   }
 
+  isTransientError(err: Error): boolean {
+    return isTransientGitHubError(err);
+  }
+
+  /**
+   * ONE attempt, by design. Retrying `createReview` blind is unsafe: a 5xx or
+   * timeout can arrive after the review was committed, so a retry either
+   * duplicates the review or (as seen in the field) trips the secondary rate
+   * limit precisely because the write succeeded. runPost reconciles against
+   * the PR and re-issues only what is genuinely missing.
+   */
   async postBatchComments(ref: PrRef, headSha: string, comments: BatchComment[]): Promise<{ posted: number }> {
     if (comments.length === 0) return { posted: 0 };
-    await withRetry(
-      () =>
-        this.client(ref).pulls.createReview({
-          owner: ref.owner,
-          repo: ref.repo,
-          pull_number: ref.number,
-          commit_id: headSha,
-          // COMMENT is the only event acceptable on the author's own PR, and
-          // posting findings must never approve/block on their behalf.
-          event: 'COMMENT',
-          // NO review body: a body renders as an extra "X left a comment" box
-          // in the PR timeline on top of the inline comments — pure noise.
-          // The API docs claim `body` is required for COMMENT, but that only
-          // holds for comment-less reviews; with a populated `comments[]`
-          // GitHub accepts the omission (the web UI submits body-less
-          // reviews the same way). Findings must only ever appear inline.
-          comments: comments.map((c) => ({ path: c.path, line: c.line, side: 'RIGHT' as const, body: c.body })),
-        }),
-      isTransientGitHubError,
-      `review batch (${comments.length} comments)`,
-    );
+    await this.client(ref).pulls.createReview({
+      owner: ref.owner,
+      repo: ref.repo,
+      pull_number: ref.number,
+      commit_id: headSha,
+      // COMMENT is the only event acceptable on the author's own PR, and
+      // posting findings must never approve/block on their behalf.
+      event: 'COMMENT',
+      // NO review body: a body renders as an extra "X left a comment" box
+      // in the PR timeline on top of the inline comments — pure noise.
+      // The API docs claim `body` is required for COMMENT, but that only
+      // holds for comment-less reviews; with a populated `comments[]`
+      // GitHub accepts the omission (the web UI submits body-less
+      // reviews the same way). Findings must only ever appear inline.
+      comments: comments.map((c) => ({ path: c.path, line: c.line, side: 'RIGHT' as const, body: c.body })),
+    });
     return { posted: comments.length };
   }
 

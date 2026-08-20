@@ -10,6 +10,7 @@ import { detectCodex, runCodexReviewer } from '../dispatch/codex.js';
 import { ensureRunDir, ERROR_FILE, RUNS_ROOT } from '../util/tmp.js';
 import { appendProgress } from '../util/progress.js';
 import { readPostedMarker, writePostedMarker } from '../util/posted-marker.js';
+import { withRetry } from '../util/retry.js';
 import { resolvePr } from '../providers/index.js';
 import { dedupeAgainstExisting, dedupeWithinBatch } from '../dedupe.js';
 import { detectCompanions, formatWarning } from '../plugins/companions.js';
@@ -164,7 +165,7 @@ export function renderSummary(
   finalFindings: Finding[],
   droppedCount: number,
   elapsedMs: number,
-  postResult?: { posted: number; attempted: number; skipped: number; errors: { error: string }[] },
+  postResult?: { posted: number; attempted: number; skipped: number; errors: { error: string }[]; verified?: boolean },
   skillRouting?: SkillRoute[],
 ): string {
   const totalRaw = outputs.reduce((n, o) => n + o.findings.length, 0);
@@ -179,6 +180,14 @@ export function renderSummary(
     lines.push(
       `**Posted:** ${postResult.posted} / ${postResult.attempted} attempted; ${postResult.skipped} skipped; ${postResult.errors.length} errors`,
     );
+    if (postResult.verified === false) {
+      // The counts above decide whether the reader reaches for --resume, so an
+      // unverified run has to say so where the counts are, not only in stderr.
+      lines.push(
+        ``,
+        `> **Unverified:** the PR could not be read back, so at least one write's outcome is unknown. Check the PR before re-running with \`--resume\` (which will refuse without \`--force-post\`).`,
+      );
+    }
   }
   lines.push(``, `| Reviewer | Findings | Status |`, `|---|---|---|`);
   for (const o of outputs) {
@@ -261,6 +270,8 @@ export async function finalizeReview(a: {
    * and must never mint the done-state summary.
    */
   findingsUnavailable: boolean;
+  /** Re-read the PR's comments before deduping (set by --resume; a fresh run just gathered them). */
+  refreshExisting?: boolean;
   forcePost?: boolean;
   overallStart: number;
   provider?: PrProvider;
@@ -280,7 +291,58 @@ export async function finalizeReview(a: {
 
   const rawFindings = a.outputs.flatMap((o) => o.findings);
   const intraBatch = dedupeWithinBatch(rawFindings, a.dedupeMode);
-  const dedupedAgainstExisting = dedupeAgainstExisting(intraBatch.kept, a.gather.existingComments, a.dedupeMode);
+  // Re-read the PR's comments before deduping. On a --resume the snapshot in
+  // `gather` was taken BEFORE the original run tried to post, so anything that
+  // run managed to publish is invisible to it — which is how an interrupted
+  // run's resume posted a second copy of all 56 comments in the field.
+  //
+  // This lives here, next to the dedupe that depends on it, rather than in the
+  // caller: an invariant installed one level up is one a future caller of
+  // finalizeReview silently loses. Runs on --dry-run too — a dry-run reporting
+  // 56 findings to post when the real run would post none is the same lie, one
+  // step earlier.
+  let existingComments = a.gather.existingComments;
+  if (a.refreshExisting && a.dedupeMode !== 'off') {
+    const { provider, ref } = resolvePr(a.prUrl, undefined, a.provider);
+    try {
+      const refreshed = await withRetry(
+        () => provider.fetchExistingComments(ref),
+        (e) => provider.isTransientError(e),
+        'existing-comment refresh',
+      );
+      // UNION, scoped — never overwrite. Assigning the whole live list would
+      // let any comment posted after the review started suppress a finding:
+      // strict dedupe drops on 0.4 title similarity, so a few vague inline
+      // comments on the changed lines ("double-check this auth path") would
+      // silently bury the matching security findings. The only comments this
+      // refresh needs are the ones an interrupted run of THIS tool wrote, and
+      // those are byte-identical to a finding it was about to post.
+      const ourBodies = new Set(a.outputs.flatMap((o) => o.findings).map((f) => f.body.trim()));
+      const known = new Set(existingComments.map((c) => c.id));
+      const ours = refreshed.filter((c) => !known.has(c.id) && ourBodies.has(c.body.trim()));
+      existingComments = [...existingComments, ...ours];
+      process.stderr.write(
+        `[review] read ${refreshed.length} comment(s) from the PR; ${ours.length} match a finding this run would post
+`,
+      );
+    } catch (err) {
+      // Fail closed when publishing. Continuing would dedupe against a snapshot
+      // known to predate a post attempt and re-post everything it published —
+      // and nothing downstream catches it: runPost reconciles only on an error
+      // path, and its window excludes comments written minutes ago. A dry-run
+      // has nothing to duplicate.
+      const why = `could not re-read the PR's comments (${(err as Error).message})`;
+      if (a.publish && !a.forcePost) {
+        throw new Error(
+          `${why} — refusing to post, because deduping against the pre-post snapshot would duplicate whatever the interrupted run already published. Retry when the API is healthy, or pass --force-post if you have checked the PR by hand.`,
+        );
+      }
+      process.stderr.write(`[review] ${why} — deduping against the gather snapshot
+`);
+    }
+  }
+
+  const dedupedAgainstExisting = dedupeAgainstExisting(intraBatch.kept, existingComments, a.dedupeMode);
   const finalFindings = dedupedAgainstExisting.kept;
   const droppedCount = intraBatch.dropped.length + dedupedAgainstExisting.dropped.length;
   if (droppedCount > 0) {
@@ -293,21 +355,27 @@ export async function finalizeReview(a: {
   let postResult: Awaited<ReturnType<typeof runPost>> | undefined;
   if (a.publish) {
     const marker = readPostedMarker(a.outDir);
-    // Refuse re-posting only when we KNOW the prior post fully succeeded, or when
-    // the marker is corrupt (fail closed — we can't rule out a completed post).
-    // A partial prior post falls through so resume can recover the un-posted rest.
-    const fullyPosted = marker !== null && marker !== 'corrupt' && marker.attempted > 0 && marker.posted >= marker.attempted;
-    if (!a.forcePost && (marker === 'corrupt' || fullyPosted)) {
+    // Refuse re-posting when we KNOW the prior post fully succeeded, when the
+    // marker is corrupt, or when the prior run could not verify its writes —
+    // all three are "cannot rule out a completed post", so all three fail
+    // closed. A partial *verified* post falls through so resume can recover
+    // the un-posted rest.
+    const known = marker !== null && marker !== 'corrupt' ? marker : null;
+    const fullyPosted = known !== null && known.attempted > 0 && known.posted >= known.attempted;
+    const unverified = known !== null && known.verified === false;
+    if (!a.forcePost && (marker === 'corrupt' || fullyPosted || unverified)) {
       const why =
         marker === 'corrupt'
           ? 'posted.marker is unreadable — refusing to re-post to avoid duplicates'
-          : `this run already posted ${(marker as { posted: number }).posted} comment(s)`;
+          : unverified
+            ? `the prior post could not be verified against the PR (${known!.posted}/${known!.attempted} counted) — refusing to re-post blind; check the PR, then use --force-post`
+            : `this run already posted ${known!.posted} comment(s)`;
       process.stderr.write(`[review] ${why}; skipping post (use --force-post to override)\n`);
       appendProgress(a.outDir, 'post', 'skipped — already posted');
     } else {
-      if (marker && marker !== 'corrupt' && marker.posted < marker.attempted) {
+      if (known && known.posted < known.attempted) {
         process.stderr.write(
-          `[review] prior post was partial (${marker.posted}/${marker.attempted}) — re-posting to recover the rest (duplicates possible)\n`,
+          `[review] prior post was partial (${known.posted}/${known.attempted}) — re-posting the rest; findings already on the PR are skipped after the read-back\n`,
         );
       }
       process.stderr.write(`[review] posting comments…\n`);
@@ -323,10 +391,15 @@ export async function finalizeReview(a: {
         },
       ];
       postResult = await runPost({ prUrl: a.prUrl, outputs: wrapper, publish: true, gather: a.gather, provider: a.provider });
-      if (postResult.posted > 0) {
-        writePostedMarker(a.outDir, { posted: postResult.posted, attempted: postResult.attempted });
-      }
-      appendProgress(a.outDir, 'post', `${postResult.posted} posted`);
+      // Unconditional: a publish attempt happened, and that fact is the guard.
+      // Gating this on `posted > 0` is what left the field incident's run with
+      // no marker at all, so its --resume re-posted all 56 comments.
+      writePostedMarker(a.outDir, {
+        posted: postResult.posted,
+        attempted: postResult.attempted,
+        verified: postResult.verified,
+      });
+      appendProgress(a.outDir, 'post', `${postResult.posted} posted${postResult.verified ? '' : ' (unverified)'}`);
     }
   } else if (a.dryRun) {
     process.stderr.write(`[review] --dry-run: skipping post\n`);
@@ -435,6 +508,10 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     outDir,
     gather,
     outputs,
+    // The gather snapshot predates the interrupted run's post attempt, so the
+    // comments it managed to publish are invisible to dedupe. finalizeReview
+    // owns the refresh because it owns the dedupe that depends on it.
+    refreshExisting: true,
     dedupeMode: config.dedupeMode,
     publish: !!opts.publish,
     dryRun: opts.dryRun,
@@ -605,8 +682,11 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   appendProgress(outDir, 'dispatch', `${sessionCtx.dispatchedReviewers.length} reviewers · ${skills.brief}`);
 
   // Codex runs as a sibling process, in parallel with the orchestrator session.
-  // runCodexReviewer resolves on every failure path (spawn error, timeout,
-  // unreadable output) with `error` set — no catch wrapper needed.
+  // runCodexReviewer resolves on every failure path with `error` set — spawn
+  // rejection included, since it catches spawnCli's synchronous argv validation
+  // (win32 only) inside its own promise executor. Handling it there rather than
+  // here is what routes the failure through codex-failure.log instead of
+  // leaving one stderr line behind.
   let codexPromise: Promise<ReviewerOutput> | null = null;
   if (includeCodex) {
     codexPromise = runCodexReviewer({

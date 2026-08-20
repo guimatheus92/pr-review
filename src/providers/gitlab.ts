@@ -410,6 +410,15 @@ export class GitLabProvider implements PrProvider {
     return notes.filter((n) => !n.system).map(mapNote);
   }
 
+  isTransientError(err: Error): boolean {
+    return isTransientGitLabError(err);
+  }
+
+  /**
+   * ONE attempt: creating a discussion is not idempotent, so a 5xx or timeout
+   * arriving after GitLab committed it must not be re-issued here. runPost
+   * retries only once the MR confirms the discussion is genuinely absent.
+   */
   async postLineComment(ref: PrRef, finding: Finding, _headSha?: string): Promise<{ id: string } | null> {
     if (!finding.file || !finding.line) return null;
     // Position SHAs must match the MR's recorded diff version, so the gather
@@ -423,15 +432,10 @@ export class GitLabProvider implements PrProvider {
     const body = finding.body.trim();
     // No top-level note fallback: findings must land as resolvable inline
     // discussions. An unanchorable finding surfaces as an error instead.
-    const created = await withRetry(
-      () =>
-        this.api<{ id: string }>(ref, `/merge_requests/${ref.number}/discussions`, {
-          method: 'POST',
-          body: { body, position },
-        }),
-      isTransientGitLabError,
-      `${finding.file}:${finding.line}`,
-    );
+    const created = await this.api<{ id: string }>(ref, `/merge_requests/${ref.number}/discussions`, {
+      method: 'POST',
+      body: { body, position },
+    });
     return { id: String(created.id) };
   }
 }

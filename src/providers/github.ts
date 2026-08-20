@@ -2,7 +2,7 @@ import { Octokit } from '@octokit/rest';
 import { execFileSync } from 'node:child_process';
 import type { ChangedFile, ExistingComment, Finding, PrMetadata, PrRef } from '../types.js';
 import type { BatchComment, PrProvider } from './types.js';
-import { withRetry } from '../util/retry.js';
+
 import { execErrorDetail } from '../util/exec-error.js';
 import { parseHttpUrl } from '../util/url.js';
 
@@ -214,7 +214,11 @@ export class GitHubProvider implements PrProvider {
     return data as unknown as string;
   }
 
-  async fetchExistingComments(ref: PrRef): Promise<ExistingComment[]> {
+  async fetchExistingComments(ref: PrRef, since?: Date): Promise<ExistingComment[]> {
+    // Both endpoints filter server-side on `since`, so a reconciliation read is
+    // one small page instead of the PR's whole comment history — which matters
+    // because those reads fire exactly when the API is already rate-limiting.
+    const sinceParam = since ? { since: since.toISOString() } : {};
     const collectReviewComments = async (): Promise<ExistingComment[]> => {
       const out: ExistingComment[] = [];
       const iter = this.client(ref).paginate.iterator(this.client(ref).pulls.listReviewComments, {
@@ -222,6 +226,7 @@ export class GitHubProvider implements PrProvider {
         repo: ref.repo,
         pull_number: ref.number,
         per_page: 100,
+        ...sinceParam,
       });
       for await (const { data } of iter) {
         for (const c of data) {
@@ -246,6 +251,7 @@ export class GitHubProvider implements PrProvider {
         repo: ref.repo,
         issue_number: ref.number,
         per_page: 100,
+        ...sinceParam,
       });
       for await (const { data } of iter) {
         for (const c of data) {
@@ -278,53 +284,59 @@ export class GitHubProvider implements PrProvider {
     return data.head.sha;
   }
 
+  isTransientError(err: Error): boolean {
+    return isTransientGitHubError(err);
+  }
+
+  /**
+   * ONE attempt, by design. Retrying `createReview` blind is unsafe: a 5xx or
+   * timeout can arrive after the review was committed, so a retry either
+   * duplicates the review or (as seen in the field) trips the secondary rate
+   * limit precisely because the write succeeded. runPost reconciles against
+   * the PR and re-issues only what is genuinely missing.
+   */
   async postBatchComments(ref: PrRef, headSha: string, comments: BatchComment[]): Promise<{ posted: number }> {
     if (comments.length === 0) return { posted: 0 };
-    await withRetry(
-      () =>
-        this.client(ref).pulls.createReview({
-          owner: ref.owner,
-          repo: ref.repo,
-          pull_number: ref.number,
-          commit_id: headSha,
-          // COMMENT is the only event acceptable on the author's own PR, and
-          // posting findings must never approve/block on their behalf.
-          event: 'COMMENT',
-          // NO review body: a body renders as an extra "X left a comment" box
-          // in the PR timeline on top of the inline comments — pure noise.
-          // The API docs claim `body` is required for COMMENT, but that only
-          // holds for comment-less reviews; with a populated `comments[]`
-          // GitHub accepts the omission (the web UI submits body-less
-          // reviews the same way). Findings must only ever appear inline.
-          comments: comments.map((c) => ({ path: c.path, line: c.line, side: 'RIGHT' as const, body: c.body })),
-        }),
-      isTransientGitHubError,
-      `review batch (${comments.length} comments)`,
-    );
+    await this.client(ref).pulls.createReview({
+      owner: ref.owner,
+      repo: ref.repo,
+      pull_number: ref.number,
+      commit_id: headSha,
+      // COMMENT is the only event acceptable on the author's own PR, and
+      // posting findings must never approve/block on their behalf.
+      event: 'COMMENT',
+      // NO review body: a body renders as an extra "X left a comment" box
+      // in the PR timeline on top of the inline comments — pure noise.
+      // The API docs claim `body` is required for COMMENT, but that only
+      // holds for comment-less reviews; with a populated `comments[]`
+      // GitHub accepts the omission (the web UI submits body-less
+      // reviews the same way). Findings must only ever appear inline.
+      comments: comments.map((c) => ({ path: c.path, line: c.line, side: 'RIGHT' as const, body: c.body })),
+    });
     return { posted: comments.length };
   }
 
+  /**
+   * ONE attempt, same rule as the batch. `createReviewComment` is not
+   * idempotent, so a 5xx or timeout arriving after GitHub committed the
+   * comment must not be re-issued here — runPost retries only once the PR
+   * confirms the comment is genuinely absent.
+   */
   async postLineComment(ref: PrRef, finding: Finding, headSha?: string): Promise<{ id: string } | null> {
     if (!finding.file || !finding.line) return null;
     const commitId = await this.resolveHeadSha(ref, headSha);
-    const body = finding.body.trim();
     // No top-level issue-comment fallback: findings must land as resolvable
     // review threads. An unanchorable finding surfaces as an error instead.
-    const { data } = await withRetry(
-      () =>
-        this.client(ref).pulls.createReviewComment({
-          owner: ref.owner,
-          repo: ref.repo,
-          pull_number: ref.number,
-          body,
-          commit_id: commitId,
-          path: finding.file!,
-          line: finding.line!,
-          side: 'RIGHT',
-        }),
-      isTransientGitHubError,
-      `${finding.file}:${finding.line}`,
-    );
+    const { data } = await this.client(ref).pulls.createReviewComment({
+      owner: ref.owner,
+      repo: ref.repo,
+      pull_number: ref.number,
+      body: finding.body.trim(),
+      commit_id: commitId,
+      path: finding.file,
+      line: finding.line,
+      side: 'RIGHT',
+    });
     return { id: String(data.id) };
   }
 }

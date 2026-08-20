@@ -10,7 +10,7 @@ description: How to test pr-review changes locally — unit tests, end-to-end ru
 npm run test
 ```
 
-`scripts/test.mjs` enumerates `tests/*.test.ts` (node 20-safe) — 110 tests covering: glob matching, output parsers (JSON, bracketed-markdown, section-header), dedupe (Jaccard similarity, strict/loose/off), diff filtering, frontmatter parsing, config merge, line snapping (`tests/line-snap.test.ts`), session context / skills routing (`tests/session-context.test.ts`), and the loader (`tests/loader.test.ts`).
+`scripts/test.mjs` enumerates `tests/**/*.test.ts` recursively (node 20-safe), including `tests/providers/` — see AGENTS.md for the current count. Coverage: glob matching, output parsers (JSON, bracketed-markdown, section-header), dedupe (Jaccard similarity, strict/loose/off), diff filtering, frontmatter parsing, config merge, line snapping (`tests/line-snap.test.ts`), session context / skills routing (`tests/session-context.test.ts`), and the loader (`tests/loader.test.ts`).
 
 ## Skills routing (fast, no runtime spawn)
 

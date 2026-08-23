@@ -1,6 +1,6 @@
 # pr-review
 
-A generic, plugin-based PR review tool for GitHub, Azure DevOps, and GitLab, packaged as a plugin for [Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/plugins-creating) **or** Claude Code. Orchestrates parallel reviewer agents in a single agent session (companion plugins optional) and posts **every** finding back to the PR as a resolvable inline review comment — never a top-level comment, nothing dropped. When the `codex` CLI is installed, a Codex second-opinion reviewer runs alongside automatically.
+A generic, plugin-based PR review tool for GitHub, Azure DevOps, and GitLab, packaged as a plugin for [Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/plugins-creating) **or** Claude Code. Orchestrates parallel review passes — each one a skill drawn from synced skill packs or your own repo — in a single agent session (companion plugins optional) and posts **every** finding back to the PR as a resolvable inline review comment — never a top-level comment, nothing dropped. When the `codex` CLI is installed, a Codex second-opinion reviewer runs alongside automatically.
 
 ```
 /pr-review https://github.com/org/repo/pull/123
@@ -31,7 +31,7 @@ hosts:
 
 ## Why a CLI, not just a skill
 
-LLMs are unreliable at gathering metadata, deduplicating findings, and posting comments. A thin Node CLI handles those deterministic tasks; reviewer agents only do the actual reviewing. See [architecture](skills/help/reference/architecture.md) for the full execution model.
+LLMs are unreliable at gathering metadata, deduplicating findings, and posting comments. A thin Node CLI handles those deterministic tasks; review passes only do the actual reviewing. See [architecture](skills/help/reference/architecture.md) for the full execution model.
 
 ## Install
 
@@ -49,9 +49,9 @@ Or inside a `claude` (Claude Code) session:
 /plugin install pr-review@pr-review
 ```
 
-No `npm install` needed. The plugin ships a pre-bundled `dist/cli.cjs`; the slash command finds it via `$CLAUDE_PLUGIN_ROOT` under Claude Code (falling back to `~/.copilot/installed-plugins/`) and runs it with `node`. The plugin layout (`commands/`, `agents/`, `skills/`) loads in both hosts; the manifest lives in two places on purpose — `.claude-plugin/plugin.json` (Claude Code's canonical location) and a root `plugin.json` (which Copilot CLI requires).
+No `npm install` needed. The plugin ships a pre-bundled `dist/cli.cjs`; the slash command finds it via `$CLAUDE_PLUGIN_ROOT` under Claude Code (falling back to `~/.copilot/installed-plugins/`) and runs it with `node`. The plugin layout (`commands/`, `skills/`) loads in both hosts; the manifest lives in two places on purpose — `.claude-plugin/plugin.json` (Claude Code's canonical location) and a root `plugin.json` (which Copilot CLI requires).
 
-**Command name per host:** Copilot CLI exposes the command as `/pr-review`. Claude Code namespaces plugin commands as `/pr-review:pr-review` — and because this plugin also ships reviewer **agents**, Claude Code does **not** register a bare `/pr-review` alias for it (empirically: plugins that ship agents don't get the bare form; it's a host behavior, not configurable in the plugin). To get a bare `/pr-review` under Claude Code, drop a personal command at `~/.claude/commands/pr-review.md` (personal commands have no namespace, so `/pr-review` resolves):
+**Command name per host:** Copilot CLI exposes the command as `/pr-review`. Claude Code namespaces plugin commands as `/pr-review:pr-review`; since the plugin no longer ships agents, current Claude Code should also register the bare `/pr-review` alias. If your host doesn't, drop a personal command at `~/.claude/commands/pr-review.md` as a fallback (personal commands have no namespace, so `/pr-review` resolves):
 
 ```markdown
 ---
@@ -93,8 +93,8 @@ npm install && npm run build
 ```bash
 /pr-review <pr-url>                    # review with auto-discovered skills; posts line comments (default)
 /pr-review <pr-url> --dry-run          # preview findings without posting
-/pr-review <pr-url> --skip security    # skip specific reviewers
-/pr-review <pr-url> --context-only     # prepare context + skill routing table, don't run reviewers
+/pr-review <pr-url> --skip owasp/logging   # skip passes (full pack/skill or bare name; also: verifier, codex)
+/pr-review <pr-url> --context-only     # prepare context + the pass files, print stack + pass table, don't dispatch
 /pr-review <pr-url> --lang pt-BR       # language for finding titles/bodies (default: en)
 /pr-review <pr-url> --fail-on high     # exit 1 if any high/critical finding survives dedupe
 /pr-review <pr-url> --runtime claude   # host the session in Claude Code instead of Copilot CLI
@@ -119,50 +119,72 @@ Review rules live where your agent tools already keep skills — no separate fol
 your-repo/
 └── .claude/                           # or .copilot/, .github/, .agents/
     └── skills/
-        ├── our-auth-conventions.md    # auto-injected when relevant to the PR
+        ├── our-auth-conventions.md    # runs as its own review pass when relevant
         └── team-style-guide.md
 ```
 
-Per PR the tool matches each repo skill's `name` + `description` against the changed file paths and the diff (accent-insensitive, stem/prefix matching, so Portuguese "planos/créditos" matches English `plans`/`Credits`). A **match** force-feeds the skill's full body into every reviewer (shows as "Injected: N" in the summary); **no match** leaves it in an on-demand **catalog** (name + description + path) that reviewers read when relevant — so a catalogued skill is never simply ignored.
+Every matched repo skill runs as **its own review pass** alongside the pack passes, keeping its plain name (`our-auth-conventions`). A skill with `applies_to` globs is selected exactly when an in-scope changed file matches; a skill without targeting goes through the `name` + `description` relevance heuristic against the changed file paths and the diff (accent-insensitive, stem/prefix matching, so Portuguese "planos/créditos" matches English `plans`/`Credits`). Skills that don't match — and anything past the pass cap — land in `skills-index.md`, an on-demand **index** (name + description + path) every pass can read when relevant, so an unmatched skill is never simply ignored.
 
-Optional frontmatter refines this: `applies_to` (globs — inject only when an in-scope changed file matches) and `inject_into` (reviewer short names — scope to specific reviewers). A skill carrying either is routed explicitly, bypassing the heuristic; a skill with neither goes through inject-if-relevant-else-catalog. Neither is required for a skill to be used. Untargeted **home** skills (`~/.claude/skills/` etc.) stay skipped — those are personal general-purpose helpers, not review content. To force a whole directory injected regardless of relevance, point `extra_skills_dirs` (in `.pr-review.yaml`), `--skills-dir`, or `PR_REVIEW_SKILLS_DIR` at it.
+`inject_into` is **deprecated**: it's parsed only to print a warning, then ignored — a matched skill is now a whole pass, so there are no reviewers to scope it to. `applies_to` still routes. Untargeted **home** skills (`~/.claude/skills/` etc.) stay skipped — those are personal general-purpose helpers, not review content. To force a whole directory in as passes regardless of relevance, point `extra_skills_dirs` (in `.pr-review.yaml`), `--skills-dir`, or `PR_REVIEW_SKILLS_DIR` at it.
 
-Preview the routing with `--context-only`, which prints a skill→reviewer table (catalog entries show as `(catalog — on-demand)`) and exits without running reviewers. A live run also reports which skills it used — a `## Skills` block at dispatch (stderr / `detached.log`) and a matching section in the final summary (injected skills + which reviewers each reached, plus a catalog count). See [reviewers vs skills](skills/help/reference/reviewers-vs-skills.md) for the full authoring guide.
+Preview the selection with `--context-only`, which prints a `## Stack` block (languages, dependencies) and a `## Passes` table (`| Pass | Matched by | Matched on | Source |`, plus the index count) and exits without dispatching. A live run reports the same in the final summary's `## Skills` section (`**Passes:** N · **On-demand (index):** K` + a pass table). See [review passes vs skills](skills/help/reference/reviewers-vs-skills.md) for the full authoring guide.
 
-## Built-in reviewers
+## Review passes & skill packs
 
-| Agent | Focus |
-|---|---|
-| `security` | Credential leaks, injection, auth gaps, input validation |
-| `quality` | Naming, dead code, complexity, DRY |
-| `architecture` | Layering, coupling, abstraction leaks |
-| `performance` | Hot-path issues, memory leaks, scale-with-data |
-| `test-coverage` | Missing/inadequate tests, mock divergence |
-| `silent-failure` | Swallowed errors, masked failures |
-| `verifier` | Cross-reviewer reconciliation (runs last) |
+There are no built-in reviewer agents. Every review pass is **one skill applied by a generic agent** inside the single orchestrator session, and the skills come from **skill packs** — git repos cloned to `~/.pr-review/packs/<name>/`. Pass names are `<pack>/<skill>` (e.g. `awesome-copilot/go`, `owasp/nodejs-security`); repo skills keep their plain name.
 
-Skip with `--skip <name>`; tighten one by authoring a skill scoped to it (`inject_into: [<name>]`).
+Three packs are pre-configured:
 
-When the `codex` CLI is installed, an optional `codex` second-opinion reviewer also runs — as a sibling process in parallel with the agent session, reading the same PR context. A different model family catches what the primary model misses. Its findings merge into the normal dedupe/post pipeline. Opt out with `--no-codex`, `invoke_codex: false`, `PR_REVIEW_NO_CODEX=1`, or `--skip codex`.
+| Pack | Source | Content | Baseline passes (run when nothing better matches) |
+|---|---|---|---|
+| `awesome-copilot` | `github/awesome-copilot` | `instructions/*.instructions.md`, `skills/*/SKILL.md` | `code-review-generic`, `security-and-owasp`, `performance-optimization`, `qa-engineering-best-practices`, `self-explanatory-code-commenting` |
+| `owasp` | `OWASP/CheatSheetSeries` | `cheatsheets/*.md` | `error-handling`, `logging` |
+| `anthropic-cybersecurity` | `mukul975/Anthropic-Cybersecurity-Skills` | defensive-review skills (operational/offensive ones excluded) | none — `mode: index`, on-demand only, never a pass |
+
+Passes are selected per PR, best evidence first: `applies_to`/`applyTo` **globs** matching changed files > exact stack-**tag** match (skill name/filename/frontmatter tags vs the detected tags) > **repo** skills > **forced** dirs > the **baseline** pointers — capped at 10 passes. Overflow, unmatched skills, and index-mode packs go to `skills-index.md`, which every pass can read on demand. Stack detection is deterministic, with no hand-written language table: GitHub Linguist's `languages.yml` (auto-downloaded to `~/.pr-review/cache/linguist-languages.yml`, refreshed on `packs sync`) maps changed files to language tags; dependency names are parsed from manifests in your checkout (`package.json`, `go.mod`, `pyproject.toml`, `*.csproj`, `Cargo.toml`, …) when its git origin is the PR's repo; and each manifest kind adds ecosystem tags (`package.json` → `node`, `npm`; `*.csproj` → `dotnet`, `nuget`; …). Docs-only PRs run only glob/forced passes; a code PR that matches zero passes exits with an error pointing at `packs suggest`.
+
+Manage packs from the CLI:
+
+```bash
+pr-review packs list                      # on-disk state, skill counts, commit, freshness
+pr-review packs sync                      # clone/pull every pack + refresh the Linguist cache
+pr-review packs add <owner/repo|url>      # add a pack to the global config and clone it
+pr-review packs suggest <tags...|pr-url>  # search skills.sh by stack tags — suggest-only, never installs
+```
+
+The first review on a machine clones any missing packs automatically (needs `git` and network; failures are warnings, not errors; expect ~1–2 minutes once). Packs more than 30 days out of sync trigger a warning on every review — run `packs sync`.
+
+Configure packs with the `skill_packs:` yaml key. Unlike every other list key (which appends across config levels), `skill_packs` **replaces** the whole list: `skill_packs: []` disables packs entirely, and a list in a repo `.pr-review.yaml` overrides the global list. Entries are `owner/repo` shorthand or `{git, name?, ref?, include?, exclude?, mode?, baseline?}` (`mode: index` = on-demand only).
+
+**Security note:** packs are third-party prompt content read by agents with tool access. Pin `ref:` for reproducibility, and know the only install paths are `packs add` and editing `skill_packs` — `packs suggest` never installs anything.
+
+Skip any pass with `--skip <names>` (full `awesome-copilot/go` or bare `go`; also `verifier`, `codex`). The **verifier** remains a pipeline step: dispatched as a generic agent to reconcile across passes when phase 1 produces a CRITICAL/HIGH finding.
+
+When the `codex` CLI is installed, an optional `codex` second-opinion reviewer also runs — as a sibling process in parallel with the agent session, reading the same PR context and the union of pass skills (`skills-all.md`). A different model family catches what the primary model misses. Its findings merge into the normal dedupe/post pipeline. Opt out with `--no-codex`, `invoke_codex: false`, `PR_REVIEW_NO_CODEX=1`, or `--skip codex`.
 
 ## CLI reference
 
 ```bash
 pr-review review <pr-url> [flags]            # full pipeline
-#   --context-only          prepare pr-context.md + per-reviewer skills files,
-#                           print the skill→reviewer routing table, exit
+#   --context-only          prepare pr-context.md + the pass files,
+#                           print the stack + pass table, exit
+#   --skip <names>          comma-separated pass names to skip (full pack/skill
+#                           or bare skill name; also: verifier, codex)
 #   --lang <code>           output language for findings (yaml: language, env: PR_REVIEW_LANG)
 #   --fail-on <severity>    critical|high|medium|low|nit → exit 1 on surviving findings
 #   --runtime <name>        copilot|claude|auto — which agent CLI hosts the session
 #                           (yaml: runtime, env: PR_REVIEW_RUNTIME; default auto)
 #   --no-codex              skip the Codex second-opinion reviewer
 #   --copilot <path>        path to the copilot binary (implies --runtime copilot unless --runtime given)
+#   --from-gather <path>    (eval harness) read the gather JSON from a file
+#                           instead of the provider APIs; requires --dry-run
 pr-review gather <pr-url> [--out <path>]     # fetch + cache metadata only
 pr-review post <pr-url> --findings <path>    # post pre-computed findings
+pr-review packs list|sync|add <source>|suggest <tags...|pr-url>   # manage skill packs
 pr-review init [--with-config] [--force]     # scaffold a starter team-rules skill + optional .pr-review.yaml
 pr-review configure [path] [--force]         # write ~/.pr-review/config.yaml
-pr-review doctor                             # environment preflight: runtimes, codex, companions, auth
-pr-review plugins list                       # list loaded reviewers + skills
+pr-review doctor                             # environment preflight: runtimes, codex, companions, auth, skill packs
+pr-review plugins list                       # list repo skills + pack skill counts
 pr-review plugins doctor                     # check companion plugin status
 pr-review config show                        # print merged config + sources
 pr-review cache info | clear                 # manage local cache
@@ -176,8 +198,8 @@ All documentation lives under the single `help` skill (`skills/help/`), loaded b
 |---|---|
 | Architecture & source map | [skills/help/reference/architecture.md](skills/help/reference/architecture.md) |
 | Configuration (5-level merge, YAML, env vars) | [skills/help/reference/configuration.md](skills/help/reference/configuration.md) |
-| Reviewers vs skills (authoring, overrides) | [skills/help/reference/reviewers-vs-skills.md](skills/help/reference/reviewers-vs-skills.md) |
-| Managing reviewers (add, remove, override) | [skills/help/reference/adding-your-own-md.md](skills/help/reference/adding-your-own-md.md) |
+| Review passes vs skills (authoring, routing) | [skills/help/reference/reviewers-vs-skills.md](skills/help/reference/reviewers-vs-skills.md) |
+| Adding your own skills & packs | [skills/help/reference/adding-your-own-md.md](skills/help/reference/adding-your-own-md.md) |
 | Companion plugins (pr-review-toolkit, code-review) | [skills/help/reference/companion-plugins.md](skills/help/reference/companion-plugins.md) |
 | CI/CD (GitHub Actions, ADO Pipelines) | [skills/help/reference/ci-integration.md](skills/help/reference/ci-integration.md) |
 | Caching | [skills/help/reference/caching.md](skills/help/reference/caching.md) |

@@ -10,7 +10,7 @@
   "plugins": [
     {
       "name": "pr-review",
-      "description": "Generic, plugin-based PR review for GitHub, Azure DevOps, and GitLab. Orchestrates parallel reviewer agents in a single session (Copilot CLI or Claude Code), with optional Codex second opinion and stack/business-rule skills.",
+      "description": "Generic, plugin-based PR review for GitHub, Azure DevOps, and GitLab. Reviews with parallel passes built from synced skill packs (stack-aware, zero built-in reviewers) in a single session (Copilot CLI or Claude Code), with optional Codex second opinion.",
       "version": "0.6.1",
       "author": {
         "name": "Guilherme Matheus",

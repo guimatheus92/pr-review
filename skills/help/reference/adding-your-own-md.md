@@ -1,12 +1,10 @@
 ---
-description: "pr-review reviewer/skill lifecycle: adding, removing, overriding, and listing reviewers and skills. Use when asked how to add/remove/override/disable a reviewer, where .md files go, how to see what's loaded, what the built-in reviewers are, or anything about managing the reviewer set."
+description: "pr-review skill lifecycle: adding, removing, and listing the skills that become review passes. Use when asked how to add/remove/disable a review pass, where .md files go, how to see what's loaded, where skill packs live, or anything about managing the skill set."
 ---
 
-# Managing Your Reviewers and Skills
+# Managing Your Skills
 
-You don't write code to manage review content. You drop `.md` files in conventional folders, and the loader picks them up. To remove, you delete a file or skip a reviewer by name.
-
-**Important:** the single-session review path loads **skills only** (`loadAll` runs with `skillsOnly`). User-authored reviewer `.md` files are not dispatched during `pr-review review` — skills injected into the seven built-in reviewers are the extension mechanism.
+You don't write code to manage review content. You drop `.md` files in conventional folders (or configure skill packs), and the loader picks them up. Every skill that matches a PR runs as its own review pass; to remove one, you delete the file or skip the pass by name.
 
 ## What's loaded right now
 
@@ -14,43 +12,31 @@ You don't write code to manage review content. You drop `.md` files in conventio
 pr-review plugins list
 ```
 
-Output groups reviewers (active passes that produce findings) and skills (passive context injected into matching reviewers). Each line shows the source file path so you know exactly where it came from — built-in, repo, personal, or plugin.
+Output groups repo/personal skills (with the source file path for each) and per-pack skill counts. There is no reviewers section any more — skills ARE the review passes.
 
 ## Where files are auto-discovered
 
-Skills are standard `SKILL.md` reference docs, so they load from every conventional skill path that Copilot CLI / Claude Code / GitHub already use.
+Skills are standard `SKILL.md` reference docs, so they load from every conventional skill path that Copilot CLI / Claude Code / GitHub already use — plus the skill packs root.
 
-| Path | Type | Scope |
-|---|---|---|
-| `<repo>/.claude/skills/*.md` | Skills | Per-repo (Claude Code convention) |
-| `<repo>/.copilot/skills/*.md` | Skills | Per-repo (Copilot CLI convention) |
-| `<repo>/.github/skills/*.md` | Skills | Per-repo (GitHub convention) |
-| `<repo>/.agents/skills/*.md` | Skills | Per-repo (AGENTS.md universal convention) |
-| `~/.claude/skills/*.md`, `~/.copilot/skills/*.md`, `~/.agents/skills/*.md` | Skills | Personal, cross-repo |
+| Path | Scope |
+|---|---|
+| `<repo>/.claude/skills/*.md` | Per-repo (Claude Code convention) |
+| `<repo>/.copilot/skills/*.md` | Per-repo (Copilot CLI convention) |
+| `<repo>/.github/skills/*.md` | Per-repo (GitHub convention) |
+| `<repo>/.agents/skills/*.md` | Per-repo (AGENTS.md universal convention) |
+| `~/.claude/skills/*.md`, `~/.copilot/skills/*.md`, `~/.agents/skills/*.md` | Personal, cross-repo |
+| `~/.pr-review/packs/<name>/` | Skill packs — git repos configured via `skill_packs` / `pr-review packs add` |
 
-Every repo skill is used — read straight from the dirs your agent tools already keep, with no separate folder and no duplication:
+How each skill routes (see [`reviewers-vs-skills`](reviewers-vs-skills.md) for the full tier list):
 
-- **Targeted** (`applies_to` and/or `inject_into`) → **injected** authoritatively, bypassing the heuristic (see the routing rules below).
-- **Untargeted** → run through a relevance heuristic that matches the skill's `name` + `description` against the changed file paths and the diff (accent-insensitive, stem/prefix matching, so Portuguese "planos/créditos" matches English `plans`/`Credits`). A **match** injects the full body into every reviewer; **no match** lists the skill in an on-demand **catalog** (name + description + path) that reviewers read when relevant — advisory background, not authoritative rules, but never dropped. So a repo full of general-purpose skills is surfaced, not injected wholesale — it never floods every reviewer's context.
+- **Targeted** (`applies_to` globs match a changed file) → becomes its own **pass**, authoritatively.
+- **Untargeted repo skill** → run through the relevance heuristic matching its `name` + `description` against the changed file paths and the diff (accent-insensitive, stem/prefix matching, so Portuguese "planos/créditos" matches English `plans`/`Credits`). A **match** makes it a pass; **no match** lists it in `skills-index.md`, the on-demand index passes read from when an entry is relevant — surfaced, never dropped.
+- **Pack skills** → glob/tag/baseline tiers; index-mode packs go straight to the index.
 - **Untargeted, in a home dir** (`~/.claude/skills/` etc.) → skipped (with a stderr note); these are personal general-purpose helpers, not review content.
 
-The standard `SKILL.md` frontmatter is what we read:
+At most 10 passes dispatch per review; overflow joins the index.
 
-- `applies_to` (globs) → which in-scope changed files trigger the skill (default: all files)
-- `inject_into` (reviewer short names: `security`, `quality`, `architecture`, `performance`, `test-coverage`, `silent-failure`, `verifier`) → which reviewers see the context (default: all reviewers). Companion agents receive only skills WITHOUT `inject_into`; the verifier receives the union of all injected skills.
-- Any other field (`name`, `allowed-tools`, etc.) is preserved but ignored
-- Malformed frontmatter YAML prints a stderr warning naming the file
-
-Routed skills are written per reviewer to `skills-<reviewer>.md` in the run dir (`~/.pr-review/runs/<id>/`). Skill bodies are capped at 16 KB each and each per-reviewer file at 64 KB — truncation warns on stderr. The catalog lives in `pr-context.md` under a separate 24 KB budget (one line per skill, description capped at 200 chars), so it never competes with the injected-skill caps.
-
-One `.md` in a skill dir serves both your normal agent sessions and pr-review; add `applies_to`/`inject_into` when you want to pin exactly which reviewers see it instead of leaning on the relevance heuristic. To force an entire directory injected regardless of relevance, point `extra_skills_dirs` / `--skills-dir` / `PR_REVIEW_SKILLS_DIR` at it.
-
-## Other ways to add content
-
-| Scope | Path | Visibility | Tracked in git? |
-|---|---|---|---|
-| **Built-in** | `agents/<name>.md` inside the plugin install | All users of pr-review globally | Yes — in the plugin source |
-| **Plugin** | A `plugin.yaml`-wrapped directory passed via `--plugin-dir` | Whoever opts in via flag or yaml | Depends on where it's published |
+One `.md` in a skill dir serves both your normal agent sessions and pr-review; add `applies_to` when you want to pin exactly which files trigger it instead of leaning on the relevance heuristic. To force an entire directory in regardless of relevance, point `extra_skills_dirs` / `--skills-dir` / `PR_REVIEW_SKILLS_DIR` at it.
 
 ## Adding
 
@@ -58,11 +44,11 @@ One `.md` in a skill dir serves both your normal agent sessions and pr-review; a
 
 ```bash
 mkdir -p .claude/skills          # or .copilot/, .github/, .agents/
-cp docs/our-auth-conventions.md  .claude/skills/          # injected when relevant to the PR
+cp docs/our-auth-conventions.md  .claude/skills/          # runs as a pass when relevant to the PR
 git add .claude && git commit -m "add review rules"
 ```
 
-The next `/pr-review <url>` picks it up automatically. No flags. No config. If the skill's `name`/`description` matches the changed files it's injected; otherwise it lands in the on-demand catalog.
+The next `/pr-review <url>` picks it up automatically. No flags. No config. If the skill's `applies_to`/`name`/`description` matches the changed files it runs as its own pass; otherwise it lands in the on-demand index.
 
 ### Adding a personal skill (cross-repo, just you)
 
@@ -70,10 +56,20 @@ Untargeted skills in a home dir are skipped (they're treated as general-purpose 
 
 ```bash
 mkdir -p ~/.claude/skills
-cp ~/notes/personal-checklist.md  ~/.claude/skills/       # add applies_to/inject_into frontmatter
+cp ~/notes/personal-checklist.md  ~/.claude/skills/       # add applies_to frontmatter
 ```
 
-With `applies_to`/`inject_into` frontmatter it's injected on every `pr-review` run from any repo. Or force a whole directory in with `--skills-dir ~/notes/review` (or `PR_REVIEW_SKILLS_DIR`). Use for cross-team review habits you carry with you.
+With `applies_to` frontmatter it runs on every `pr-review` run from any repo. Or force a whole directory in with `--skills-dir ~/notes/review` (or `PR_REVIEW_SKILLS_DIR`). Use for cross-team review habits you carry with you.
+
+### Adding a skill pack (whole repos of review knowledge)
+
+```bash
+pr-review packs add <owner/repo>       # appends to the global config and clones
+pr-review packs suggest <pr-url>       # suggests packs for the PR's stack — never installs
+pr-review packs sync                   # clone/pull all configured packs
+```
+
+Or edit `skill_packs:` in `.pr-review.yaml` / `~/.pr-review/config.yaml`. Note `skill_packs` REPLACES the whole list (unlike other list keys): `skill_packs: []` disables packs entirely.
 
 ### Adding an ad-hoc file for one run
 
@@ -82,20 +78,28 @@ pr-review review <pr-url> --skill ./extra-context.md
 pr-review review <pr-url> --skills-dir ./other/path
 ```
 
-### Reviewer vs skill (quick decision)
+## Adding depth to a review
 
-- **Skill** — reference material that augments the built-in reviewers. Goes in `skills/`. No own findings; content is injected into matching reviewers as context.
-- **Reviewer** — the seven built-in review passes dispatched via `task()` in the single session. User reviewer `.md` files are not loaded by the review path.
+There is no reviewer prompt to edit — depth comes from more (or sharper) skills. To make reviews of, say, your C# controllers apply stricter security rules, write a skill targeted at those files:
 
-Author skills. See [`reviewers-vs-skills`](../reviewers-vs-skills/SKILL.md) for the full distinction.
+```markdown
+---
+description: Team security rules for controllers
+applies_to: ["**/*Controller.cs"]
+---
+# Our stricter security rules
+...
+```
+
+Drop it in a repo skill dir (`.claude/skills/` etc.) for the team, or a home dir for personal use. When a PR touches a matching file, the skill runs as its own dedicated pass alongside the pack passes. For a whole domain of depth (security, performance, a language), add a skill pack instead of writing everything yourself.
 
 ## Removing
 
-### Skip for a single run
+### Skip a pass for a single run
 
 ```bash
-pr-review review <pr-url> --skip security
-pr-review review <pr-url> --skip security,test-coverage,verifier   # multiple
+pr-review review <pr-url> --skip go                            # bare skill suffix
+pr-review review <pr-url> --skip awesome-copilot/go,verifier   # full name; verifier/codex too
 ```
 
 ### Always skip in this repo
@@ -104,8 +108,8 @@ pr-review review <pr-url> --skip security,test-coverage,verifier   # multiple
 
 ```yaml
 skip_reviewers:
-  - security
-  - test-coverage
+  - awesome-copilot/self-explanatory-code-commenting
+  - codex
 ```
 
 Committed alongside the rest of the repo's review config. The team shares the skip list.
@@ -127,41 +131,19 @@ Just delete the file:
 rm .claude/skills/my-old-skill.md
 ```
 
-### Removing a built-in from the plugin source
+### Removing a pack
 
-```bash
-cd "$(copilot plugin path pr-review)"
-rm agents/security.md
-npm run build
-```
-
-Most people don't need this — `--skip` or `skip_reviewers` are reversible and don't fork the plugin. Only remove from source if you're maintaining a custom fork.
-
-## Tightening a built-in
-
-Reviewer files can't be shadowed in the single-session path (user reviewer `.md` files aren't loaded). To make, say, the `security` reviewer apply your team's stricter rules, author a **skill** targeted at it:
-
-```markdown
----
-description: Team security rules
-inject_into: [security]
-applies_to: ["**/*.cs"]
----
-# Our stricter security rules
-...
-```
-
-Drop it in a repo skill dir (`.claude/skills/` etc.) for the team, or a home dir with the same frontmatter for personal use. The security reviewer then evaluates the diff against its built-in criteria plus yours.
+Set `skill_packs:` in config to the list you want (it replaces, so listing everything except the unwanted pack removes it; `[]` removes them all), then optionally delete its clone under `~/.pr-review/packs/`.
 
 ## Verifying changes took effect
 
 ```bash
-pr-review plugins list                    # shows the resolved set with file paths
-pr-review review <pr-url> --context-only  # prints the skill→reviewer routing table (no runtime spawn)
+pr-review plugins list                    # shows the resolved skills + pack counts with file paths
+pr-review review <pr-url> --context-only  # prints ## Stack + the ## Passes table (no runtime spawn)
 pr-review config show                     # shows effective config + which file each setting came from
 ```
 
-`--context-only` also writes `pr-context.md` and the `skills-<reviewer>.md` files to the run dir so you can inspect exactly what each reviewer would receive. Use these before running a real review so you don't burn tokens to discover a misconfig.
+`--context-only` also writes `pr-context.md`, the `pass-*.md` files, and `skills-index.md` to the run dir so you can inspect exactly what each pass would receive. Use these before running a real review so you don't burn tokens to discover a misconfig.
 
 ## File format (any scope)
 
@@ -173,13 +155,13 @@ description: C# style and team conventions
 applies_to:
   - "**/*.cs"
   - "**/*.csproj"
-inject_into: [security, quality]
+tags: [csharp, dotnet]
 ---
 
 # C# Style Guide
 ...
 ```
 
-Recognized keys: `description`, `applies_to` (globs matched against in-scope changed files; empty = all), `inject_into` (reviewer short names; empty = all reviewers).
+Recognized keys: `description`, `applies_to` (globs matched against in-scope changed files; alias `applyTo`, which may be a comma-separated string), `name` (wins over the filename), `tags` (exact-matched against the PR's stack tags). `inject_into` is deprecated — parsed only to print a stderr warning, then ignored.
 
-Anything else in frontmatter (including the standard `SKILL.md` spec's `name`, `allowed-tools`, etc. — the convention shared by Copilot CLI and Claude Code) is preserved but ignored, so a SKILL.md you already wrote for either host works as a pr-review skill without edits. If the frontmatter YAML is malformed, a stderr warning names the file.
+Files with no frontmatter at all still work: the description falls back to the first `#` heading, and filename suffixes are folded (`go.instructions.md` → `go`, `Input_Validation_Cheat_Sheet.md` → `input-validation`). Anything else in frontmatter (the standard `SKILL.md` spec's `allowed-tools`, etc.) is preserved but ignored, so a SKILL.md you already wrote for Copilot CLI or Claude Code works as a pr-review skill without edits. If the frontmatter YAML is malformed, a stderr warning names the file.

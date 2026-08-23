@@ -54,7 +54,7 @@ program
   .option('--skills-dir <path...>', 'Include a directory of skill .md files (repeatable)')
   .option('--plugin <name...>', 'Named plugin to include (resolves from node_modules)')
   .option('--plugin-dir <path...>', 'Packaged plugin directory (has plugin.yaml)')
-  .option('--no-autodiscover', 'Disable scanning .pr-review/ conventional paths')
+  .option('--no-autodiscover', 'Disable scanning the standard skill dirs (.claude/.copilot/.github/.agents under skills/, repo + home)')
   .option('--dedupe-mode <mode>', "Dedupe mode: strict | loose | off", 'strict')
   .option('--default-model <model>', 'Default model for reviewers without an explicit one')
   .option('--copilot <path>', 'Path to the copilot CLI binary (implies --runtime copilot unless --runtime is given)')
@@ -283,7 +283,7 @@ program
 
 program
   .command('configure [path]')
-  .description('Write ~/.pr-review/config.yaml. With a path, adds it to extra_reviewers_dirs; without, runs interactive prompts.')
+  .description('Write ~/.pr-review/config.yaml. With a path, adds it to extra_skills_dirs (forced review passes); without, runs interactive prompts.')
   .option('--force', 'Overwrite existing entries', false)
   .action(async (path: string | undefined, opts: { force: boolean }) => {
     try {

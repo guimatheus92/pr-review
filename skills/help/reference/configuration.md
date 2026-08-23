@@ -1,5 +1,5 @@
 ---
-description: "pr-review configuration: 5-level config merge, YAML examples, environment variables, auto-discovery paths. Use when asked how to configure pr-review, change defaults, set models, add extra skill/reviewer paths, or understand config precedence."
+description: "pr-review configuration: 5-level config merge, YAML examples, environment variables, skill packs, auto-discovery paths. Use when asked how to configure pr-review, change defaults, set models, manage skill packs, add extra skill paths, or understand config precedence."
 ---
 
 # Configuration
@@ -19,7 +19,7 @@ Use `pr-review config show` to see the effective merged config and where each se
 ## Setup commands
 
 ```bash
-pr-review configure ~/my-reviews    # quick: sets primary path in ~/.pr-review/config.yaml
+pr-review configure ~/my-skills     # quick: appends to extra_skills_dirs in ~/.pr-review/config.yaml (every skill there runs as a forced pass)
 pr-review configure                 # interactive: prompts for model, paths, etc.
 pr-review init                      # scaffold a starter team-rules skill in current repo
 pr-review init --with-config        # also writes .pr-review.yaml
@@ -33,17 +33,36 @@ default_model: claude-opus-4.8
 language: en                     # finding titles/bodies language (default en)
 extra_skills_dirs:
   - ~/work/team-conventions
-skip_reviewers: [verifier]
+skip_reviewers: [verifier]       # pass names (full `pack/skill` or bare suffix), plus `verifier` / `codex`
 invoke_companions: true
 invoke_codex: true               # Codex second-opinion reviewer (auto-skipped if codex not installed)
 companion_warn: true
-dedupe_mode: strict              # strict | loose | off
+dedupe:
+  mode: strict                   # strict | loose | off
 hosts:                           # self-hosted hostname → provider (github | azuredevops | gitlab)
   github.mycorp.com: github
   tfs.corp.com: azuredevops
 ```
 
 Runtime `auto` (the default) probes PATH: copilot first, then claude; it errors if neither is found. Model note: the copilot-style default `claude-opus-4.8` is mapped to `opus` for the claude runtime; models you set explicitly pass through as-is.
+
+## Skill packs (`skill_packs`)
+
+Review passes come from skill packs — git repos cloned to `~/.pr-review/packs/<name>/`. Three packs are pre-configured (`awesome-copilot`, `owasp`, and the index-only `anthropic-cybersecurity`); override with `skill_packs:` in either YAML file:
+
+```yaml
+skill_packs:                        # REPLACES the whole list — this key does NOT merge
+  - github/awesome-copilot          # 'owner/repo' shorthand
+  - git: OWASP/CheatSheetSeries     # full entry form
+    name: owasp
+    ref: v2.0.0                     # pin for reproducibility (packs are third-party prompt content)
+    include: ["cheatsheets/*.md"]
+    exclude: []
+    mode: auto                      # auto | index — index packs are on-demand only, never a pass
+    baseline: [error-handling, logging]
+```
+
+Unlike every other list key (which pushes onto the merged list), `skill_packs` **replaces**: `skill_packs: []` disables packs entirely, and a repo `.pr-review.yaml` list overrides the global list completely. `pr-review packs add <owner/repo|url>` materializes the defaults into `~/.pr-review/config.yaml` first, then appends.
 
 ## Repo config (`<repo>/.pr-review.yaml`)
 
@@ -55,7 +74,8 @@ extra_skills_dirs:
 extra_skills:
   - ./ARCHITECTURE.md
 skip_reviewers:
-  - test-coverage
+  - awesome-copilot/go     # full pass name…
+  - logging                # …or bare skill suffix
 diff_excludes:
   - "**/generated/**"
   - "**/*.designer.cs"
@@ -75,9 +95,9 @@ diff_excludes:
 | `AZURE_DEVOPS_PAT` / `SYSTEM_ACCESSTOKEN` / `AZURE_DEVOPS_EXT_PAT` | ADO auth (PAT) |
 | `AZURE_DEVOPS_BEARER` | ADO auth (bearer token; also set by the `--detach` pre-flight) |
 
-## Auto-discovery paths
+## Auto-discovery and on-disk paths
 
-Skills are auto-discovered from standard locations — no config needed:
+Repo skills are auto-discovered from standard locations — no config needed — and packs/caches live under `~/.pr-review/`:
 
 | Path | Scope |
 |---|---|
@@ -86,5 +106,7 @@ Skills are auto-discovered from standard locations — no config needed:
 | `<repo>/.github/skills/*.md` | GitHub convention |
 | `<repo>/.agents/skills/*.md` | AGENTS.md convention |
 | `~/.claude/skills/`, `~/.copilot/skills/`, `~/.agents/skills/` | Personal |
+| `~/.pr-review/packs/<name>/` | Skill pack clones (managed by `pr-review packs sync`) |
+| `~/.pr-review/cache/linguist-languages.yml` | GitHub Linguist cache for stack detection (auto-downloaded; refreshed on `packs sync`) |
 
-Existing skills from Claude Code or Copilot CLI work as-is — no copying needed. Per PR, repo skills relevant to the changed files are injected and the rest are catalogued (on-demand). To force every skill in a directory injected unconditionally, point `extra_skills_dirs` (or `--skills-dir` / `PR_REVIEW_SKILLS_DIR`) at it — e.g. `extra_skills_dirs: [.claude/skills]`. Untargeted skills in a home dir are skipped unless pulled in this way.
+Existing skills from Claude Code or Copilot CLI work as-is — no copying needed. Per PR, skills matching the changed files become review passes and the rest land in the on-demand `skills-index.md`. To force every skill in a directory into its own pass, point `extra_skills_dirs` (or `--skills-dir` / `PR_REVIEW_SKILLS_DIR`) at it — e.g. `extra_skills_dirs: [.claude/skills]`. Untargeted skills in a home dir are skipped unless pulled in this way.

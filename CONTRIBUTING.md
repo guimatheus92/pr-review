@@ -6,7 +6,7 @@
 git clone <repo> && cd pr-review
 npm install
 npm run build          # tsc + esbuild → dist/cli.cjs
-npm run test           # node scripts/test.mjs → node --test over tests/*.test.ts (110 tests)
+npm run test           # node scripts/test.mjs → node --test over tests/**/*.test.ts
 ```
 
 Iterative dev: `npm run build:watch` (tsc only; re-run `npm run bundle` for the esbuild output).
@@ -22,16 +22,16 @@ node ./dist/cli.js review <pr-url> --dry-run
 
 See [skills/help/reference/architecture.md](skills/help/reference/architecture.md) for the full source map and execution model.
 
-The two-layer pattern: slash command (`commands/pr-review.md`) → Node CLI (`src/`) → single agent session (Copilot CLI or Claude Code, per `--runtime`) dispatching reviewer agents via `task()` / `Task()`.
+The two-layer pattern: slash command (`commands/pr-review.md`) → Node CLI (`src/`) → single agent session (Copilot CLI or Claude Code, per `--runtime`) dispatching review passes — one generic agent applying one skill each — via `task()` / `Task()`.
 
-## Adding a built-in reviewer
+## Adding or curating a skill pack
 
-Built-in reviewers are `.md` files at `agents/<name>.md`, registered in `BUILTIN_AGENTS`.
+Review knowledge comes from skill packs — git repos cloned to `~/.pr-review/packs/<name>/`. The defaults live in `DEFAULT_PACKS` in [src/config.ts](src/config.ts); users override them with `skill_packs:` in yaml (replace semantics).
 
-1. Create `agents/<name>.md` mirroring an existing one (e.g. `security.md`). Required frontmatter: `name`, `description`. Do **not** pin `model:` — built-in agents inherit the session model, which is required for cross-runtime operation.
-2. Keep it **stack-agnostic**. Framework-specific content belongs in user skills. Do not add an "Output format" block — the dispatch prompt in [src/dispatch/single-session.ts](src/dispatch/single-session.ts) is the single source of the output contract.
-3. Add the agent name to `BUILTIN_AGENTS` in [src/dispatch/single-session.ts](src/dispatch/single-session.ts).
-4. Rebuild: `npm run build`. Verify: `node ./dist/cli.js plugins list`.
+1. Add an entry to `DEFAULT_PACKS`: `name` (pack dir + pass-name prefix), `git` (`owner/repo` or a git URL), `include`/`exclude` globs selecting which files load as skills, `mode` (`auto`, or `index` for packs that only feed the on-demand skills index and never run as a pass), and `baseline` — skill names inside the pack that run as a pass on every PR.
+2. Baselines are **pointers, not content**: `pr-review packs sync` pulls the upstream repo, and a renamed upstream file surfaces as a `missingBaseline` warning on review — fix the pointer, never vendor the content.
+3. Curate with `exclude` globs (matched against the pack-relative path **and** the normalized skill name) instead of forking upstream — see the `anthropic-cybersecurity` entry for the pattern.
+4. Rebuild: `npm run build`. Verify: `node ./dist/cli.js packs sync` then `node ./dist/cli.js packs list`.
 5. Update [README.md](README.md) and [skills/help/reference/reviewers-vs-skills.md](skills/help/reference/reviewers-vs-skills.md).
 
 ## Authoring a plugin (for distribution)
@@ -41,8 +41,6 @@ Most users just drop `.md` files in a standard tool skill dir (`.claude/skills/`
 ```
 my-shared-pack/
 ├── plugin.yaml
-├── prompts/
-│   └── csharp-review.md
 └── skills/
     └── dotnet-style.md
 ```
@@ -53,18 +51,12 @@ name: csharp-conventions
 version: 1.0.0
 description: C# coding conventions
 applies_to: ["**/*.cs"]
-reviewers:
-  - id: csharp-review
-    prompt: ./prompts/csharp-review.md
-    model: claude-opus-4.8
-    output_format: json
 skills:
   - id: dotnet-style
     path: ./skills/dotnet-style.md
-    inject_into: [csharp-review, security]
 ```
 
-Consume via `--plugin-dir ./my-shared-pack` or in `.pr-review.yaml`. Note: standalone reviewers (`reviewers:`) are not dispatched in single-session mode — only skills are injected. Skill frontmatter supports `applies_to` (globs against changed files) and `inject_into` (reviewer names); preview routing with `pr-review review <url> --context-only`.
+Consume via `--plugin-dir ./my-shared-pack` or in `.pr-review.yaml`. Each matched skill runs as its own review pass; standalone reviewers (`reviewers:`) still parse but are never dispatched. Skill frontmatter supports `applies_to` (globs against changed files), `name`, and `tags`; `inject_into` is deprecated — it prints a warning and is ignored. Preview routing with `pr-review review <url> --context-only`.
 
 ## Adding a PR provider
 

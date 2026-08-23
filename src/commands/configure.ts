@@ -32,15 +32,17 @@ export function writeConfig(cfg: GlobalRawConfig, path: string = GLOBAL_PATH): v
 export function runConfigureQuick(path: string, opts: { force?: boolean } = {}): void {
   const resolved = resolve(path.replace(/^~/, homedir()));
   const cfg = readOrEmpty();
-  cfg.extra_reviewers_dirs = cfg.extra_reviewers_dirs ?? [];
-  if (!cfg.extra_reviewers_dirs.includes(resolved)) {
-    cfg.extra_reviewers_dirs.push(resolved);
+  // The review path loads skills only — reviewer dirs are never dispatched, so
+  // the quick path writes extra_skills_dirs (every skill there runs as a forced pass).
+  cfg.extra_skills_dirs = cfg.extra_skills_dirs ?? [];
+  if (!cfg.extra_skills_dirs.includes(resolved)) {
+    cfg.extra_skills_dirs.push(resolved);
   } else if (!opts.force) {
-    process.stderr.write(`(${resolved} already in extra_reviewers_dirs; nothing changed)\n`);
+    process.stderr.write(`(${resolved} already in extra_skills_dirs; nothing changed)\n`);
     return;
   }
   writeConfig(cfg);
-  process.stderr.write(`wrote ${GLOBAL_PATH}\n  extra_reviewers_dirs += ${resolved}\n`);
+  process.stderr.write(`wrote ${GLOBAL_PATH}\n  extra_skills_dirs += ${resolved}\n`);
 }
 
 export async function runConfigureInteractive(): Promise<void> {

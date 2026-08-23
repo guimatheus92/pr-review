@@ -23,6 +23,11 @@ export function safeOwner(ref: Pick<PrRef, 'owner'>): string {
   return safeSegment(ref.owner);
 }
 
+/** Flatten any name (pass name, reviewer name) into a filename-safe token. */
+export function sanitizeForFilename(name: string): string {
+  return name.replace(/[\\/:*?"<>|]/g, '_');
+}
+
 export const RUNS_ROOT = join(homedir(), '.pr-review', 'runs');
 
 /**

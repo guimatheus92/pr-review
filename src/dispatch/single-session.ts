@@ -1,23 +1,21 @@
 import { assertSafeArg, spawnCli } from '../util/spawn.js';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import type { GatherOutput, ReviewerOutput, SkillDefinition } from '../types.js';
+import type { GatherOutput, ReviewerOutput } from '../types.js';
 import { matchesAny } from '../util/globs.js';
+import { sanitizeForFilename } from '../util/tmp.js';
 import { parseReviewerOutput } from './parsers.js';
-import { normalizeModel, runtimeBinary, runtimeSpawnArgs, taskCall, taskToolName, type Runtime } from './runtime.js';
+import {
+  GENERIC_AGENT,
+  normalizeModel,
+  runtimeBinary,
+  runtimeSpawnArgs,
+  taskCall,
+  taskToolName,
+  type Runtime,
+} from './runtime.js';
 import { appendProgress } from '../util/progress.js';
-import { selectRelevantSkills } from './skill-match.js';
-
-/** Exported so tests can lock the registry against the agents/*.md files. */
-export const BUILTIN_AGENTS = [
-  'pr-review:security',
-  'pr-review:quality',
-  'pr-review:architecture',
-  'pr-review:performance',
-  'pr-review:test-coverage',
-  'pr-review:silent-failure',
-] as const;
-const VERIFIER_AGENT = 'pr-review:verifier';
+import type { IndexEntry, PassRoute, ReviewPass } from './pass-select.js';
 
 const COMPANION_DISPATCH = [
   {
@@ -40,8 +38,14 @@ const COMPANION_SLASH = [
 export interface SingleSessionOptions {
   prUrl: string;
   gather: GatherOutput;
-  skills: SkillDefinition[];
+  /** The review passes to dispatch — every pass is one skill applied by a generic agent. */
+  passes: ReviewPass[];
+  /** On-demand entries listed in skills-index.md (overflow, unmatched, index-only packs). */
+  indexEntries: IndexEntry[];
+  /** The PR's detected stack tags, rendered into pr-context.md. */
+  stackTags: string[];
   installedCompanions: string[];
+  /** Pass names to skip (full `pack/skill` or bare suffix), plus `verifier` / `codex`. */
   skipReviewers: string[];
   outDir: string;
   copilotBinary?: string;
@@ -51,10 +55,8 @@ export interface SingleSessionOptions {
   language?: string;
   /** Which agent CLI hosts the session. Defaults to copilot. */
   runtime?: Runtime;
-  /** When the Codex sibling reviewer will run, route skills to it too. */
+  /** When the Codex sibling reviewer will run, it reads the union skills file too. */
   includeCodex?: boolean;
-  /** Untargeted repo shared-dir skills, listed for on-demand reading (not injected). */
-  catalog?: SkillDefinition[];
 }
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
@@ -76,22 +78,19 @@ export function isTransientOrchestratorFailure(stdout: string, stderr = ''): boo
   return TRANSIENT_ORCHESTRATOR_RE.test(stdout) || TRANSIENT_ORCHESTRATOR_RE.test(stderr);
 }
 
-// Skills are injected verbatim into every matching reviewer's context, so an
-// unbounded body multiplies token cost across the whole fan-out. The caps are
-// a per-run token budget; truncation always warns on stderr.
-const SKILL_BODY_CAP = 16_000;
-const SKILLS_FILE_CAP = 64_000;
+// One pass carries ONE skill body, so the per-body cap is per-file (OWASP cheat
+// sheets run ~25 KB). The union file (codex/companions/verifier) concatenates up
+// to MAX_PASSES bodies, so it gets a larger budget. Truncation always warns.
+export const PASS_BODY_CAP = 48_000;
+export const UNION_FILE_CAP = 96_000;
+// skills-index.md is its own on-demand file — never competes with pr-context.
+const INDEX_CAP = 96_000;
 
-// The catalog lists untargeted skills (name + description + path) for on-demand
-// reading; it lives in pr-context.md so it never competes with the injected-skill
-// budget above. One line per skill; the section is capped separately.
-const CATALOG_DESC_CAP = 200;
-const CATALOG_CAP = 24_000;
+/** The dispatch-side cap mirror: prepareSessionContext is the last line of defence. */
+export const MAX_PASSES = 10;
 
 // ponytail: docs-only heuristic — anything ambiguous dispatches everything.
 const DOCS_ONLY_GLOBS = ['**/*.md', '**/*.markdown', '**/*.txt', '**/*.rst', 'docs/**', 'LICENSE*', 'CHANGELOG*'];
-/** The reviewers that survive a docs-only PR. Must name entries of BUILTIN_AGENTS (locked by test). */
-const DOCS_ONLY_REVIEWERS = ['quality'];
 
 /** Single source of the reviewer output contract — the dispatch prompts and the Codex sibling all quote this. */
 export const OUTPUT_SHAPE =
@@ -103,14 +102,60 @@ export function skillsRulesSentence(skillsPath: string | undefined): string {
     : '';
 }
 
-/** The pseudo-target marking a catalog (on-demand) skill in skillRouting — not a real reviewer. */
-export const CATALOG_TARGET = '(catalog — on-demand)';
+/**
+ * The ONLY review-shaped text this repo still owns: pipeline rules — severity
+ * scale, scope discipline, dedupe hygiene, finding anatomy. Domain knowledge
+ * lives in the synced skills; keep this stack-agnostic (a test greps it).
+ */
+export const PASS_RULES = [
+  `## Pipeline rules`,
+  ``,
+  `- You are a code reviewer applying ONLY the rules in the skill below to this PR's diff. Do not do a general review.`,
+  `- Severity scale: CRITICAL (exploitable or production-breaking today) → HIGH (real risk, fix before merge) → MEDIUM (should fix soon) → LOW (minor) → NIT (tiny suggestion; never blocks).`,
+  `- Only flag code this PR changes. Never flag pre-existing issues in untouched lines.`,
+  `- Do not duplicate anything listed under "Existing Comments" in the PR context.`,
+  `- Every finding carries the exact \`file\` and \`line\` from the diff (new-side line numbers).`,
+  `- In each finding's body, state the rule violated and the concrete fix.`,
+].join('\n');
 
-export interface SkillRoute {
-  skill: string;
-  source: string;
-  targets: string[];
-}
+/**
+ * The verifier survives as a PIPELINE step (reconciliation is process, not
+ * domain knowledge): it reads everyone else's findings and reconciles.
+ * Formerly agents/verifier.md.
+ */
+export const VERIFIER_BRIEF = [
+  `# Review pass: verifier`,
+  ``,
+  `You are the verifier. Other review passes have already produced their findings; the orchestrator tells you where to read them (a \`phase1-findings.json\` file) along with the PR context.`,
+  ``,
+  `Your job is **not** to re-review the diff from scratch. Your job is to spot what the others collectively missed and to reconcile contradictions.`,
+  ``,
+  `## What to look for`,
+  ``,
+  `1. **Cross-cutting issues missed by everyone** — a problem that emerges from the interaction of multiple files but didn't surface in any single pass's scope (e.g. a new endpoint changes a contract that breaks a consumer in a different module).`,
+  `2. **Contradictions** — two passes flagging opposite changes on the same code. Decide which is right and downgrade or override the wrong one.`,
+  `3. **Severity miscalibration** — a finding marked CRITICAL that's actually NIT, or vice versa. Re-rank only when clearly miscalibrated.`,
+  `4. **Missing blast-radius assessment** — a finding correctly identified but underestimating downstream impact (e.g. "minor change to DB schema" when migration steps are missing).`,
+  `5. **Patterns across findings** — if multiple findings of low severity together indicate a systemic issue, flag the systemic issue at appropriate severity.`,
+  `6. **Things every pass skipped because of scope** — orphaned i18n strings, broken cross-package references, schema/code drift.`,
+  ``,
+  `## What NOT to do`,
+  ``,
+  `- Re-flag issues already covered by other passes.`,
+  `- Bikeshed wording of existing findings.`,
+  `- Add nits the other passes chose not to flag.`,
+  `- Block on style preferences.`,
+  ``,
+  `## Severity rules`,
+  ``,
+  `- **CRITICAL** — production-breaking gap NO pass caught, OR contradiction that would cause a wrong fix.`,
+  `- **HIGH** — cross-cutting issue with real impact.`,
+  `- **MEDIUM** — pattern across findings worth surfacing as one issue.`,
+  `- **LOW** — minor reconciliation.`,
+  `- **NIT** — almost never use; the verifier is for substantive gaps.`,
+  ``,
+  `In each finding's body, state which passes/files it spans, why it was missed, and the concrete fix.`,
+].join('\n');
 
 export interface SessionContext {
   contextPath: string;
@@ -118,81 +163,35 @@ export interface SessionContext {
   phase1Path: string;
   orchestratorPrompt: string;
   orchestratorPath: string;
-  dispatchedReviewers: string[];
+  /** Dispatched passes — post-skip, post-triage, post-cap, in dispatch order. */
+  passes: ReviewPass[];
+  /** Pass names dropped by the docs-only triage. */
   triageSkipped: string[];
-  skillRouting: SkillRoute[];
-  /** reviewer/target short name → absolute path of its skills-<name>.md */
+  /** One row per known skill: dispatched / index / skipped. Persisted as passes.json. */
+  routing: PassRoute[];
+  /** pass name → its pass-*.md; plus 'all' → the union file read by codex/companions/verifier. */
   skillsFiles: Record<string, string>;
+  /** verifier.md — present when the verifier will be dispatched. */
+  verifierPath?: string;
 }
 
-function agentToShortName(agentType: string): string {
-  return agentType.replace(/^pr-review:/, '');
+/** Docs-only PRs run only passes pinned to files (glob) or forced — never baseline noise. */
+function triagePasses(passes: ReviewPass[], inScopePaths: string[]): { dispatch: ReviewPass[]; skipped: ReviewPass[] } {
+  const docsOnly = inScopePaths.length > 0 && inScopePaths.every((p) => matchesAny(p, DOCS_ONLY_GLOBS));
+  if (!docsOnly) return { dispatch: passes, skipped: [] };
+  const surviving = passes.filter((p) => p.matchedBy === 'glob' || p.matchedBy === 'forced');
+  return { dispatch: surviving, skipped: passes.filter((p) => !surviving.includes(p)) };
 }
 
-/**
- * A skill applies to a reviewer when (a) its `inject_into` list is empty or
- * names that reviewer, and (b) its `applies_to` globs are empty or match at
- * least one in-scope changed file. Same rule the docs promise.
- */
-function applicableSkills(
-  skills: SkillDefinition[],
-  reviewerShort: string,
-  inScopePaths: string[],
-): SkillDefinition[] {
-  return skills.filter((s) => {
-    if (s.injectInto && s.injectInto.length > 0 && !s.injectInto.includes(reviewerShort)) {
-      return false;
-    }
-    if (s.appliesTo.length === 0) return true;
-    return inScopePaths.some((p) => matchesAny(p, s.appliesTo));
-  });
+/** `--skip <name>` accepts the full `pack/skill` name or the bare skill suffix. */
+function isSkipped(skip: Set<string>, passName: string): boolean {
+  return skip.has(passName) || skip.has(passName.split('/').pop()!);
 }
 
-function renderSkillsFile(target: string, skills: SkillDefinition[]): string {
-  const lines: string[] = [
-    `# Project-Specific Rules (${target})`,
-    ``,
-    `The following project conventions, business rules, and team standards apply to this review. They are authoritative and OVERRIDE generic judgement.`,
-  ];
-  let total = lines.join('\n').length;
-  for (const s of skills) {
-    let body = s.body.trim();
-    if (body.length > SKILL_BODY_CAP) {
-      body = body.slice(0, SKILL_BODY_CAP) + '\n\n[truncated: skill body exceeded 16 KB]';
-      process.stderr.write(
-        `[skills] warning: skill '${s.name}' body exceeds ${SKILL_BODY_CAP} bytes — truncated in reviewer context\n`,
-      );
-    }
-    const section = ['', `## ${s.name}`, s.description ? `_${s.description}_` : '', '', body].join('\n');
-    if (total + section.length > SKILLS_FILE_CAP) {
-      process.stderr.write(
-        `[skills] warning: skills file for '${target}' exceeds ${SKILLS_FILE_CAP} bytes — skill '${s.name}' and later skills omitted\n`,
-      );
-      lines.push('', `[omitted: remaining skills exceeded the ${SKILLS_FILE_CAP}-byte context budget]`);
-      break;
-    }
-    lines.push(section);
-    total += section.length;
-  }
-  return lines.join('\n');
-}
-
-function triageReviewers(shorts: string[], inScopePaths: string[]): { dispatch: string[]; skipped: string[] } {
-  const docsOnly =
-    inScopePaths.length > 0 && inScopePaths.every((p) => matchesAny(p, DOCS_ONLY_GLOBS));
-  if (!docsOnly) return { dispatch: shorts, skipped: [] };
-  const surviving = shorts.filter((s) => DOCS_ONLY_REVIEWERS.includes(s));
-  if (surviving.length === 0) {
-    // e.g. the surviving reviewer was --skip'ed: never triage down to zero.
-    return { dispatch: shorts, skipped: [] };
-  }
-  return {
-    dispatch: surviving,
-    skipped: shorts.filter((s) => !DOCS_ONLY_REVIEWERS.includes(s)),
-  };
-}
-
-function writeContextFile(opts: SingleSessionOptions, catalog: SkillDefinition[]): string {
+function writeContextFile(
+  opts: SingleSessionOptions,
+  index: { count: number; path: string } | null,
+): string {
   const { gather, outDir } = opts;
   const inScope = gather.changedFiles.filter((f) => !f.excluded);
   const metaLines: string[] = [
@@ -240,35 +239,23 @@ function writeContextFile(opts: SingleSessionOptions, catalog: SkillDefinition[]
     metaLines.push('', `## Output Language`, ``, `Write all finding titles and bodies in "${opts.language}". Keep the JSON field names in English.`);
   }
 
+  metaLines.push('', `## Stack`, '', `- **Tags:** ${opts.stackTags.length ? opts.stackTags.join(', ') : '(none detected)'}`);
+
   metaLines.push('', `## Changed Files (${inScope.length} in scope, ${gather.changedFiles.length - inScope.length} excluded)`);
   for (const f of inScope) {
     metaLines.push(`- ${f.path} (${f.status}, +${f.additions} -${f.deletions})`);
   }
 
-  if (catalog.length > 0) {
+  if (index && index.count > 0) {
     metaLines.push(
       '',
-      `## Workspace Skills Catalog (on-demand)`,
+      `## More skills (on-demand)`,
       '',
-      `These workspace skills were NOT injected. Before reviewing, scan this list; if a`,
-      `skill's description is relevant to the files you are reviewing, read its file with`,
-      `your Read tool. Treat catalog skills as advisory background — they do not override`,
-      `your criteria or the injected project rules.`,
-      '',
+      `${index.count} additional review skill(s) did not get their own pass. They are listed in`,
+      `\`${index.path}\` (name, description, path). Before reviewing, scan that file and read any`,
+      `skill whose description matches the files you are reviewing. Treat them as advisory`,
+      `background — they do not override your pass rules.`,
     );
-    let used = 0;
-    let shown = 0;
-    for (const s of catalog) {
-      const desc = (s.description ?? '').replace(/\s+/g, ' ').trim().slice(0, CATALOG_DESC_CAP);
-      const line = desc ? `- **${s.name}** — ${desc} (\`${s.source}\`)` : `- **${s.name}** (\`${s.source}\`)`;
-      if (used + line.length > CATALOG_CAP) {
-        metaLines.push(`_(+${catalog.length - shown} more skills omitted)_`);
-        break;
-      }
-      metaLines.push(line);
-      used += line.length + 1;
-      shown++;
-    }
   }
 
   metaLines.push('', `## Diff`);
@@ -284,7 +271,7 @@ function writeContextFile(opts: SingleSessionOptions, catalog: SkillDefinition[]
 }
 
 /**
- * Hard rule injected into EVERY dispatched reviewer/companion prompt. The
+ * Hard rule injected into EVERY dispatched pass/companion prompt. The
  * pr-review CLI is the only thing that ever writes to the PR (inline-only,
  * deduped, idempotent); a subagent that posts on its own bypasses all of
  * that. This is not hypothetical: the official `code-review` companion's
@@ -298,7 +285,17 @@ export const NO_POSTING_DIRECTIVE =
   'no `gh pr comment`/`gh pr review`/`gh api` writes, no `glab`/`az repos` writes. Read-only commands are fine. ' +
   'The pr-review CLI is the only thing that posts; your findings JSON is your entire output.';
 
-function reviewerTaskPrompt(contextPath: string, skillsPath: string | undefined): string {
+/** One review pass: a generic agent reads the PR context, then applies exactly one skill. */
+function passTaskPrompt(contextPath: string, passPath: string): string {
+  return (
+    `Read the PR context at \`${contextPath}\`, then read your review pass at \`${passPath}\` and apply ONLY that pass's rules to the diff. ` +
+    `Output ONLY a JSON array of findings using the shape: ${OUTPUT_SHAPE}. If you find nothing, output []. No prose. No fences. ` +
+    NO_POSTING_DIRECTIVE
+  );
+}
+
+/** Companion agents keep their own criteria; the union skills file is optional context. */
+function companionTaskPrompt(contextPath: string, skillsPath: string | undefined): string {
   return (
     `Read the PR context at \`${contextPath}\`.${skillsRulesSentence(skillsPath)} Apply your review criteria. ` +
     `Output ONLY a JSON array of findings using the shape: ${OUTPUT_SHAPE}. If you find nothing, output []. No prose. No fences. ` +
@@ -306,10 +303,81 @@ function reviewerTaskPrompt(contextPath: string, skillsPath: string | undefined)
   );
 }
 
+function renderPassFile(pass: ReviewPass): string {
+  let body = pass.body.trim();
+  if (body.length > PASS_BODY_CAP) {
+    body = body.slice(0, PASS_BODY_CAP) + `\n\n[truncated: skill body exceeded ${PASS_BODY_CAP} bytes]`;
+    process.stderr.write(
+      `[skills] warning: pass '${pass.name}' body exceeds ${PASS_BODY_CAP} bytes — truncated\n`,
+    );
+  }
+  return [
+    `# Review pass: ${pass.name}`,
+    pass.description ? `_${pass.description}_` : '',
+    ``,
+    `Source: \`${pass.source}\` (relative references/ links resolve from its directory)`,
+    ``,
+    PASS_RULES,
+    ``,
+    `## Skill`,
+    ``,
+    body,
+  ].join('\n');
+}
+
+/** The union of every dispatched pass body — read by codex, companions, and the verifier. */
+function renderUnionFile(passes: ReviewPass[]): string {
+  const lines: string[] = [
+    `# Review skills for this PR (union of all passes)`,
+    ``,
+    `Reference material for this review. Each section is one skill another pass applies in detail.`,
+  ];
+  let total = lines.join('\n').length;
+  for (const p of passes) {
+    const body = p.body.trim().slice(0, PASS_BODY_CAP);
+    const section = ['', `## ${p.name}`, p.description ? `_${p.description}_` : '', '', body].join('\n');
+    if (total + section.length > UNION_FILE_CAP) {
+      process.stderr.write(
+        `[skills] warning: union skills file exceeds ${UNION_FILE_CAP} bytes — '${p.name}' and later skills omitted\n`,
+      );
+      lines.push('', `[omitted: remaining skills exceeded the ${UNION_FILE_CAP}-byte context budget]`);
+      break;
+    }
+    lines.push(section);
+    total += section.length;
+  }
+  return lines.join('\n');
+}
+
+function renderIndexFile(entries: IndexEntry[]): string {
+  const lines: string[] = [
+    `# On-demand skill index`,
+    ``,
+    `Skills available to this review that did not get their own pass. Read any whose`,
+    `description matches the files under review (advisory background only).`,
+    ``,
+  ];
+  let used = 0;
+  let shown = 0;
+  for (const e of entries) {
+    const desc = e.description ? ` — ${e.description}` : '';
+    const line = `- **${e.name}**${desc} (\`${e.source}\`)`;
+    if (used + line.length > INDEX_CAP) {
+      lines.push(`_(+${entries.length - shown} more skills omitted)_`);
+      break;
+    }
+    lines.push(line);
+    used += line.length + 1;
+    shown++;
+  }
+  return lines.join('\n');
+}
+
 /**
- * Writes pr-context.md, the per-reviewer skills-*.md files, and the
- * orchestrator prompt. Exported so `review --context-only` can produce and
- * inspect exactly what reviewers would receive without spawning copilot.
+ * Writes pr-context.md, one pass-*.md per dispatched pass, the union and index
+ * files, verifier.md, and the orchestrator prompt. Exported so `review
+ * --context-only` can produce and inspect exactly what the passes would
+ * receive without spawning the runtime.
  */
 export function prepareSessionContext(opts: SingleSessionOptions): SessionContext {
   mkdirSync(opts.outDir, { recursive: true });
@@ -317,104 +385,76 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
   const findingsPath = resolve(opts.outDir, 'single-session-findings.json');
   const phase1Path = resolve(opts.outDir, 'phase1-findings.json');
 
-  const inScopeFiles = opts.gather.changedFiles.filter((f) => !f.excluded);
-  const inScopePaths = inScopeFiles.map((f) => f.path);
-
-  // Catalog skills whose name/description matches the changed files are promoted to
-  // injected (force-fed into every reviewer); the rest stay in the on-demand catalog.
-  const { matched, rest } = selectRelevantSkills(opts.catalog ?? [], inScopeFiles);
-  const injectedSkills = [...opts.skills, ...matched];
-
-  writeContextFile(opts, rest);
+  const inScopePaths = opts.gather.changedFiles.filter((f) => !f.excluded).map((f) => f.path);
 
   const skip = new Set(opts.skipReviewers);
-  const activeShorts = BUILTIN_AGENTS.map(agentToShortName).filter((s) => !skip.has(s));
-  const { dispatch: dispatchedReviewers, skipped: triageSkipped } = triageReviewers(activeShorts, inScopePaths);
+  const skippedByFlag = opts.passes.filter((p) => isSkipped(skip, p.name));
+  const afterSkip = opts.passes.filter((p) => !isSkipped(skip, p.name));
+  const { dispatch: afterTriage, skipped: triaged } = triagePasses(afterSkip, inScopePaths);
+  // Last line of defence — the selection module already caps, but this file owns the token budget.
+  const passes = afterTriage.slice(0, MAX_PASSES);
+  const capOverflow = afterTriage.slice(MAX_PASSES);
   const wantVerifier = !skip.has('verifier');
 
-  // Route skills: per built-in reviewer; one shared file for companions
-  // (skills without inject_into only); verifier gets the union.
-  const routing = new Map<string, Set<string>>();
-  const skillsFiles = new Map<string, string>();
-  const noteRoute = (skill: SkillDefinition, target: string) => {
-    if (!routing.has(skill.name)) routing.set(skill.name, new Set());
-    routing.get(skill.name)!.add(target);
-  };
-  const writeSkills = (target: string, list: SkillDefinition[]): string | undefined => {
-    if (list.length === 0) return undefined;
-    const path = resolve(opts.outDir, `skills-${target}.md`);
-    writeFileSync(path, renderSkillsFile(target, list), 'utf8');
-    for (const s of list) noteRoute(s, target);
-    return path;
-  };
-
-  const verifierUnion = new Map<string, SkillDefinition>();
-  for (const short of dispatchedReviewers) {
-    const list = applicableSkills(injectedSkills, short, inScopePaths);
-    const path = writeSkills(short, list);
-    if (path) skillsFiles.set(short, path);
-    for (const s of list) verifierUnion.set(s.name, s);
+  const indexEntries: IndexEntry[] = [
+    ...capOverflow.map((p) => ({
+      name: p.name,
+      description: p.description ?? '',
+      source: p.source,
+      tags: [],
+    })),
+    ...opts.indexEntries,
+  ];
+  const indexPath = resolve(opts.outDir, 'skills-index.md');
+  if (indexEntries.length > 0) {
+    writeFileSync(indexPath, renderIndexFile(indexEntries), 'utf8');
   }
 
-  const companionsActive =
-    opts.invokeCompanions &&
-    (COMPANION_DISPATCH.some((c) => opts.installedCompanions.includes(c.pluginId)) ||
-      COMPANION_SLASH.some((c) => opts.installedCompanions.includes(c.pluginId)));
-  if (companionsActive) {
-    const list = applicableSkills(
-      injectedSkills.filter((s) => !s.injectInto || s.injectInto.length === 0),
-      'companions',
-      inScopePaths,
-    );
-    const path = writeSkills('companions', list);
-    if (path) skillsFiles.set('companions', path);
-    for (const s of list) verifierUnion.set(s.name, s);
+  writeContextFile(opts, indexEntries.length > 0 ? { count: indexEntries.length, path: indexPath } : null);
+
+  const skillsFiles: Record<string, string> = {};
+  for (const p of passes) {
+    const path = resolve(opts.outDir, `pass-${sanitizeForFilename(p.name)}.md`);
+    writeFileSync(path, renderPassFile(p), 'utf8');
+    skillsFiles[p.name] = path;
+  }
+  if (passes.length > 0) {
+    const unionPath = resolve(opts.outDir, 'skills-all.md');
+    writeFileSync(unionPath, renderUnionFile(passes), 'utf8');
+    skillsFiles['all'] = unionPath;
   }
 
-  if (opts.includeCodex) {
-    const list = applicableSkills(injectedSkills, 'codex', inScopePaths);
-    const path = writeSkills('codex', list);
-    if (path) skillsFiles.set('codex', path);
-    for (const s of list) verifierUnion.set(s.name, s);
-  }
-
+  let verifierPath: string | undefined;
   if (wantVerifier) {
-    for (const s of applicableSkills(injectedSkills, 'verifier', inScopePaths)) {
-      verifierUnion.set(s.name, s);
-    }
-    const path = writeSkills('verifier', [...verifierUnion.values()]);
-    if (path) skillsFiles.set('verifier', path);
+    verifierPath = resolve(opts.outDir, 'verifier.md');
+    writeFileSync(verifierPath, VERIFIER_BRIEF, 'utf8');
   }
 
-  const skillRouting: SkillRoute[] = [
-    ...injectedSkills.map((s) => ({
-      skill: s.name,
-      source: s.source,
-      targets: [...(routing.get(s.name) ?? [])],
-    })),
-    ...rest.map((s) => ({
-      skill: s.name,
-      source: s.source,
-      targets: [CATALOG_TARGET],
-    })),
+  const routing: PassRoute[] = [
+    ...passes.map((p) => ({ name: p.name, source: p.source, matchedBy: p.matchedBy as PassRoute['matchedBy'] })),
+    ...capOverflow.map((p) => ({ name: p.name, source: p.source, matchedBy: 'index' as const })),
+    ...opts.indexEntries.map((e) => ({ name: e.name, source: e.source, matchedBy: 'index' as const })),
+    ...[...skippedByFlag, ...triaged].map((p) => ({ name: p.name, source: p.source, matchedBy: 'skipped' as const })),
   ];
   // Persist the routing so a --resume (which never re-runs prepareSessionContext) can
   // still render the Skills section. Best-effort: this artifact is display-only, so a
   // failed write must never take down a run that would otherwise review and post.
   try {
-    writeFileSync(resolve(opts.outDir, 'skill-routing.json'), JSON.stringify(skillRouting), 'utf8');
+    writeFileSync(resolve(opts.outDir, 'passes.json'), JSON.stringify(routing), 'utf8');
   } catch (err) {
-    process.stderr.write(`[single-session] could not write skill-routing.json: ${(err as Error).message}\n`);
+    process.stderr.write(`[single-session] could not write passes.json: ${(err as Error).message}\n`);
   }
 
+  const triageSkipped = triaged.map((p) => p.name);
   const orchestratorPrompt = buildOrchestratorPrompt(opts, {
     contextPath,
     findingsPath,
     phase1Path,
-    dispatchedReviewers,
+    passes,
     triageSkipped,
     skillsFiles,
     wantVerifier,
+    verifierPath,
   });
   const orchestratorPath = resolve(opts.outDir, 'orchestrator-prompt.md');
   writeFileSync(orchestratorPath, orchestratorPrompt, 'utf8');
@@ -425,10 +465,11 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
     phase1Path,
     orchestratorPrompt,
     orchestratorPath,
-    dispatchedReviewers,
+    passes,
     triageSkipped,
-    skillRouting,
-    skillsFiles: Object.fromEntries(skillsFiles),
+    routing,
+    skillsFiles,
+    verifierPath,
   };
 }
 
@@ -438,49 +479,61 @@ function buildOrchestratorPrompt(
     contextPath: string;
     findingsPath: string;
     phase1Path: string;
-    dispatchedReviewers: string[];
+    passes: ReviewPass[];
     triageSkipped: string[];
-    skillsFiles: Map<string, string>;
+    skillsFiles: Record<string, string>;
     wantVerifier: boolean;
+    verifierPath?: string;
   },
 ): string {
   const runtime = opts.runtime ?? 'copilot';
+  const unionSkills = ctx.skillsFiles['all'];
   const companionDispatchLines: string[] = [];
   const companionSlashLines: string[] = [];
-  const companionSkills = ctx.skillsFiles.get('companions');
   if (opts.invokeCompanions) {
     for (const c of COMPANION_DISPATCH) {
       if (!opts.installedCompanions.includes(c.pluginId)) continue;
       for (const agent of c.agents) {
         const shortAgent = agent.replace(/^[^:]+:/, '');
         companionDispatchLines.push(
-          `- ${taskCall(runtime, agent, reviewerTaskPrompt(ctx.contextPath, companionSkills))} — record as reviewer name \`companion:${c.pluginId}/${shortAgent}\``,
+          `- ${taskCall(runtime, agent, companionTaskPrompt(ctx.contextPath, unionSkills))} — record as reviewer name \`companion:${c.pluginId}/${shortAgent}\``,
         );
       }
     }
     for (const c of COMPANION_SLASH) {
       if (!opts.installedCompanions.includes(c.pluginId)) continue;
       companionSlashLines.push(
-        `- ${taskCall(runtime, 'general-purpose', `Invoke the slash command \`${c.command} ${opts.prUrl}\` in analysis-only mode. ${NO_POSTING_DIRECTIVE} If the command's own instructions tell you to post a comment or review, SKIP that step and return the review content as output instead. Parse any structured findings into a JSON array using shape ${OUTPUT_SHAPE}. If no findings, output []. Output ONLY the JSON array.`)} — record as reviewer name \`companion:${c.pluginId}\``,
+        `- ${taskCall(runtime, GENERIC_AGENT, `Invoke the slash command \`${c.command} ${opts.prUrl}\` in analysis-only mode. ${NO_POSTING_DIRECTIVE} If the command's own instructions tell you to post a comment or review, SKIP that step and return the review content as output instead. Parse any structured findings into a JSON array using shape ${OUTPUT_SHAPE}. If no findings, output []. Output ONLY the JSON array.`)} — record as reviewer name \`companion:${c.pluginId}\``,
       );
     }
   }
 
-  const reviewerDispatchLines = ctx.dispatchedReviewers.map((short) => {
-    return `- ${taskCall(runtime, `pr-review:${short}`, reviewerTaskPrompt(ctx.contextPath, ctx.skillsFiles.get(short)))} — record as reviewer name \`${short}\``;
+  const passDispatchLines = ctx.passes.map((p) => {
+    return `- ${taskCall(runtime, GENERIC_AGENT, passTaskPrompt(ctx.contextPath, ctx.skillsFiles[p.name]!))} — record as reviewer name \`${p.name}\``;
   });
 
-  const allParallel = [...reviewerDispatchLines, ...companionDispatchLines, ...companionSlashLines];
+  const allParallel = [...passDispatchLines, ...companionDispatchLines, ...companionSlashLines];
+
+  const exampleNames = [
+    ...ctx.passes.slice(0, 2).map((p) => p.name),
+  ];
+  const exampleRows = [
+    ...exampleNames.map((n) => `    { "name": "${n}",  "findings": [ <that pass's array> ] },`),
+    `    ...`,
+    `    { "name": "companion:pr-review-toolkit/code-reviewer", "findings": [...] },`,
+    `    ...`,
+    `    { "name": "verifier",  "findings": [ <verifier's array> ] }`,
+  ];
 
   const lines = [
-    `You are the pr-review orchestrator. Your ONLY job is to coordinate a comprehensive pull request review by dispatching specialized subagents in parallel, collecting their JSON findings, then writing a single consolidated JSON file.`,
+    `You are the pr-review orchestrator. Your ONLY job is to coordinate a comprehensive pull request review by dispatching review passes in parallel, collecting their JSON findings, then writing a single consolidated JSON file.`,
     ``,
     `## Input`,
     `- PR context: \`${ctx.contextPath}\` (already prepared by the Node CLI; do not refetch or modify)`,
     `- Do NOT read the PR context file yourself — only the subagents read it. Your context must stay lean.`,
     `- ${NO_POSTING_DIRECTIVE} This binds you AND every subagent you dispatch.`,
     ``,
-    `## Phase 1 — Parallel reviewer dispatch`,
+    `## Phase 1 — Parallel pass dispatch`,
     ``,
     `Use the \`${taskToolName(runtime)}\` tool to launch ALL of the following in parallel. Do not wait between them; dispatch them as a batch:`,
     ``,
@@ -492,7 +545,7 @@ function buildOrchestratorPrompt(
   if (ctx.triageSkipped.length > 0) {
     lines.push(
       ``,
-      `(Reviewers ${ctx.triageSkipped.join(', ')} were skipped by the CLI because this PR only touches documentation files.)`,
+      `(Passes ${ctx.triageSkipped.join(', ')} were skipped by the CLI because this PR only touches documentation files — only file-scoped passes run.)`,
     );
   }
 
@@ -500,7 +553,7 @@ function buildOrchestratorPrompt(
     ``,
     `## Phase 2 — Write the findings files (do this the moment Phase 1 returns)`,
     ``,
-    `Once ALL Phase 1 subagents return, assemble their collected arrays into the exact JSON shape shown in Phase 4 below (a \`reviewers\` array; one entry per dispatched reviewer, empty arrays included).`,
+    `Once ALL Phase 1 subagents return, assemble their collected arrays into the exact JSON shape shown in Phase 4 below (a \`reviewers\` array; one entry per dispatched pass, empty arrays included).`,
     ``,
     `Write that SAME JSON to BOTH of these files immediately — before you even consider the verifier:`,
     `1. \`${ctx.phase1Path}\``,
@@ -510,15 +563,14 @@ function buildOrchestratorPrompt(
   );
 
   if (ctx.wantVerifier) {
-    const verifierSkills = ctx.skillsFiles.get('verifier');
-    const verifierRules = skillsRulesSentence(verifierSkills);
+    const verifierRules = skillsRulesSentence(unionSkills);
     lines.push(
       ``,
       `## Phase 3 — Verifier (conditional)`,
       ``,
       `Dispatch the verifier ONLY if at least one Phase 1 finding has severity CRITICAL or HIGH. Otherwise skip it — the files you wrote in Phase 2 are already final (they record reviewer \`verifier\` with an empty findings array).`,
       ``,
-      `- ${taskCall(runtime, VERIFIER_AGENT, `Read the PR context at \`${ctx.contextPath}\` and the Phase 1 findings at \`${ctx.phase1Path}\`.${verifierRules} Output ONLY a JSON array of cross-cutting issues, contradictions, or gaps that the other reviewers missed. Use shape ${OUTPUT_SHAPE}. If nothing to add, output []. ${NO_POSTING_DIRECTIVE}`)} — record as reviewer name \`verifier\``,
+      `- ${taskCall(runtime, GENERIC_AGENT, `Read your role brief at \`${ctx.verifierPath}\`, the PR context at \`${ctx.contextPath}\`, and the Phase 1 findings at \`${ctx.phase1Path}\`.${verifierRules} Output ONLY a JSON array of cross-cutting issues, contradictions, or gaps that the other passes missed. Use shape ${OUTPUT_SHAPE}. If nothing to add, output []. ${NO_POSTING_DIRECTIVE}`)} — record as reviewer name \`verifier\``,
     );
   }
 
@@ -528,7 +580,7 @@ function buildOrchestratorPrompt(
     ``,
     `The consolidated output file is \`${ctx.findingsPath}\` — you already wrote it in Phase 2.`,
     ctx.wantVerifier
-      ? `If — and ONLY if — you dispatched the verifier in Phase 3 and it returned findings, REWRITE \`${ctx.findingsPath}\` so its \`verifier\` entry carries them alongside the Phase 1 reviewers. Otherwise leave the Phase 2 file untouched.`
+      ? `If — and ONLY if — you dispatched the verifier in Phase 3 and it returned findings, REWRITE \`${ctx.findingsPath}\` so its \`verifier\` entry carries them alongside the Phase 1 passes. Otherwise leave the Phase 2 file untouched.`
       : `Leave the Phase 2 file untouched.`,
     ``,
     `Exact JSON shape (use Write or apply_patch tool — no shell redirection):`,
@@ -536,12 +588,7 @@ function buildOrchestratorPrompt(
     '```json',
     `{`,
     `  "reviewers": [`,
-    `    { "name": "security",  "findings": [ <security agent's array> ] },`,
-    `    { "name": "quality",   "findings": [ <quality agent's array> ] },`,
-    `    ...`,
-    `    { "name": "companion:pr-review-toolkit/code-reviewer", "findings": [...] },`,
-    `    ...`,
-    `    { "name": "verifier",  "findings": [ <verifier's array> ] }`,
+    ...exampleRows,
     `  ]`,
     `}`,
     '```',
@@ -549,8 +596,8 @@ function buildOrchestratorPrompt(
     `Critical rules:`,
     `- Do NOT modify, re-rank, or summarize findings. Copy them verbatim from each subagent's output into the array under its reviewer name.`,
     `- If a subagent returned non-JSON, store its raw output as a single finding with severity "LOW", title "Unparseable output from <name>", and body = the raw output.`,
-    `- Include EVERY reviewer that was dispatched, even ones with empty arrays.`,
-    `- Once \`${ctx.findingsPath}\` reflects all dispatched reviewers, reply with the single word \`DONE\`. Nothing else.`,
+    `- Include EVERY pass that was dispatched, even ones with empty arrays.`,
+    `- Once \`${ctx.findingsPath}\` reflects all dispatched passes, reply with the single word \`DONE\`. Nothing else.`,
   );
 
   return lines.join('\n');
@@ -591,7 +638,7 @@ export function parseFindingsFile(path: string, model: string, durationMs: numbe
  * The verifier is a conditional pass (only on CRITICAL/HIGH), so its absence is
  * normal. But when severe findings ARE present and no verifier entry made it
  * into the salvaged output, the orchestrator ended its turn before reconciling
- * — say so, because cross-reviewer duplicates/contradictions it would have
+ * — say so, because cross-pass duplicates/contradictions it would have
  * merged can survive into the posted review.
  */
 function warnIfVerifierMissing(outputs: ReviewerOutput[]): void {
@@ -603,7 +650,7 @@ function warnIfVerifierMissing(outputs: ReviewerOutput[]): void {
   if (hasSevere) {
     process.stderr.write(
       `[single-session] warning: CRITICAL/HIGH findings present but no verifier reconciliation ran — ` +
-        `cross-reviewer duplicates may survive (re-run, or loosen --dedupe-mode, to reconcile)\n`,
+        `cross-pass duplicates may survive (re-run, or loosen --dedupe-mode, to reconcile)\n`,
     );
   }
 }
@@ -619,7 +666,7 @@ export async function runSingleSession(
   const runtime = opts.runtime ?? 'copilot';
   const model = normalizeModel(runtime, opts.defaultModel ?? 'claude-opus-4.8');
   process.stderr.write(
-    `[single-session] dispatching orchestrator (runtime=${runtime}, ${ctx.dispatchedReviewers.length} built-in agents` +
+    `[single-session] dispatching orchestrator (runtime=${runtime}, ${ctx.passes.length} pass(es)` +
       (ctx.triageSkipped.length ? `, ${ctx.triageSkipped.length} skipped by triage: ${ctx.triageSkipped.join(', ')}` : '') +
       `, companions=${opts.invokeCompanions ? 'on' : 'off'}, model=${model})\n`,
   );

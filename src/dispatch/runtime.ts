@@ -47,6 +47,13 @@ export function runtimeSpawnArgs(runtime: Runtime, model: string, addDir: string
   return ['--model', model, '--allow-all-tools', '--no-ask-user', '--add-dir', addDir, '-s'];
 }
 
+/**
+ * The generic subagent type both runtimes accept — every review pass, the
+ * verifier, and the companion slash path dispatch as this type. There are no
+ * registered reviewer agents any more.
+ */
+export const GENERIC_AGENT = 'general-purpose';
+
 /** How the runtime spells its subagent-dispatch tool. */
 export function taskCall(runtime: Runtime, agentType: string, prompt: string): string {
   if (runtime === 'claude') {

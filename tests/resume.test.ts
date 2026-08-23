@@ -271,7 +271,7 @@ test('resume — a partial prior post (posted < attempted) is retried, not skipp
   }
 });
 
-test('resume — Skills section: omitted when skill-routing.json is absent, rendered when present', async () => {
+test('resume — Skills section: omitted when passes.json is absent, rendered when present', async () => {
   const noRouting = seedRun(ONE);
   try {
     const r = await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: noRouting, publish: false, dryRun: true, provider: fakeProvider().provider });
@@ -283,24 +283,24 @@ test('resume — Skills section: omitted when skill-routing.json is absent, rend
   const withRouting = seedRun(ONE);
   try {
     writeFileSync(
-      join(withRouting, 'skill-routing.json'),
-      JSON.stringify([{ skill: 'sec-rules', source: 's', targets: ['security', 'verifier'] }]),
+      join(withRouting, 'passes.json'),
+      JSON.stringify([{ name: 'owasp/nodejs-security', source: 's', matchedBy: 'tag' }]),
       'utf8',
     );
     const r = await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: withRouting, publish: false, dryRun: true, provider: fakeProvider().provider });
     assert.ok(r.summary.includes('## Skills'), 'routing artifact present → Skills section rendered');
-    assert.ok(r.summary.includes('| sec-rules | security |'), 'injected skill row present on resume');
+    assert.ok(r.summary.includes('| owasp/nodejs-security | tag |'), 'pass row present on resume');
   } finally {
     rmSync(withRouting, { recursive: true, force: true });
   }
 });
 
-test('resume — a corrupt or wrong-shape skill-routing.json degrades, never aborts the resume', async () => {
-  // Wrong shape parses fine but would crash summarizeSkills — AFTER posting — if unvalidated.
-  for (const bad of ['{"skill":', '{}', 'null', '[{"skill":"x"}]']) {
+test('resume — a corrupt or wrong-shape passes.json degrades, never aborts the resume', async () => {
+  // Wrong shape parses fine but would crash summarizePasses — AFTER posting — if unvalidated.
+  for (const bad of ['{"name":', '{}', 'null', '[{"name":"x"}]', '[{"matchedBy":"glob"}]']) {
     const dir = seedRun(ONE);
     try {
-      writeFileSync(join(dir, 'skill-routing.json'), bad, 'utf8');
+      writeFileSync(join(dir, 'passes.json'), bad, 'utf8');
       const r = await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: false, dryRun: true, provider: fakeProvider().provider });
       assert.match(r.summary, /PR Review Summary/, `resume completed for ${bad}`);
       assert.ok(!r.summary.includes('## Skills'), `Skills section omitted for ${bad}`);

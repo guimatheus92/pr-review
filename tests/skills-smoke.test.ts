@@ -5,24 +5,22 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from '../src/config.js';
 import { loadAll } from '../src/plugins/loader.js';
+import { selectPasses } from '../src/dispatch/pass-select.js';
 import { prepareSessionContext } from '../src/dispatch/single-session.js';
 import type { GatherOutput } from '../src/types.js';
 
-// End-to-end smoke test for the "skills as context" core value: a project-specific
+// End-to-end smoke test for the "skills as passes" core value: a project-specific
 // business rule — deliberately UNRELATED to any stack — authored in .claude/skills/
-// must be discovered from disk, routed by its frontmatter, and injected verbatim into
-// exactly the targeted reviewers' context files. This chains loadAll (discovery) →
-// prepareSessionContext (routing/injection), the two halves the other tests cover only
-// in isolation. It is fully deterministic: no network, no runtime, no LLM.
+// must be discovered from disk, selected as its own review pass, and written verbatim
+// into that pass's context file. This chains loadAll (discovery) → selectPasses
+// (selection) → prepareSessionContext (files/prompt) — the three halves the other
+// tests cover only in isolation. Fully deterministic: no network, no runtime, no LLM.
 
-// A rule with zero connection to this repo's TypeScript/Node stack — so any injection
-// of its text PROVES the skill pipeline is stack-agnostic and content-driven.
 const RULE_BODY = `---
 name: db-access-layer
 description: Mandatory data-access architecture rule for this repo
 applies_to:
   - "src/**/*.ts"
-inject_into: [architecture, security]
 ---
 # Database access rule (MANDATORY — project-specific)
 
@@ -62,56 +60,52 @@ function fixtureGather(paths: string[]): GatherOutput {
   };
 }
 
-test('skills smoke — a stack-agnostic business rule flows disk → discovery → injection into the targeted reviewers only', () => {
+test('skills smoke — a repo business rule flows disk → discovery → its own review pass', () => {
   const cwd = mkdtempSync(join(tmpdir(), 'pr-review-smoke-'));
-  const home = mkdtempSync(join(tmpdir(), 'pr-review-smoke-home-')); // empty → no global skills leak
+  const home = mkdtempSync(join(tmpdir(), 'pr-review-smoke-home-')); // empty → no global skills, no packs
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-smoke-out-'));
   try {
     const skillsDir = join(cwd, '.claude', 'skills');
     mkdirSync(skillsDir, { recursive: true });
     writeFileSync(join(skillsDir, 'db-access-layer.md'), RULE_BODY);
 
-    // Discovery: autodiscover reads skills from the tool dir (.claude/skills); the rule
-    // is targeted (inject_into) so it injects. homeOverride keeps the dev's real skills out.
     const { config } = loadConfig({ cwd, homeOverride: home });
-    const { skills } = loadAll({ cwd, config, skillsOnly: true, home });
+    const gather = fixtureGather(['src/orders/service.ts']);
+    const loaded = loadAll({ cwd, config, skillsOnly: true, home });
+    assert.ok(loaded.skills.some((s) => s.name === 'db-access-layer'), 'targeted rule discovered');
+    assert.equal(loaded.packSkills.length, 0, 'no pack checkouts in the empty test home');
 
-    const rule = skills.find((s) => s.name === 'db-access-layer');
-    assert.ok(rule, 'the targeted rule must be discovered and injected');
-    assert.deepEqual(rule!.injectInto, ['architecture', 'security']);
-    assert.deepEqual(rule!.appliesTo, ['src/**/*.ts']);
+    const inScopeFiles = gather.changedFiles.filter((f) => !f.excluded);
+    const selection = selectPasses({
+      skills: loaded.skills,
+      catalog: loaded.catalog,
+      packSkills: loaded.packSkills,
+      inScopeFiles,
+      stackTags: ['typescript'],
+      baseline: [],
+    });
+    const rulePass = selection.passes.find((p) => p.name === 'db-access-layer');
+    assert.ok(rulePass, 'the rule becomes its own review pass');
+    assert.equal(rulePass!.matchedBy, 'glob');
 
-    // Injection: feed the DISCOVERED skills straight into prepareSessionContext (the
-    // real integration — a shape drift between loader and dispatch would break here).
     const ctx = prepareSessionContext({
       prUrl: 'https://github.com/o/r/pull/1',
-      gather: fixtureGather(['src/orders/service.ts']), // matches applies_to → all reviewers dispatched
-      skills,
+      gather,
+      passes: selection.passes,
+      indexEntries: selection.indexEntries,
+      stackTags: selection.stackTags,
       installedCompanions: [],
       skipReviewers: [],
       outDir,
       invokeCompanions: false,
     });
 
-    const bodyOf = (reviewer: string) => {
-      const f = join(outDir, `skills-${reviewer}.md`);
-      return existsSync(f) ? readFileSync(f, 'utf8') : '';
-    };
     const CITE = 'AccountRepository'; // distinctive, stack-agnostic phrase from the rule
-
-    // Reaches exactly the targeted reviewers + the verifier union.
-    assert.ok(bodyOf('architecture').includes(CITE), 'inject_into architecture');
-    assert.ok(bodyOf('security').includes(CITE), 'inject_into security');
-    assert.ok(bodyOf('verifier').includes(CITE), 'verifier gets the union');
-
-    // Never leaks to reviewers outside inject_into.
-    assert.ok(!bodyOf('quality').includes(CITE), 'inject_into filter keeps it out of quality');
-    assert.ok(!bodyOf('performance').includes(CITE), 'inject_into filter keeps it out of performance');
-
-    // Routing table reflects the same targeting.
-    const route = ctx.skillRouting.find((r) => r.skill === 'db-access-layer');
-    assert.ok(route, 'routing table lists the rule');
-    assert.deepEqual(route!.targets.filter((t) => t !== 'verifier').sort(), ['architecture', 'security']);
+    const passFile = readFileSync(ctx.skillsFiles['db-access-layer']!, 'utf8');
+    assert.ok(passFile.includes(CITE), 'rule body written into its pass file');
+    assert.ok(readFileSync(ctx.skillsFiles['all']!, 'utf8').includes(CITE), 'union carries it for codex/verifier');
+    assert.ok(ctx.orchestratorPrompt.includes('record as reviewer name `db-access-layer`'));
+    assert.equal(ctx.routing.find((r) => r.name === 'db-access-layer')?.matchedBy, 'glob');
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
@@ -119,43 +113,56 @@ test('skills smoke — a stack-agnostic business rule flows disk → discovery �
   }
 });
 
-test('catalog smoke — an untargeted .claude/skills skill flows disk → catalog → pr-context.md, never into skills files', () => {
+test('index smoke — an unmatched untargeted skill flows disk → index file, never into a pass; inject_into warns deprecated', () => {
   const cwd = mkdtempSync(join(tmpdir(), 'pr-review-smoke-'));
   const home = mkdtempSync(join(tmpdir(), 'pr-review-smoke-home-'));
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-smoke-out-'));
+  const lines: string[] = [];
+  const orig = process.stderr.write.bind(process.stderr);
+  (process.stderr as unknown as { write: (s: string) => boolean }).write = (s: string) => {
+    lines.push(s);
+    return true;
+  };
   try {
     const claudeDir = join(cwd, '.claude', 'skills');
     mkdirSync(claudeDir, { recursive: true });
-    // Untargeted (no applies_to/inject_into) → catalog, not injection. The body carries
-    // a distinctive marker that must never reach any injected context file.
+    // Untargeted and unrelated to the changed files → on-demand index, not a pass.
     writeFileSync(
-      join(claudeDir, 'pp-planos.md'),
-      '---\ndescription: plan and limit rules for stores\n---\nCATALOG_ONLY_MARKER — read on demand.\n',
+      join(claudeDir, 'video-helper.md'),
+      '---\ndescription: video captions and overlays helper\n---\nINDEX_ONLY_MARKER — read on demand.\n',
     );
 
     const { config } = loadConfig({ cwd, homeOverride: home });
-    const { skills, catalog } = loadAll({ cwd, config, skillsOnly: true, home });
-    assert.ok(!skills.some((s) => s.name === 'pp-planos'), 'untargeted repo skill is not injected');
-    assert.deepEqual(catalog.map((s) => s.name), ['pp-planos'], 'it lands in the catalog');
+    const gather = fixtureGather(['src/orders/service.ts']);
+    const loaded = loadAll({ cwd, config, skillsOnly: true, home });
+    const selection = selectPasses({
+      skills: loaded.skills,
+      catalog: loaded.catalog,
+      packSkills: loaded.packSkills,
+      inScopeFiles: gather.changedFiles,
+      stackTags: ['typescript'],
+      baseline: [],
+    });
+    assert.ok(!selection.passes.some((p) => p.name === 'video-helper'), 'unmatched skill is not a pass');
+    assert.ok(selection.indexEntries.some((e) => e.name === 'video-helper'), 'it lands in the index');
 
     const ctx = prepareSessionContext({
       prUrl: 'https://github.com/o/r/pull/1',
-      gather: fixtureGather(['src/orders/service.ts']),
-      skills,
-      catalog,
+      gather,
+      passes: selection.passes,
+      indexEntries: selection.indexEntries,
+      stackTags: selection.stackTags,
       installedCompanions: [],
       skipReviewers: [],
       outDir,
       invokeCompanions: false,
     });
-
-    const contextBody = readFileSync(ctx.contextPath, 'utf8');
-    assert.ok(contextBody.includes('## Workspace Skills Catalog'), 'catalog section rendered');
-    assert.ok(contextBody.includes('**pp-planos**'), 'catalog entry listed');
-    assert.ok(contextBody.includes('plan and limit rules for stores'), 'description listed');
-    assert.ok(!contextBody.includes('CATALOG_ONLY_MARKER'), 'catalog body not injected into pr-context.md');
-    assert.ok(!existsSync(join(outDir, 'skills-quality.md')) || !readFileSync(join(outDir, 'skills-quality.md'), 'utf8').includes('CATALOG_ONLY_MARKER'));
+    const index = readFileSync(join(outDir, 'skills-index.md'), 'utf8');
+    assert.ok(index.includes('**video-helper**'));
+    assert.ok(readFileSync(ctx.contextPath, 'utf8').includes('skills-index.md'), 'pr-context points at the index');
+    assert.ok(!existsSync(join(outDir, 'pass-video-helper.md')), 'no pass file for an index skill');
   } finally {
+    (process.stderr as unknown as { write: typeof orig }).write = orig;
     rmSync(cwd, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
     rmSync(outDir, { recursive: true, force: true });

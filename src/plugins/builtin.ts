@@ -99,13 +99,17 @@ export function loadSkillFile(filePath: string): SkillDefinition {
   const raw = readFileSync(filePath, 'utf8');
   const { meta, body } = parseFrontmatter(raw, filePath);
   const declaredName = typeof meta.name === 'string' && meta.name.trim() ? meta.name.trim() : undefined;
+  if (meta.inject_into ?? meta.injectInto) {
+    process.stderr.write(
+      `[skills] warning: ${filePath}: inject_into is deprecated and ignored — every matched skill now runs as its own review pass (applies_to still scopes it to files)\n`,
+    );
+  }
   return {
     name: normalizeSkillName(declaredName ?? inferNameFromPath(filePath)),
     description: meta.description ?? firstHeading(body),
     source: filePath,
     body,
     appliesTo: parseGlobList(meta.applies_to ?? meta.appliesTo ?? meta.applyTo),
-    injectInto: meta.inject_into ?? meta.injectInto,
     tags: parseGlobList(meta.tags),
   };
 }

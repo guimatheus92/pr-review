@@ -131,6 +131,11 @@ test('index smoke — an unmatched untargeted skill flows disk → index file, n
       join(claudeDir, 'video-helper.md'),
       '---\ndescription: video captions and overlays helper\n---\nINDEX_ONLY_MARKER — read on demand.\n',
     );
+    // Legacy frontmatter: parsed only to warn — every matched skill is its own pass now.
+    writeFileSync(
+      join(claudeDir, 'legacy-rule.md'),
+      '---\ndescription: legacy targeted rule\napplies_to: ["src/**"]\ninject_into: [security]\n---\nlegacy body\n',
+    );
 
     const { config } = loadConfig({ cwd, homeOverride: home });
     const gather = fixtureGather(['src/orders/service.ts']);
@@ -145,6 +150,11 @@ test('index smoke — an unmatched untargeted skill flows disk → index file, n
     });
     assert.ok(!selection.passes.some((p) => p.name === 'video-helper'), 'unmatched skill is not a pass');
     assert.ok(selection.indexEntries.some((e) => e.name === 'video-helper'), 'it lands in the index');
+    assert.ok(
+      lines.some((l) => l.includes('inject_into is deprecated')),
+      'legacy inject_into frontmatter warns once at load time',
+    );
+    assert.ok(selection.passes.some((p) => p.name === 'legacy-rule'), 'applies_to still routes the legacy skill');
 
     const ctx = prepareSessionContext({
       prUrl: 'https://github.com/o/r/pull/1',

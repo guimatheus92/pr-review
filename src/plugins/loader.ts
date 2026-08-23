@@ -133,7 +133,6 @@ function loadPluginEntries(pluginDir: string, manifest: PluginManifest): LoadedS
       ...def,
       name: s.id,
       appliesTo: s.appliesTo ?? def.appliesTo,
-      injectInto: s.injectInto ?? def.injectInto,
     });
   }
   return { reviewers, skills };
@@ -168,9 +167,9 @@ export interface LoadAllOptions {
   home?: string;
 }
 
-/** A skill opts into explicit (authoritative) routing via targeting frontmatter. */
+/** A skill opts into explicit (authoritative) routing via applies_to globs. */
 function hasReviewTargeting(s: SkillDefinition): boolean {
-  return s.appliesTo.length > 0 || (s.injectInto !== undefined && s.injectInto.length > 0);
+  return s.appliesTo.length > 0;
 }
 
 export function loadAll(

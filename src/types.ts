@@ -93,8 +93,6 @@ export interface SkillDefinition {
   source: string;
   body: string;
   appliesTo: string[];
-  /** DEPRECATED: parsed only to warn; every matched skill runs as its own review pass. */
-  injectInto?: string[];
   /** Frontmatter `tags` — matched against the PR's stack tags for pack skills. */
   tags?: string[];
   /** Pack name when loaded from a skill pack (name is then `<pack>/<skill>`). */

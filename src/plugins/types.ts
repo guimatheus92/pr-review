@@ -20,5 +20,4 @@ export interface PluginSkillEntry {
   id: string;
   path: string;
   appliesTo?: string[];
-  injectInto?: string[];
 }

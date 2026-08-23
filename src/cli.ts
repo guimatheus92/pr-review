@@ -271,11 +271,6 @@ program
       for (const d of result.createdDirs) console.error(`created ${d}`);
       for (const f of result.createdFiles) console.error(`created ${f}`);
       for (const f of result.skippedFiles) console.error(`skipped (exists) ${f}`);
-      if (result.detectedStack) {
-        console.error(`detected stack: ${result.detectedStack}`);
-      } else {
-        console.error('no primary stack detected — starter skill uses empty applies_to');
-      }
       console.error('\nEdit .claude/skills/team-rules.md to add your team conventions.');
     } catch (err) {
       console.error((err as Error).message);

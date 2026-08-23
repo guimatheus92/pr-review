@@ -38,7 +38,6 @@ test('loadAll — discovers flat .md and SKILL.md dirs, parses targeting frontma
     assert.deepEqual(names, ['domain-glossary', 'team-rules']);
     const team = skills.find((s) => s.name === 'team-rules')!;
     assert.deepEqual(team.appliesTo, ['**/*.ts']);
-    assert.deepEqual(team.injectInto, ['security']);
     assert.ok(!skills.some((s) => s.name === 'ignored'), 'files under a SKILL.md dir are not loaded');
   } finally {
     rmSync(cwd, { recursive: true, force: true });
@@ -139,8 +138,8 @@ test('catalog — a name that also exists as a targeted (injected) skill is drop
     const claudeDir = join(cwd, '.claude', 'skills');
     mkdirSync(copilotDir, { recursive: true });
     mkdirSync(claudeDir, { recursive: true });
-    // Same name: targeted (frontmatter → injected) in one dir, untargeted in another.
-    writeFileSync(join(copilotDir, 'shared-name.md'), '---\ndescription: t\ninject_into: [security]\n---\nInjected rule body.\n');
+    // Same name: targeted (applies_to → injected) in one dir, untargeted in another.
+    writeFileSync(join(copilotDir, 'shared-name.md'), '---\ndescription: t\napplies_to: ["**/*.ts"]\n---\nInjected rule body.\n');
     writeFileSync(join(claudeDir, 'shared-name.md'), '---\ndescription: dup\n---\nCatalog body.\n');
     const { config } = loadConfig({ cwd, homeOverride: home });
     const { skills, catalog } = loadAll({ cwd, config, skillsOnly: true, home });

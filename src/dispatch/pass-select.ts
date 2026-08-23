@@ -39,7 +39,7 @@ export interface PassRoute {
 }
 
 export interface PassSelection {
-  /** Ordered glob > tag > repo > forced > baseline, capped at MAX_PASSES. */
+  /** Ranked forced > repo (user content) > pack glob > pack tag > baseline, capped at MAX_PASSES. */
   passes: ReviewPass[];
   /** Overflow first, then stack-relevant entries, then the rest (incl. index-only packs). */
   indexEntries: IndexEntry[];
@@ -49,11 +49,21 @@ export interface PassSelection {
   missingBaseline: string[];
 }
 
-const RANK: Record<MatchedBy, number> = { glob: 0, tag: 1, repo: 2, forced: 3, baseline: 4 };
-
 /** A match-everything glob is not stack-specific — it never counts as a glob hit. */
 function isMatchAll(g: string): boolean {
   return g === '**' || g === '*' || g === '**/*';
+}
+
+/**
+ * A bare extension wildcard (`**​/*.ts`, `**.json`, `*.md`) matches by file TYPE
+ * alone. Pack authors use these promiscuously — awesome-copilot's astro/nestjs/
+ * svelte/wordpress guides all claim `**​/*.ts` — so for PACK skills a
+ * language-glob hit only counts when the skill's own identity (name/tags) also
+ * overlaps the stack. Observed live: without this, a TypeScript PR filled all
+ * 10 slots with framework guides for frameworks the repo doesn't use.
+ */
+function isLanguageGlob(g: string): boolean {
+  return /^(\*\*\/)?\*{1,2}\.[a-z0-9_-]+$/i.test(g);
 }
 
 const DESC_CAP = 200;
@@ -68,7 +78,10 @@ const DESC_CAP = 200;
  */
 function tokensOf(s: SkillDefinition): Set<string> {
   const nameNoPack = s.pack && s.name.startsWith(`${s.pack}/`) ? s.name.slice(s.pack.length + 1) : s.name;
-  const base = s.source.replace(/\\/g, '/').split('/').pop() ?? '';
+  // The file's own .md extension (and the pack-format .instructions suffix) is
+  // container format, not identity — without stripping it, every pack file
+  // "matches" any PR that touches markdown (stack tag `md`).
+  const base = (s.source.replace(/\\/g, '/').split('/').pop() ?? '').replace(/(\.instructions)?\.md$/i, '');
   const raw = `${nameNoPack} ${base} ${(s.tags ?? []).join(' ')}`.toLowerCase();
   return new Set(raw.split(/[^a-z0-9#+]+/).filter((t) => t.length >= 2));
 }
@@ -120,11 +133,18 @@ export function selectPasses(input: {
     }
     const globs = s.appliesTo.filter((g) => !isMatchAll(g));
     const globHits = globs.filter((g) => inScopePaths.some((p) => matchesAny(p, [g])));
-    if (globHits.length > 0) {
-      candidates.push(candidate(s, 'glob', globHits));
+    const tagHits = [...tokensOf(s)].filter((t) => stackSet.has(t)).sort();
+    const specificHits = globHits.filter((g) => !isLanguageGlob(g));
+    if (specificHits.length > 0) {
+      // A filename / directory / compound glob is real targeting on its own.
+      candidates.push(candidate(s, 'glob', specificHits));
       continue;
     }
-    const tagHits = [...tokensOf(s)].filter((t) => stackSet.has(t)).sort();
+    if (globHits.length > 0 && tagHits.length > 0) {
+      // Extension-only globs count only for a stack-consistent skill.
+      candidates.push(candidate(s, 'glob', [...tagHits, ...globHits]));
+      continue;
+    }
     if (tagHits.length > 0) {
       candidates.push(candidate(s, 'tag', tagHits));
       continue;
@@ -155,9 +175,19 @@ export function selectPasses(input: {
   for (const s of matched) candidates.push(candidate(s, 'repo', []));
   indexSkills.push(...rest);
 
+  // The user's own content outranks any pack: repo/plugin skills carry the
+  // business rules this tool exists to apply (forced dirs are the most explicit
+  // opt-in of all). Packs fill the remaining slots; baseline fills last.
+  const rankOf = (c: Candidate): number => {
+    if (c.pass.matchedBy === 'forced') return 0;
+    if (c.skill.origin !== 'pack' && (c.pass.matchedBy === 'glob' || c.pass.matchedBy === 'repo')) return 1;
+    if (c.pass.matchedBy === 'glob') return 2;
+    if (c.pass.matchedBy === 'tag') return 3;
+    return 4; // baseline
+  };
   const ordered = [...candidates].sort(
     (a, b) =>
-      RANK[a.pass.matchedBy] - RANK[b.pass.matchedBy] ||
+      rankOf(a) - rankOf(b) ||
       b.pass.matchedOn.length - a.pass.matchedOn.length ||
       a.pass.name.localeCompare(b.pass.name),
   );

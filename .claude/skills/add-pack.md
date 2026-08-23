@@ -44,6 +44,6 @@ Review knowledge comes from **skill packs**: git repos cloned to `~/.pr-review/p
 
 - **Packs are third-party prompt content** read by agents with tool access. Review a repo before adding it and pin `ref:` for reproducibility. `packs add` / `skill_packs` edits are the only install path; `suggest` never installs.
 - First review on a machine clones missing packs (needs git + network; fail-soft warnings; ~1-2 min). More than 30 days without `packs sync` → a stale warning on every review.
-- Pass selection tiers (`src/dispatch/pass-select.ts`): glob > tag > repo > forced > baseline, capped at `MAX_PASSES` (10). Overflow, unmatched skills, and index-mode packs land in `skills-index.md` — on-demand, not ignored.
+- Pass selection (`src/dispatch/pass-select.ts`): forced > repo (your own skills) > pack glob (a bare extension wildcard needs stack-consistent name/tags) > pack tag > baseline, capped at `MAX_PASSES` (10). Overflow, unmatched skills, and index-mode packs land in `skills-index.md` — on-demand, not ignored.
 - Skill frontmatter: `name` (wins over filename), `tags`, `applies_to`, `applyTo` (awesome-copilot alias; may be a CSV string; `'**'` alone never counts as a glob match). `inject_into` is deprecated — parsed only to print a stderr warning, then ignored.
 - The pass name is the public API — `--skip <name>` and `skip_reviewers:` accept the full `<pack>/<skill>` name or the bare suffix (plus `verifier` and `codex`).

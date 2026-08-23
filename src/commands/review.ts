@@ -57,6 +57,8 @@ interface ReviewCmdOptions {
   fromGather?: string;
   /** Test seam — replaces the pass-selection step. */
   selectPassesFn?: typeof selectPasses;
+  /** Test seam — isolates config/packs/Linguist from the developer's real home dir. */
+  homeOverride?: string;
 }
 
 export interface ReviewResult {
@@ -470,7 +472,7 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
 
   process.stderr.write(`[review] resuming run ${runId} from ${outDir}\n`);
   appendProgress(outDir, 'resume', `run ${runId}`);
-  const { config } = loadConfig({ cwd: process.cwd(), cliOverrides: toConfigOverrides(opts) });
+  const { config } = loadConfig({ cwd: process.cwd(), homeOverride: opts.homeOverride, cliOverrides: toConfigOverrides(opts) });
   // The live run persisted routing here; absent (old / pre-0.7 runs) → Skills section omitted.
   let passRouting: PassRoute[] | undefined;
   const routingPath = join(outDir, 'passes.json');
@@ -528,7 +530,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     // best-effort — status falls back to artifact heuristics without it
   }
 
-  const { config } = loadConfig({ cwd, cliOverrides: toConfigOverrides(opts) });
+  const { config } = loadConfig({ cwd, homeOverride: opts.homeOverride, cliOverrides: toConfigOverrides(opts) });
 
   if (opts.fromGather && !opts.dryRun) {
     throw new Error('--from-gather requires --dry-run (offline eval hook; posting from a fabricated gather is not allowed)');
@@ -540,10 +542,11 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   // Packs + Linguist resolve alongside gather/companion detection. Review-time is
   // clone-if-missing ONLY (`packs sync` is the explicit update path); every
   // failure is a warning — a review runs with whatever is on disk.
-  const packsPromise = Promise.resolve().then(() => ensurePacks(config.skillPacks));
+  const packsPromise = Promise.resolve().then(() => ensurePacks(config.skillPacks, { home: opts.homeOverride }));
   // No packs configured → language tags feed nothing glob/tag-matched; skip the
   // (possibly network) Linguist load entirely.
-  const linguistPromise = config.skillPacks.length > 0 ? loadLinguist({}) : Promise.resolve(null);
+  const linguistPromise =
+    config.skillPacks.length > 0 ? loadLinguist({ home: opts.homeOverride }) : Promise.resolve(null);
 
   let runtime: Runtime;
   try {
@@ -625,7 +628,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   }
 
   // Every review pass is a skill: user-authored reviewer .md files are never loaded.
-  const loaded = loadAll({ cwd, config, skillsOnly: true });
+  const loaded = loadAll({ cwd, config, skillsOnly: true, home: opts.homeOverride });
   process.stderr.write(
     `[review] discovered ${loaded.skills.length + loaded.catalog.length} project skill(s) + ${loaded.packSkills.length} pack skill(s)\n`,
   );
@@ -696,9 +699,11 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     const idxCount = ctx.routing.filter((r) => r.matchedBy === 'index').length;
     if (idxCount > 0) lines.push(``, `**Index (on-demand):** ${idxCount} skill(s) → \`${join(outDir, 'skills-index.md')}\``);
     const summary = lines.join('\n');
-    writeFileSync(join(outDir, 'pr-review-summary.md'), summary, 'utf8');
-    // Zero passes on a non-docs-only PR is the "nothing to review with" failure (exit 2).
+    // Zero passes on a code PR is the "nothing to review with" failure (exit 2):
+    // status treats pr-review-summary.md as done/exit-0 the moment it exists, so
+    // the failed preview writes error.txt instead of the done-state artifact.
     const zeroPasses = ctx.passes.length === 0 && ctx.triageSkipped.length === 0;
+    writeFileSync(join(outDir, zeroPasses ? ERROR_FILE : 'pr-review-summary.md'), summary, 'utf8');
     return { outputs: [], summary, exitCode: zeroPasses ? 2 : 0 };
   }
 

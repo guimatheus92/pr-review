@@ -212,7 +212,7 @@ export function loadAll(
     const personalSkipped = personalGeneric.filter((s) => !hasReviewTargeting(s)).length;
     if (personalSkipped > 0) {
       process.stderr.write(
-        `[skills] skipped ${personalSkipped} personal skill(s) from home dirs (~/.claude etc.) — not used for review (add applies_to/inject_into to a repo skill to inject it)\n`,
+        `[skills] skipped ${personalSkipped} personal skill(s) from home dirs (~/.claude etc.) — not used for review (give one applies_to globs, or move it into a repo skill dir, to run it as a pass)\n`,
       );
     }
   }

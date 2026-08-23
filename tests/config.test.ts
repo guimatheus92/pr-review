@@ -246,3 +246,47 @@ test('skill_packs — other list keys still PUSH across levels (regression)', ()
   }
 });
 
+
+test('skill_packs — null (empty key) and scalar values warn and are ignored, never crash', () => {
+  const { tmp, home } = cfgDirs();
+  const lines: string[] = [];
+  const orig = process.stderr.write.bind(process.stderr);
+  (process.stderr as unknown as { write: (s: string) => boolean }).write = (s: string) => {
+    lines.push(s);
+    return true;
+  };
+  try {
+    writeFileSync(join(tmp, '.pr-review.yaml'), 'skill_packs:\n  # - github/awesome-copilot\n');
+    const { config } = loadConfig({ cwd: tmp, homeOverride: home });
+    assert.equal(config.skillPacks.length, 3, 'null key keeps the defaults instead of crashing');
+    writeFileSync(join(tmp, '.pr-review.yaml'), 'skill_packs: github/awesome-copilot\n');
+    const { config: scalar } = loadConfig({ cwd: tmp, homeOverride: home });
+    assert.equal(scalar.skillPacks.length, 3);
+    assert.ok(lines.some((l) => l.includes('skill_packs must be a list')));
+  } finally {
+    (process.stderr as unknown as { write: typeof orig }).write = orig;
+    rmSync(tmp, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('skill_packs — duplicate pack names: first wins with a warning (no shared checkout aliasing)', () => {
+  const { tmp, home } = cfgDirs();
+  const lines: string[] = [];
+  const orig = process.stderr.write.bind(process.stderr);
+  (process.stderr as unknown as { write: (s: string) => boolean }).write = (s: string) => {
+    lines.push(s);
+    return true;
+  };
+  try {
+    writeFileSync(join(tmp, '.pr-review.yaml'), 'skill_packs:\n  - alpha/skills\n  - beta/skills\n');
+    const { config } = loadConfig({ cwd: tmp, homeOverride: home });
+    assert.equal(config.skillPacks.length, 1);
+    assert.equal(config.skillPacks[0]!.git, 'alpha/skills');
+    assert.ok(lines.some((l) => l.includes("duplicate skill pack name 'skills'")));
+  } finally {
+    (process.stderr as unknown as { write: typeof orig }).write = orig;
+    rmSync(tmp, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});

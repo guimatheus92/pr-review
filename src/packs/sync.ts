@@ -11,8 +11,36 @@ export const STALE_DAYS = 30;
 /** Seam for tests: run git with args (optionally in cwd), return stdout. Throws on failure. */
 export type GitExec = (args: string[], cwd?: string) => string;
 
+const GIT_TIMEOUT_MS = 5 * 60 * 1000;
+
 const defaultGit: GitExec = (args, cwd) =>
-  execFileSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' });
+  execFileSync('git', args, {
+    cwd,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf8',
+    // A pack source that wants credentials must fail, not hang the review on an
+    // invisible prompt; ditto a network stall.
+    timeout: GIT_TIMEOUT_MS,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'Never' },
+  });
+
+/**
+ * Only plain fetch transports reach `git clone` argv. Config values are
+ * repo-controlled (.pr-review.yaml), so exotic transports (`ext::` runs a
+ * command, `--upload-pack=` smuggles one) and dash-prefixed values must never
+ * make it into the argv. Local paths are allowed only when they exist (tests,
+ * private mirrors).
+ */
+export function isSafeGitSource(url: string): boolean {
+  if (!url || url.startsWith('-')) return false;
+  if (/^(https?|ssh):\/\//i.test(url)) return true;
+  if (/^git@[\w.-]+:/.test(url)) return true;
+  return existsSync(url);
+}
+
+export function isSafeRef(ref: string): boolean {
+  return /^[\w./-]+$/.test(ref) && !ref.startsWith('-');
+}
 
 export function packsRoot(home: string = homedir()): string {
   return join(home, '.pr-review', 'packs');
@@ -149,18 +177,26 @@ export function ensurePacks(packs: SkillPack[], opts: { home?: string; git?: Git
       }
       continue;
     }
+    const url = gitUrl(pack);
+    if (!isSafeGitSource(url) || (pack.ref !== undefined && !isSafeRef(pack.ref))) {
+      warnings.push(`[packs] ${pack.name}: refusing unsafe git source/ref in skill_packs — skipped`);
+      continue;
+    }
     try {
       mkdirSync(packsRoot(opts.home), { recursive: true });
       const args = ['clone', '--depth', '1', '--single-branch'];
       if (pack.ref) args.push('--branch', pack.ref);
-      args.push(gitUrl(pack), dir);
+      args.push(url, dir);
       git(args);
+      // An interrupted clone can leave a .git dir with no commit — verify before trusting it.
+      git(['rev-parse', '--verify', 'HEAD'], dir);
       writeMeta(pack, opts.home, git);
       present.push(pack);
       cloned.push(pack.name);
     } catch (err) {
-      // git usually removes its own failed target; belt and braces for partials.
-      if (existsSync(dir) && !isGitCheckout(dir)) {
+      // git usually removes its own failed target; belt and braces for partials
+      // (including a .git dir that never got a commit — rev-parse above threw).
+      if (existsSync(dir)) {
         try {
           rmSync(dir, { recursive: true, force: true });
         } catch {
@@ -189,16 +225,32 @@ export function syncPacks(packs: SkillPack[], opts: { home?: string; git?: GitEx
   for (const pack of packs) {
     const dir = packDir(pack, opts.home);
     try {
+      const url = gitUrl(pack);
+      if (!isSafeGitSource(url) || (pack.ref !== undefined && !isSafeRef(pack.ref))) {
+        result.failed.push({ name: pack.name, error: 'refusing unsafe git source/ref in skill_packs' });
+        continue;
+      }
       if (!existsSync(dir)) {
         mkdirSync(packsRoot(opts.home), { recursive: true });
         const args = ['clone', '--depth', '1', '--single-branch'];
         if (pack.ref) args.push('--branch', pack.ref);
-        args.push(gitUrl(pack), dir);
+        args.push(url, dir);
         git(args);
+        git(['rev-parse', '--verify', 'HEAD'], dir);
       } else if (!isGitCheckout(dir)) {
         result.failed.push({ name: pack.name, error: `${dir} exists but is not a git checkout` });
         continue;
       } else {
+        const prior = readPackMeta(pack, opts.home);
+        if (prior && (prior.ref ?? null) !== (pack.ref ?? null)) {
+          // pull keeps tracking the branch the clone was made from — a config
+          // ref change silently would not take effect.
+          result.failed.push({
+            name: pack.name,
+            error: `configured ref changed (${prior.ref ?? 'default'} → ${pack.ref ?? 'default'}) — delete ${dir} and re-sync`,
+          });
+          continue;
+        }
         git(['pull', '--ff-only', '--quiet'], dir);
       }
       const meta = writeMeta(pack, opts.home, git);

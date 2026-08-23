@@ -118,9 +118,12 @@ test('ensurePacks — a bad source warns and leaves no directory behind', { skip
   const root = mkdtempSync(join(tmpdir(), 'pr-review-packs-'));
   const home = join(root, 'home');
   try {
+    // An existing dir that is NOT a git repo: passes the source check, clone fails.
+    const emptySource = join(root, 'not-a-repo');
+    mkdirSync(emptySource, { recursive: true });
     const p: SkillPack = {
       name: 'broken',
-      git: join(root, 'does-not-exist'),
+      git: emptySource,
       include: ['**/SKILL.md'],
       exclude: [],
       mode: 'auto',
@@ -130,6 +133,12 @@ test('ensurePacks — a bad source warns and leaves no directory behind', { skip
     assert.equal(res.present.length, 0);
     assert.ok(res.warnings.some((w) => w.includes('clone failed')));
     assert.ok(!existsSync(packDir(p, home)));
+
+    // A nonexistent local path is refused before git ever runs.
+    const ghost: SkillPack = { ...p, name: 'ghost', git: join(root, 'does-not-exist') };
+    const res2 = ensurePacks([ghost], { home });
+    assert.equal(res2.present.length, 0);
+    assert.ok(res2.warnings.some((w) => w.includes('unsafe git source')));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -150,6 +159,42 @@ test('ensurePacks — stale meta (or none) on a present pack warns to run packs 
     const res = ensurePacks([p], { home, git: () => '' });
     assert.equal(res.present.length, 1, 'stale is a warning, not a removal');
     assert.ok(res.warnings.some((w) => w.includes('packs sync')));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('ensurePacks/syncPacks — unsafe git sources and refs are refused before reaching argv', { skip }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'pr-review-packs-'));
+  const home = join(root, 'home');
+  try {
+    const evil: SkillPack[] = [
+      { name: 'ext', git: 'ext::sh -c whoami', include: ['**/SKILL.md'], exclude: [], mode: 'auto', baseline: [] },
+      { name: 'dash', git: '--upload-pack=whoami', include: ['**/SKILL.md'], exclude: [], mode: 'auto', baseline: [] },
+      { name: 'badref', git: makeRemote(root), ref: '--exec=whoami', include: ['**/SKILL.md'], exclude: [], mode: 'auto', baseline: [] },
+    ];
+    const res = ensurePacks(evil, { home });
+    assert.equal(res.present.length, 0);
+    assert.equal(res.warnings.filter((w) => w.includes('unsafe git source/ref')).length, 3);
+    const sres = syncPacks(evil, { home });
+    assert.equal(sres.synced.length, 0);
+    assert.ok(sres.failed.every((f) => f.error.includes('unsafe git source/ref')));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('syncPacks — a changed ref: is reported, never silently pulled from the old branch', { skip }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'pr-review-packs-'));
+  const home = join(root, 'home');
+  try {
+    const remote = makeRemote(root);
+    const p = pack(remote);
+    ensurePacks([p], { home });
+    const repinned = { ...p, ref: 'v2' };
+    const res = syncPacks([repinned], { home });
+    assert.equal(res.synced.length, 0);
+    assert.ok(res.failed.some((f) => f.error.includes('ref changed')), JSON.stringify(res.failed));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

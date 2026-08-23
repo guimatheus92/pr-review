@@ -22,13 +22,13 @@ Each pass gets a `pass-<name>.md` file in the run dir (`~/.pr-review/runs/<id>/`
 
 ## How passes are selected
 
-Selection is tiered (`src/dispatch/pass-select.ts`), highest tier wins per skill:
+Selection is ranked (`src/dispatch/pass-select.ts`) — your own content always outranks pack content:
 
-1. **glob** — the skill's `applies_to`/`applyTo` globs match a changed file (a bare `**` never counts).
-2. **tag** — EXACT token match between the skill's name/filename/frontmatter `tags` and the PR's stack tags (languages from the GitHub Linguist database, dependency names from manifests, ecosystem tags like `nodejs`/`dotnet`).
-3. **repo** — untargeted repo skills matched by the `name` + `description` relevance heuristic against the changed files and diff.
-4. **forced** — everything from `extra_skills_dirs` / `--skills-dir` / `--skill`.
-5. **baseline** — each pack's baseline pointer list (e.g. `awesome-copilot/code-review-generic`, `owasp/error-handling`); runs on every code PR.
+1. **forced** — everything from `extra_skills_dirs` / `--skills-dir` / `--skill` (the most explicit opt-in).
+2. **repo** — your repo's own skills: `applies_to`-targeted ones (shown as `glob` in the table), and untargeted ones promoted by the `name` + `description` relevance heuristic against the changed files and diff.
+3. **pack glob** — a pack skill whose `applies_to`/`applyTo` globs match a changed file. A bare `**` never counts, and a bare extension wildcard (`**/*.ts`) only counts when the skill's name/tags also overlap the stack — pack authors use those promiscuously (awesome-copilot's astro/nestjs/svelte guides all claim `**/*.ts`).
+4. **pack tag** — EXACT token match between the skill's name/filename/frontmatter `tags` and the PR's stack tags (languages from the GitHub Linguist database, dependency names from manifests, ecosystem tags like `nodejs`/`dotnet`).
+5. **baseline** — each pack's baseline pointer list (e.g. `awesome-copilot/code-review-generic`, `owasp/error-handling`); runs on every code PR when slots remain.
 
 **Cap:** at most `MAX_PASSES = 10` passes dispatch. Overflow, unmatched skills, and index-mode packs land in `skills-index.md` — an on-demand list every pass can read from when an entry is relevant. Indexed skills are surfaced, not ignored.
 

@@ -50,9 +50,41 @@ test('selectPasses — glob hit via CSV-parsed applyTo; match-all is never a glo
   const sel = base({ packSkills: [go, generic], baseline: ['pk/code-review-generic'] });
   const goPass = sel.passes.find((p) => p.name === 'pk/go')!;
   assert.equal(goPass.matchedBy, 'glob');
-  assert.deepEqual(goPass.matchedOn, ['**/*.go']);
+  // Extension-only glob + stack-consistent identity: matchedOn carries both signals.
+  assert.deepEqual(goPass.matchedOn, ['go', '**/*.go']);
   const gen = sel.passes.find((p) => p.name === 'pk/code-review-generic')!;
   assert.equal(gen.matchedBy, 'baseline', 'applyTo ** falls through to the baseline pointer');
+});
+
+test('selectPasses — a promiscuous extension glob without stack identity is demoted to the index', () => {
+  // Observed live: awesome-copilot astro/nestjs/svelte/wordpress all claim **/*.ts.
+  const astro = packSkill('astro', { appliesTo: ['**/*.ts', '**/*.md'] });
+  const csharp = packSkill('csharp', { appliesTo: ['**/*.cs'] });
+  const sel = selectPasses({
+    skills: [],
+    catalog: [],
+    packSkills: [astro, csharp],
+    inScopeFiles: [{ path: 'src/app.ts' }, { path: 'src/Api.cs' }],
+    stackTags: ['typescript', 'ts', 'c#', 'csharp'],
+    baseline: [],
+  });
+  assert.ok(!sel.passes.some((p) => p.name === 'pk/astro'), 'astro has no stack identity here → index');
+  assert.ok(sel.indexEntries.some((e) => e.name === 'pk/astro'));
+  const cs = sel.passes.find((p) => p.name === 'pk/csharp')!;
+  assert.equal(cs.matchedBy, 'glob', 'csharp is stack-consistent → its extension glob counts');
+});
+
+test('selectPasses — a specific glob (filename/dir/compound) counts on its own, no identity needed', () => {
+  const agentSkills = packSkill('agent-skills', { appliesTo: ['**/skills/**/SKILL.md'] });
+  const sel = selectPasses({
+    skills: [],
+    catalog: [],
+    packSkills: [agentSkills],
+    inScopeFiles: [{ path: 'skills/help/SKILL.md' }],
+    stackTags: [],
+    baseline: [],
+  });
+  assert.equal(sel.passes.find((p) => p.name === 'pk/agent-skills')?.matchedBy, 'glob');
 });
 
 test('selectPasses — exact tag match, never prefixes: java ≠ javascript, terraform hits', () => {
@@ -66,9 +98,9 @@ test('selectPasses — exact tag match, never prefixes: java ≠ javascript, ter
   assert.ok(sel.indexEntries.some((e) => e.name === 'pk/java'));
 });
 
-test('selectPasses — order glob > tag > repo > forced > baseline; cap sends overflow to the index head', () => {
+test('selectPasses — order forced > repo > pack glob > tag > baseline; cap sends overflow to the index head', () => {
   const packSkills: SkillDefinition[] = [];
-  for (let i = 0; i < 6; i++) packSkills.push(packSkill(`glob-${i}`, { appliesTo: ['**/*.go'] }));
+  for (let i = 0; i < 6; i++) packSkills.push(packSkill(`glob-${i}`, { appliesTo: ['**/main.go'] }));
   for (let i = 0; i < 3; i++) packSkills.push(packSkill(`tag-${i}`, { tags: ['terraform'] }));
   for (let i = 0; i < 3; i++) packSkills.push(packSkill(`base-${i}`));
   const forced = repoSkill('forced-one', { origin: 'forced' });
@@ -79,7 +111,7 @@ test('selectPasses — order glob > tag > repo > forced > baseline; cap sends ov
   });
   assert.equal(sel.passes.length, MAX_PASSES);
   const kinds = sel.passes.map((p) => p.matchedBy);
-  assert.deepEqual(kinds, ['glob', 'glob', 'glob', 'glob', 'glob', 'glob', 'tag', 'tag', 'tag', 'forced']);
+  assert.deepEqual(kinds, ['forced', 'glob', 'glob', 'glob', 'glob', 'glob', 'glob', 'tag', 'tag', 'tag']);
   // 3 baseline passes overflowed → head of the index, and routed as 'index'
   assert.deepEqual(sel.indexEntries.slice(0, 3).map((e) => e.name), ['pk/base-0', 'pk/base-1', 'pk/base-2']);
   for (const name of ['pk/base-0', 'pk/base-1', 'pk/base-2']) {
@@ -110,7 +142,7 @@ test('selectPasses — repo skills: targeted globs route as glob, untargeted go 
 });
 
 test('selectPasses — baseline dedupe keeps the higher tier; description capped in index entries', () => {
-  const dual = packSkill('security-and-owasp', { appliesTo: ['**/*.go'] });
+  const dual = packSkill('security-and-owasp', { appliesTo: ['**/main.go'] });
   const longDesc = packSkill('wordy', { description: 'x'.repeat(500) });
   const sel = base({ packSkills: [dual, longDesc], baseline: ['pk/security-and-owasp'] });
   const rows = sel.passes.filter((p) => p.name === 'pk/security-and-owasp');
@@ -118,6 +150,42 @@ test('selectPasses — baseline dedupe keeps the higher tier; description capped
   assert.equal(rows[0]!.matchedBy, 'glob');
   const entry = sel.indexEntries.find((e) => e.name === 'pk/wordy')!;
   assert.equal(entry.description.length, 200);
+});
+
+test('selectPasses — the repo’s own skills outrank pack glob hits under the cap', () => {
+  const packSkills: SkillDefinition[] = [];
+  for (let i = 0; i < MAX_PASSES; i++) packSkills.push(packSkill(`pg-${i}`, { appliesTo: ['**/main.go'] }));
+  // Untargeted repo skill promoted by the relevance heuristic ('infra' stems 'infra/main.tf').
+  const mine = repoSkill('infra-conventions', { description: 'conventions for infra modules' });
+  const sel = base({ packSkills, catalog: [mine] });
+  assert.equal(sel.passes[0]!.name, 'infra-conventions', 'user content first');
+  assert.equal(sel.passes.length, MAX_PASSES);
+  assert.ok(sel.indexEntries.some((e) => e.name.startsWith('pk/pg-')), 'one pack hit overflowed instead');
+});
+
+test('selectPasses — the skill file’s own .md extension is never identity: a changed README must not tag-match every pack skill', () => {
+  // Every pack file ends in .md and Linguist aliases Markdown as 'md' — without
+  // stripping the extension, one changed README.md made all 604 awesome-copilot
+  // skills tag-match and evicted every baseline (observed live).
+  const clojure = packSkill('clojure', { source: '/packs/pk/clojure.instructions.md' });
+  const baseline = packSkill('code-review-generic');
+  const sel = selectPasses({
+    skills: [],
+    catalog: [],
+    packSkills: [clojure, baseline],
+    inScopeFiles: [{ path: 'README.md' }, { path: 'src/app.ts' }],
+    stackTags: ['md', 'markdown', 'typescript', 'ts'],
+    baseline: ['pk/code-review-generic'],
+  });
+  assert.ok(!sel.passes.some((p) => p.name === 'pk/clojure'), '.md extension must not count as identity');
+  assert.equal(sel.passes.find((p) => p.name === 'pk/code-review-generic')?.matchedBy, 'baseline', 'baseline survives');
+});
+
+test('selectPasses — within a tier, more matchedOn evidence wins the tie-break', () => {
+  const narrow = packSkill('narrow', { appliesTo: ['**/main.go'] });
+  const wide = packSkill('wide', { appliesTo: ['**/main.go', 'infra/main.tf'] });
+  const sel = base({ packSkills: [narrow, wide] });
+  assert.deepEqual(sel.passes.map((p) => p.name), ['pk/wide', 'pk/narrow']);
 });
 
 test('selectPasses — routes mirror passes + index', () => {

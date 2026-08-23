@@ -23,6 +23,8 @@ function gatherFixture() {
   };
 }
 
+const TEST_HOME = mkdtempSync(join(tmpdir(), 'pr-resume-home-'));
+
 function fakeProvider() {
   const calls = { batches: [] as BatchComment[][], singles: [] as Finding[] };
   const provider: PrProvider = {
@@ -62,7 +64,7 @@ test('resume — reuses on-disk reviewer outputs, posts them, and writes posted.
   const dir = seedRun(ONE);
   try {
     const { provider, calls } = fakeProvider();
-    const r = await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider });
+    const r = await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider });
     assert.equal(calls.batches.length, 1, 'posted via one batch');
     assert.equal(calls.batches[0].length, 1);
     assert.ok(existsSync(join(dir, 'posted.marker')), 'marker written after a successful post');
@@ -91,7 +93,7 @@ test('resume — re-reads the PR, so findings the interrupted run already posted
         source: 'human' as const,
       },
     ];
-    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider });
+    await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider });
     assert.equal(calls.batches.length, 0, 'nothing to post — the PR already has it');
     assert.equal(calls.singles.length, 0);
   } finally {
@@ -118,7 +120,7 @@ test('resume — a DRY-RUN also dedupes against the live PR, not the gather snap
   try {
     const { provider } = fakeProvider();
     provider.fetchExistingComments = async () => [PUBLISHED];
-    const r = await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: false, dryRun: true, provider });
+    const r = await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: false, dryRun: true, provider });
     assert.ok(!r.summary.includes('a real finding body'), 'the already-published finding is not offered again');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -135,7 +137,7 @@ test('resume — the refresh only adopts comments matching a finding this run wo
     provider.fetchExistingComments = async () => [
       { ...PUBLISHED, id: 'human-1', body: 'possible injection risk here, double-check this', author: 'someone-else' },
     ];
-    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider });
+    await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider });
     assert.equal(calls.batches.length, 1, 'a bystander comment must not suppress the finding');
     assert.equal(calls.batches[0].length, 1);
   } finally {
@@ -155,12 +157,12 @@ test('resume — a publishing resume that cannot re-read the PR fails closed; --
       throw new Error('read failed: 500');
     };
     await assert.rejects(
-      () => runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider }),
+      () => runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider }),
       /refusing to post/,
     );
     assert.equal(calls.batches.length, 0, 'nothing was written');
 
-    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, forcePost: true, provider });
+    await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, forcePost: true, provider });
     assert.equal(calls.batches.length, 1, '--force-post is the documented escape hatch');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -174,7 +176,7 @@ test('resume — a DRY-RUN whose refresh fails degrades to the snapshot instead 
     provider.fetchExistingComments = async () => {
       throw new Error('read failed: 500');
     };
-    const r = await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: false, dryRun: true, provider });
+    const r = await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: false, dryRun: true, provider });
     assert.match(r.summary, /PR Review Summary/, 'a dry-run has nothing to duplicate');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -189,10 +191,10 @@ test('resume — an UNVERIFIED prior post fails closed, even though it is partia
   try {
     writePostedMarker(dir, { posted: 0, attempted: 1, verified: false });
     const { provider, calls } = fakeProvider();
-    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider });
+    await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider });
     assert.equal(calls.batches.length, 0, 'unverified is not a licence to re-post');
 
-    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, forcePost: true, provider });
+    await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, forcePost: true, provider });
     assert.equal(calls.batches.length, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -207,7 +209,7 @@ test('resume — a publish attempt that posted nothing still records a marker', 
     // attempt happened and must be on record.
     provider.postLineComment = async () => null;
     delete (provider as { postBatchComments?: unknown }).postBatchComments;
-    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider });
+    await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider });
     assert.ok(existsSync(join(dir, 'posted.marker')), 'a 0-posted attempt used to leave no guard at all');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -217,14 +219,14 @@ test('resume — a publish attempt that posted nothing still records a marker', 
 test('resume — a second resume refuses to re-post while the marker exists; --force-post overrides', async () => {
   const dir = seedRun(ONE);
   try {
-    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider: fakeProvider().provider });
+    await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider: fakeProvider().provider });
 
     const second = fakeProvider();
-    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider: second.provider });
+    await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider: second.provider });
     assert.equal(second.calls.batches.length, 0, 'posted.marker present → no duplicate post');
 
     const third = fakeProvider();
-    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, forcePost: true, provider: third.provider });
+    await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, forcePost: true, provider: third.provider });
     assert.equal(third.calls.batches.length, 1, '--force-post overrides the marker');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -237,7 +239,7 @@ test('resume — falls back to phase1-findings.json when the final consolidation
     writeFileSync(join(dir, 'pr-review-gather.json'), JSON.stringify(gatherFixture()), 'utf8');
     writeFileSync(join(dir, 'phase1-findings.json'), JSON.stringify({ reviewers: ONE }), 'utf8');
     const { provider, calls } = fakeProvider();
-    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider });
+    await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider });
     assert.equal(calls.batches.length, 1, 'salvaged findings from phase1 and posted');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -249,10 +251,10 @@ test('resume — a corrupt posted.marker fails closed (no re-post) unless --forc
   try {
     writeFileSync(join(dir, 'posted.marker'), '{ corrupt not json', 'utf8');
     const a = fakeProvider();
-    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider: a.provider });
+    await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider: a.provider });
     assert.equal(a.calls.batches.length, 0, 'corrupt marker → refuse (fail closed)');
     const b = fakeProvider();
-    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, forcePost: true, provider: b.provider });
+    await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, forcePost: true, provider: b.provider });
     assert.equal(b.calls.batches.length, 1, '--force-post overrides');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -264,7 +266,7 @@ test('resume — a partial prior post (posted < attempted) is retried, not skipp
   try {
     writePostedMarker(dir, { posted: 1, attempted: 3 }); // a partial post left findings unposted
     const a = fakeProvider();
-    await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider: a.provider });
+    await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider: a.provider });
     assert.equal(a.calls.batches.length, 1, 'partial marker must not strand the un-posted findings');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -274,7 +276,7 @@ test('resume — a partial prior post (posted < attempted) is retried, not skipp
 test('resume — Skills section: omitted when passes.json is absent, rendered when present', async () => {
   const noRouting = seedRun(ONE);
   try {
-    const r = await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: noRouting, publish: false, dryRun: true, provider: fakeProvider().provider });
+    const r = await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: noRouting, publish: false, dryRun: true, provider: fakeProvider().provider });
     assert.ok(!r.summary.includes('## Skills'), 'no routing artifact → Skills section omitted (degrades)');
   } finally {
     rmSync(noRouting, { recursive: true, force: true });
@@ -287,7 +289,7 @@ test('resume — Skills section: omitted when passes.json is absent, rendered wh
       JSON.stringify([{ name: 'owasp/nodejs-security', source: 's', matchedBy: 'tag' }]),
       'utf8',
     );
-    const r = await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: withRouting, publish: false, dryRun: true, provider: fakeProvider().provider });
+    const r = await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: withRouting, publish: false, dryRun: true, provider: fakeProvider().provider });
     assert.ok(r.summary.includes('## Skills'), 'routing artifact present → Skills section rendered');
     assert.ok(r.summary.includes('| owasp/nodejs-security | tag |'), 'pass row present on resume');
   } finally {
@@ -301,7 +303,7 @@ test('resume — a corrupt or wrong-shape passes.json degrades, never aborts the
     const dir = seedRun(ONE);
     try {
       writeFileSync(join(dir, 'passes.json'), bad, 'utf8');
-      const r = await runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: false, dryRun: true, provider: fakeProvider().provider });
+      const r = await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: false, dryRun: true, provider: fakeProvider().provider });
       assert.match(r.summary, /PR Review Summary/, `resume completed for ${bad}`);
       assert.ok(!r.summary.includes('## Skills'), `Skills section omitted for ${bad}`);
     } finally {
@@ -314,12 +316,12 @@ test('resume — missing gather and missing reviewer output each error clearly',
   const dir = mkdtempSync(join(tmpdir(), 'pr-resume-'));
   try {
     await assert.rejects(
-      runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider: fakeProvider().provider }),
+      runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider: fakeProvider().provider }),
       /no pr-review-gather/,
     );
     writeFileSync(join(dir, 'pr-review-gather.json'), JSON.stringify(gatherFixture()), 'utf8');
     await assert.rejects(
-      runReview({ prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider: fakeProvider().provider }),
+      runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider: fakeProvider().provider }),
       /nothing to resume/,
     );
   } finally {

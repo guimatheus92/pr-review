@@ -20,7 +20,7 @@ To gate a pipeline on serious findings, add `--fail-on <severity>` (`critical`\|
 pr-review review "$PR_URL" --fail-on high
 ```
 
-The step fails (exit 1) when any CRITICAL or HIGH finding survives dedupe. Treat exit 2 as an infrastructure failure, not a review verdict.
+The step fails (exit 1) when any CRITICAL or HIGH finding survives dedupe. Treat exit 2 as an infrastructure failure, not a review verdict — it also covers "nothing to review with" (no skills matched the PR and no baseline is configured; run `pr-review packs suggest` or check `skill_packs`).
 
 ## GitHub Actions (official path)
 

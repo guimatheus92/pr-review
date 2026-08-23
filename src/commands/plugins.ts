@@ -7,11 +7,9 @@ export async function pluginsList(opts: { reviewersDir?: string[]; skillsDir?: s
     cliOverrides: { reviewersDirs: opts.reviewersDir, skillsDirs: opts.skillsDir },
   });
   const set = loadAll({ cwd: process.cwd(), config });
-  console.log(`Reviewers (${set.reviewers.length}):`);
-  for (const r of set.reviewers) {
-    console.log(`  - ${r.name}${r.isBuiltIn ? ' (built-in)' : ''}  model=${r.model}  source=${r.source}`);
-  }
-  console.log(`\nSkills (${set.skills.length + set.catalog.length}):`);
+  // No reviewers listing: standalone reviewer .md files parse but are never
+  // dispatched — every review pass is a skill.
+  console.log(`Skills (${set.skills.length + set.catalog.length}):`);
   for (const s of [...set.skills, ...set.catalog]) {
     console.log(`  - ${s.name}  applies_to=${JSON.stringify(s.appliesTo)}  source=${s.source}`);
   }

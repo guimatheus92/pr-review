@@ -39,6 +39,19 @@ function defaultGitRemote(cwd: string): string | null {
   }
 }
 
+/** Manifests live at the repo root — resolve it so a run from a subdirectory still finds them. */
+function defaultGitToplevel(cwd: string): string | null {
+  try {
+    return execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      encoding: 'utf8',
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
 export function detectStack(
   changedPaths: string[],
   opts: {
@@ -46,6 +59,7 @@ export function detectStack(
     cwd?: string;
     pr?: { owner: string; repo: string };
     gitRemote?: (cwd: string) => string | null;
+    gitToplevel?: (cwd: string) => string | null;
   },
 ): StackInfo {
   const notes: string[] = [];
@@ -63,7 +77,8 @@ export function detectStack(
   if (opts.cwd && opts.pr) {
     const origin = (opts.gitRemote ?? defaultGitRemote)(opts.cwd);
     if (cwdMatchesPr(origin, opts.pr.owner, opts.pr.repo)) {
-      const dep = readDependencyTags(opts.cwd);
+      const root = (opts.gitToplevel ?? defaultGitToplevel)(opts.cwd) ?? opts.cwd;
+      const dep = readDependencyTags(root);
       dependencies = dep.dependencies;
       ecosystems = dep.ecosystems;
     } else {

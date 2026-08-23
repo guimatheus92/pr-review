@@ -191,9 +191,30 @@ function applyRaw(target: Config, raw: RawConfig, baseDir: string): void {
   if (raw.skill_packs !== undefined) {
     // REPLACE, not push: `skill_packs: []` disables packs, and a repo list
     // overrides the global list entirely (documented in the example yaml).
-    target.skillPacks = raw.skill_packs
-      .map(normalizePack)
-      .filter((p): p is SkillPack => p !== null);
+    // Guard the shape: `skill_packs:` with every entry commented out parses to
+    // null, and a scalar is a typo — neither may crash every CLI command.
+    if (!Array.isArray(raw.skill_packs)) {
+      process.stderr.write(
+        `[config] warning: skill_packs must be a list (got ${raw.skill_packs === null ? 'an empty key' : typeof raw.skill_packs}) — ignoring it; use skill_packs: [] to disable packs\n`,
+      );
+    } else {
+      const seen = new Set<string>();
+      target.skillPacks = raw.skill_packs
+        .map(normalizePack)
+        .filter((p): p is SkillPack => p !== null)
+        .filter((p) => {
+          if (seen.has(p.name)) {
+            // Two different repos inferring the same name would silently share
+            // one checkout dir — first wins, loudly.
+            process.stderr.write(
+              `[config] warning: duplicate skill pack name '${p.name}' (${p.git}) — first entry wins; set a distinct name: on one of them\n`,
+            );
+            return false;
+          }
+          seen.add(p.name);
+          return true;
+        });
+    }
   }
   if (raw.dedupe?.mode) target.dedupeMode = raw.dedupe.mode;
   if (raw.diff_excludes) target.diffExcludes.push(...raw.diff_excludes);

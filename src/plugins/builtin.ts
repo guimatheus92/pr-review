@@ -33,7 +33,7 @@ export function parseFrontmatter(raw: string, sourcePath?: string): { meta: Fron
   } catch (err) {
     if (sourcePath) {
       process.stderr.write(
-        `[skills] warning: invalid frontmatter YAML in ${sourcePath} — frontmatter ignored (${(err as Error).message.split('\n')[0]})\n`,
+        `[skills] warning: invalid frontmatter YAML in ${printable(sourcePath)} — frontmatter ignored (${printable((err as Error).message.split('\n')[0] ?? '')})\n`,
       );
     }
     return { meta: {}, body: raw };
@@ -47,15 +47,33 @@ export function parseFrontmatter(raw: string, sourcePath?: string): { meta: Fron
  */
 export function parseGlobList(v: unknown): string[] {
   if (typeof v === 'string') {
-    return v
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
+    // Split on commas OUTSIDE braces — `**/*.{ts,tsx}` is one glob, not two.
+    const parts: string[] = [];
+    let depth = 0;
+    let cur = '';
+    for (const ch of v) {
+      if (ch === '{') depth++;
+      else if (ch === '}') depth = Math.max(0, depth - 1);
+      if (ch === ',' && depth === 0) {
+        parts.push(cur);
+        cur = '';
+      } else {
+        cur += ch;
+      }
+    }
+    parts.push(cur);
+    return parts.map((s) => s.trim()).filter(Boolean);
   }
   if (Array.isArray(v)) {
     return v.map((s) => String(s).trim()).filter(Boolean);
   }
   return [];
+}
+
+/** Strip control characters before echoing third-party (pack) strings to the terminal. */
+export function printable(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[\u0000-\u001f\u007f]/g, '');
 }
 
 /** First `# heading` of the body — the description fallback for files with no frontmatter (OWASP cheat sheets). */
@@ -75,7 +93,7 @@ export function normalizeSkillName(base: string): string {
   return base
     .toLowerCase()
     .replace(/[_\s]+/g, '-')
-    .replace(/(\.instructions|-cheat-sheet)$/, '');
+    .replace(/([-.]instructions|-cheat-sheet)$/, '');
 }
 
 export function loadReviewerFile(filePath: string, isBuiltIn = false): ReviewerDefinition {
@@ -101,7 +119,7 @@ export function loadSkillFile(filePath: string): SkillDefinition {
   const declaredName = typeof meta.name === 'string' && meta.name.trim() ? meta.name.trim() : undefined;
   if (meta.inject_into ?? meta.injectInto) {
     process.stderr.write(
-      `[skills] warning: ${filePath}: inject_into is deprecated and ignored — every matched skill now runs as its own review pass (applies_to still scopes it to files)\n`,
+      `[skills] warning: ${printable(filePath)}: inject_into is deprecated and ignored — every matched skill now runs as its own review pass (applies_to still scopes it to files)\n`,
     );
   }
   return {

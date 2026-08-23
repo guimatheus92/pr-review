@@ -119,6 +119,10 @@ test('no-posting directive — reaches the orchestrator and EVERY dispatch line,
     const dispatchLines = prompt.split('\n').filter((l) => /^- .*(task|Task)\(/.test(l));
     // 2 passes + 6 companion agents + 1 companion slash + 1 verifier — a lost line is a failure too.
     assert.equal(dispatchLines.length, 10, `expected exactly 10 dispatch lines, got ${dispatchLines.length}`);
+    // Every task-call in the prompt must BE one of those bullet lines — a dispatch
+    // added as prose or a multi-line prompt would escape the per-line assertions.
+    const totalCalls = (prompt.match(/task\(agent_type=|Task\(subagent_type=/g) ?? []).length;
+    assert.equal(totalCalls, dispatchLines.length, 'a task call exists outside the audited dispatch bullets');
     for (const line of dispatchLines) {
       assert.ok(line.includes(directive), `dispatch line missing the no-posting directive: ${line.slice(0, 120)}…`);
     }

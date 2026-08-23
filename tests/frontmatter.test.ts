@@ -122,3 +122,8 @@ test('loadSkillFile — tags frontmatter is parsed', () => {
   const path = tmpFile('k8s.md', ['---', 'description: x', 'tags: [kubernetes, rbac]', '---', 'body'].join('\n'));
   assert.deepEqual(loadSkillFile(path).tags, ['kubernetes', 'rbac']);
 });
+
+test('parseGlobList — commas inside braces do not split the glob', () => {
+  assert.deepEqual(parseGlobList('**/*.{ts,tsx},**/go.mod'), ['**/*.{ts,tsx}', '**/go.mod']);
+  assert.deepEqual(parseGlobList('**/*.{js,jsx,mjs}'), ['**/*.{js,jsx,mjs}']);
+});

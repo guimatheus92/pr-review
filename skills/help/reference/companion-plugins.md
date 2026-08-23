@@ -53,7 +53,7 @@ pr-review-toolkit’s six agents each get their own summary row (`companion:pr-r
 
 Each companion plugin's slash command kicks off the plugin's internal orchestrator, which dispatches its own sub-agents inside the review session. pr-review-toolkit runs six agents; code-review runs five. Wall-clock time per companion is typically 5–15 minutes.
 
-The default per-reviewer timeout is 5 minutes, but companion reviewers get a 20-minute timeout automatically (`timeoutMs: 20 * 60 * 1000` in [src/plugins/companions.ts](../../src/plugins/companions.ts)).
+There is no per-pass timeout: everything dispatched inside the session — passes and companions alike — shares the orchestrator process timeout (30 minutes).
 
 ## Cost note
 

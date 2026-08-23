@@ -10,9 +10,11 @@ export function isManifest(basename: string): boolean {
   return NAME_RE.test(basename) || EXT_RE.test(basename);
 }
 
+// NOTE: no 'packages' here — JS monorepos keep first-party workspace manifests
+// under packages/, and losing those loses every framework tag.
 const SKIP_DIRS = new Set([
   'node_modules', '.git', 'bin', 'obj', 'vendor', 'dist', 'build', 'out',
-  '.venv', 'venv', 'target', '__pycache__', 'packages',
+  '.venv', 'venv', 'target', '__pycache__',
 ]);
 
 // ponytail: ecosystem tags per manifest KIND — format knowledge (stable), not review

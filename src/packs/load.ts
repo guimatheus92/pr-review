@@ -1,10 +1,22 @@
-import { existsSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readdirSync, realpathSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import type { SkillPack } from '../config.js';
 import type { SkillDefinition } from '../types.js';
-import { loadSkillFile, normalizeSkillName } from '../plugins/builtin.js';
+import { loadSkillFile, normalizeSkillName, printable } from '../plugins/builtin.js';
 import { matchesAny } from '../util/globs.js';
 import { packDir } from './sync.js';
+
+/** True when the file really lives under the pack dir — a symlink placed in a
+ *  malicious pack must not read arbitrary local files into agent context. */
+function containedIn(root: string, file: string): boolean {
+  try {
+    const real = realpathSync(file).toLowerCase();
+    const base = realpathSync(root).toLowerCase();
+    return real === base || real.startsWith(base + '\\') || real.startsWith(base + '/');
+  } catch {
+    return false;
+  }
+}
 
 /** The skill name a pack-relative path will load under (mirrors loadSkillFile naming). */
 function skillNameOf(rel: string): string {
@@ -32,6 +44,7 @@ export function listPackFiles(dir: string, include: string[], exclude: string[])
     .filter((rel) => !rel.startsWith('.git/') && !rel.includes('/node_modules/') && !rel.startsWith('node_modules/'))
     .filter((rel) => matchesAny(rel, include))
     .filter((rel) => !(exclude.length > 0 && (matchesAny(rel, exclude) || matchesAny(skillNameOf(rel), exclude))))
+    .filter((rel) => containedIn(dir, resolve(dir, rel)))
     .sort();
 }
 
@@ -50,7 +63,7 @@ export function loadPackSkills(packs: SkillPack[], home?: string): SkillDefiniti
       const def = loadSkillFile(join(dir, rel));
       const name = `${pack.name}/${def.name}`;
       if (byName.has(name)) {
-        process.stderr.write(`[packs] warning: duplicate skill name '${name}' in pack — later file wins (${rel})\n`);
+        process.stderr.write(`[packs] warning: duplicate skill name '${printable(name)}' in pack — later file wins (${printable(rel)})\n`);
       }
       byName.set(name, { ...def, name, pack: pack.name, origin: 'pack', mode: pack.mode });
     }

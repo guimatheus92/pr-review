@@ -62,6 +62,7 @@ function emptySelection(): PassSelection {
 }
 
 function setup(paths: string[]) {
+  const home = mkdtempSync(join(tmpdir(), 'pr-zero-home-'));
   const cwd = mkdtempSync(join(tmpdir(), 'pr-zero-cwd-'));
   writeFileSync(join(cwd, '.pr-review.yaml'), 'skill_packs: []\ncompanion_warn: false\n');
   const runDir = mkdtempSync(join(tmpdir(), 'pr-zero-run-'));
@@ -71,11 +72,13 @@ function setup(paths: string[]) {
   process.chdir(cwd);
   return {
     cwd,
+    home,
     runDir,
     gatherFile,
     restore() {
       process.chdir(prev);
       rmSync(cwd, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
       rmSync(runDir, { recursive: true, force: true });
     },
   };
@@ -96,6 +99,7 @@ test('zero passes on a code PR — exit 2, error.txt written, NO done-state summ
   try {
     const r = await runReview({
       ...BASE,
+      homeOverride: s.home,
       runDir: s.runDir,
       fromGather: s.gatherFile,
       provider: fakeProvider(),
@@ -117,6 +121,7 @@ test('docs-only PR where triage removes every pass — benign exit 0 with an exp
   try {
     const r = await runReview({
       ...BASE,
+      homeOverride: s.home,
       runDir: s.runDir,
       fromGather: s.gatherFile,
       provider: fakeProvider(),
@@ -143,6 +148,7 @@ test('--from-gather without --dry-run throws before any work', async () => {
     await assert.rejects(
       runReview({
         ...BASE,
+        homeOverride: s.home,
         dryRun: false,
         publish: true,
         runDir: s.runDir,
@@ -152,6 +158,27 @@ test('--from-gather without --dry-run throws before any work', async () => {
       }),
       /--from-gather requires --dry-run/,
     );
+  } finally {
+    s.restore();
+  }
+});
+
+test('--context-only with zero passes on a code PR — exit 2 and error.txt, never the done-state summary', async () => {
+  const s = setup(['lib/app.ex']);
+  try {
+    const r = await runReview({
+      ...BASE,
+      homeOverride: s.home,
+      contextOnly: true,
+      runDir: s.runDir,
+      fromGather: s.gatherFile,
+      provider: fakeProvider(),
+      selectPassesFn: () => emptySelection(),
+    });
+    assert.equal(r.exitCode, 2);
+    assert.ok(existsSync(join(s.runDir, 'error.txt')), 'preview of a failed selection is error.txt');
+    assert.ok(!existsSync(join(s.runDir, 'pr-review-summary.md')), 'no done-state artifact');
+    assert.match(r.summary, /## Stack/);
   } finally {
     s.restore();
   }

@@ -145,3 +145,104 @@ test('autodiscoveryPaths — built-in reviewers are agents (no reviewer dirs aut
   assert.ok(paths.personalSkills.some((p) => /\.copilot[\/\\]skills$/.test(p)));
 });
 
+// --- skill_packs ---
+
+function cfgDirs(): { tmp: string; home: string } {
+  return {
+    tmp: mkdtempSync(join(tmpdir(), 'pr-review-cfg-')),
+    home: mkdtempSync(join(tmpdir(), 'pr-review-home-')),
+  };
+}
+
+test('skill_packs — defaults carry the 3 batteries-included packs', () => {
+  const { tmp, home } = cfgDirs();
+  try {
+    const { config } = loadConfig({ cwd: tmp, homeOverride: home });
+    assert.deepEqual(
+      config.skillPacks.map((p) => p.name),
+      ['awesome-copilot', 'owasp', 'anthropic-cybersecurity'],
+    );
+    const ac = config.skillPacks[0]!;
+    assert.ok(ac.baseline.includes('code-review-generic'));
+    assert.equal(config.skillPacks[2]!.mode, 'index');
+    assert.ok(config.skillPacks[2]!.exclude.length > 0);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('skill_packs — yaml REPLACES the list (empty list disables packs entirely)', () => {
+  const { tmp, home } = cfgDirs();
+  try {
+    writeFileSync(join(tmp, '.pr-review.yaml'), 'skill_packs: []\n');
+    const { config } = loadConfig({ cwd: tmp, homeOverride: home });
+    assert.deepEqual(config.skillPacks, []);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('skill_packs — repo yaml replaces the global yaml list entirely', () => {
+  const { tmp, home } = cfgDirs();
+  try {
+    mkdirSync(join(home, '.pr-review'), { recursive: true });
+    writeFileSync(join(home, '.pr-review', 'config.yaml'), 'skill_packs:\n  - acme/global-pack\n');
+    writeFileSync(join(tmp, '.pr-review.yaml'), 'skill_packs:\n  - acme/repo-pack\n');
+    const { config } = loadConfig({ cwd: tmp, homeOverride: home });
+    assert.deepEqual(config.skillPacks.map((p) => p.name), ['repo-pack']);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('skill_packs — string shorthand and object entries normalize with defaults', () => {
+  const { tmp, home } = cfgDirs();
+  try {
+    writeFileSync(
+      join(tmp, '.pr-review.yaml'),
+      [
+        'skill_packs:',
+        '  - octo/short-pack',
+        '  - git: https://gitlab.com/acme/deep.git',
+        '    name: deep',
+        '    include: ["docs/*.md"]',
+        '    mode: index',
+        '    baseline: [x]',
+        '  - name: broken-no-git',
+        '',
+      ].join('\n'),
+    );
+    const { config } = loadConfig({ cwd: tmp, homeOverride: home });
+    assert.equal(config.skillPacks.length, 2, 'entry without git is dropped with a warning');
+    const short = config.skillPacks[0]!;
+    assert.deepEqual(
+      { name: short.name, git: short.git, include: short.include, exclude: short.exclude, mode: short.mode, baseline: short.baseline },
+      { name: 'short-pack', git: 'octo/short-pack', include: ['**/SKILL.md'], exclude: [], mode: 'auto', baseline: [] },
+    );
+    const deep = config.skillPacks[1]!;
+    assert.equal(deep.mode, 'index');
+    assert.deepEqual(deep.include, ['docs/*.md']);
+    assert.deepEqual(deep.baseline, ['x']);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('skill_packs — other list keys still PUSH across levels (regression)', () => {
+  const { tmp, home } = cfgDirs();
+  try {
+    mkdirSync(join(home, '.pr-review'), { recursive: true });
+    writeFileSync(join(home, '.pr-review', 'config.yaml'), 'extra_skills_dirs:\n  - ./global-skills\n');
+    writeFileSync(join(tmp, '.pr-review.yaml'), 'extra_skills_dirs:\n  - ./repo-skills\n');
+    const { config } = loadConfig({ cwd: tmp, homeOverride: home });
+    assert.equal(config.skillsDirs.length, 2, 'skillsDirs accumulates, unlike skillPacks');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+

@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { RUNTIME_CHOICES, type RuntimeChoice } from './dispatch/runtime.js';
 import { PROVIDERS, type Provider } from './types.js';
+import { safeSegment } from './util/tmp.js';
 
 export interface Config {
   defaultModel: string;
@@ -26,7 +27,75 @@ export interface Config {
   invokeCodex: boolean;
   /** Self-hosted hostname → provider mapping (e.g. github.mycorp.com: github). */
   hosts: Record<string, Provider>;
+  /**
+   * External skill packs (git repos) that supply the review passes. REPLACE
+   * semantics — a yaml `skill_packs:` overrides the whole list (so `[]`
+   * disables), unlike every other list key, which pushes across levels.
+   */
+  skillPacks: SkillPack[];
 }
+
+export interface SkillPack {
+  /** Slug: pack dir name under ~/.pr-review/packs/ and the pass-name prefix. */
+  name: string;
+  /** 'owner/repo' shorthand (GitHub), a full git URL, or a local path (tests). */
+  git: string;
+  /** Branch/tag to pin; default = the repo's default branch. */
+  ref?: string;
+  /** Globs (pack-relative paths) selecting which files load as skills. */
+  include: string[];
+  /** Globs matched against the pack-relative path AND the normalized skill name. */
+  exclude: string[];
+  /** 'index' packs are never dispatched as passes — on-demand index only. */
+  mode: 'auto' | 'index';
+  /** Skill names inside THIS pack that run as a pass on every PR (generic lenses). */
+  baseline: string[];
+}
+
+/**
+ * The batteries-included pack list. Pointers, not content: sync refreshes the
+ * content, and a renamed upstream file surfaces as a visible missing-baseline
+ * warning. Override or disable entirely with `skill_packs:` in yaml.
+ */
+export const DEFAULT_PACKS: SkillPack[] = [
+  {
+    name: 'awesome-copilot',
+    git: 'github/awesome-copilot',
+    include: ['instructions/*.instructions.md', 'skills/*/SKILL.md'],
+    exclude: [],
+    mode: 'auto',
+    baseline: [
+      'code-review-generic',
+      'security-and-owasp',
+      'performance-optimization',
+      'qa-engineering-best-practices',
+      'self-explanatory-code-commenting',
+    ],
+  },
+  {
+    name: 'owasp',
+    git: 'OWASP/CheatSheetSeries',
+    include: ['cheatsheets/*.md'],
+    exclude: [],
+    mode: 'auto',
+    baseline: ['error-handling', 'logging'],
+  },
+  {
+    name: 'anthropic-cybersecurity',
+    git: 'mukul975/Anthropic-Cybersecurity-Skills',
+    include: ['skills/*/SKILL.md'],
+    // ponytail: ONE curated list — operational/offensive verbs never useful in
+    // a diff review (forensics, hunting, C2…). Data, not code; tune in yaml.
+    exclude: [
+      'hunting-*', 'exploiting-*', 'performing-*', 'conducting-*', 'executing-*',
+      'triaging-*', 'reverse-*', 'deobfuscating-*', 'extracting-*', 'collecting-*',
+      'acquiring-*', 'investigating-*', 'recovering-*',
+      '*forensic*', '*malware*', '*incident-response*', '*siem*',
+    ],
+    mode: 'index',
+    baseline: [],
+  },
+];
 
 const DEFAULTS: Config = {
   defaultModel: 'claude-opus-4.8',
@@ -46,6 +115,7 @@ const DEFAULTS: Config = {
   runtime: 'auto',
   invokeCodex: true,
   hosts: {},
+  skillPacks: DEFAULT_PACKS,
 };
 
 interface RawConfig {
@@ -65,6 +135,26 @@ interface RawConfig {
   runtime?: RuntimeChoice;
   invoke_codex?: boolean;
   hosts?: Record<string, string>;
+  skill_packs?: (string | ({ git?: string } & Partial<SkillPack>))[];
+}
+
+/** Fill a raw `skill_packs` entry ('owner/repo' shorthand or object) with defaults. */
+function normalizePack(raw: string | ({ git?: string } & Partial<SkillPack>)): SkillPack | null {
+  const obj = typeof raw === 'string' ? { git: raw } : raw;
+  if (!obj.git || typeof obj.git !== 'string') {
+    process.stderr.write(`[config] warning: skill_packs entry without a git source ignored\n`);
+    return null;
+  }
+  const inferredName = obj.name ?? obj.git.replace(/\/+$/, '').split('/').pop() ?? 'pack';
+  return {
+    name: safeSegment(inferredName),
+    git: obj.git,
+    ref: obj.ref,
+    include: obj.include && obj.include.length > 0 ? obj.include : ['**/SKILL.md'],
+    exclude: obj.exclude ?? [],
+    mode: obj.mode === 'index' ? 'index' : 'auto',
+    baseline: obj.baseline ?? [],
+  };
 }
 
 function expandHome(p: string): string {
@@ -97,6 +187,13 @@ function applyRaw(target: Config, raw: RawConfig, baseDir: string): void {
       else if (p.dir) target.pluginDirs.push(resolve(baseDir, expandHome(p.dir)));
       else if (p.name) target.plugins.push(p.name);
     }
+  }
+  if (raw.skill_packs !== undefined) {
+    // REPLACE, not push: `skill_packs: []` disables packs, and a repo list
+    // overrides the global list entirely (documented in the example yaml).
+    target.skillPacks = raw.skill_packs
+      .map(normalizePack)
+      .filter((p): p is SkillPack => p !== null);
   }
   if (raw.dedupe?.mode) target.dedupeMode = raw.dedupe.mode;
   if (raw.diff_excludes) target.diffExcludes.push(...raw.diff_excludes);

@@ -1,0 +1,212 @@
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import type { SkillPack } from '../config.js';
+import { binaryOnPath } from '../dispatch/runtime.js';
+
+/** A pack unsynced longer than this warns on every review. */
+export const STALE_DAYS = 30;
+
+/** Seam for tests: run git with args (optionally in cwd), return stdout. Throws on failure. */
+export type GitExec = (args: string[], cwd?: string) => string;
+
+const defaultGit: GitExec = (args, cwd) =>
+  execFileSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' });
+
+export function packsRoot(home: string = homedir()): string {
+  return join(home, '.pr-review', 'packs');
+}
+
+export function packDir(pack: Pick<SkillPack, 'name'>, home?: string): string {
+  return join(packsRoot(home), pack.name);
+}
+
+/** Sibling of the checkout, never inside it — metadata must not dirty the tree. */
+export function packMetaPath(pack: Pick<SkillPack, 'name'>, home?: string): string {
+  return join(packsRoot(home), `${pack.name}.json`);
+}
+
+/** 'owner/repo' shorthand → GitHub https URL; anything else (URL, local path) passes through. */
+export function gitUrl(pack: Pick<SkillPack, 'git'>): string {
+  return /^[\w.-]+\/[\w.-]+$/.test(pack.git) ? `https://github.com/${pack.git}.git` : pack.git;
+}
+
+export interface PackMeta {
+  git: string;
+  ref?: string;
+  syncedAt: string;
+  commit?: string;
+  commitDate?: string;
+}
+
+export function readPackMeta(pack: Pick<SkillPack, 'name'>, home?: string): PackMeta | null {
+  try {
+    const parsed = JSON.parse(readFileSync(packMetaPath(pack, home), 'utf8')) as PackMeta;
+    return parsed && typeof parsed.syncedAt === 'string' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function gitAvailable(): boolean {
+  return binaryOnPath('git');
+}
+
+function isGitCheckout(dir: string): boolean {
+  return existsSync(join(dir, '.git'));
+}
+
+function firstLine(err: unknown): string {
+  const e = err as Error & { stderr?: string };
+  const text = (e.stderr ?? e.message ?? String(err)).toString().trim();
+  return text.split('\n')[0] ?? 'unknown error';
+}
+
+function writeMeta(pack: SkillPack, home: string | undefined, git: GitExec): PackMeta {
+  const dir = packDir(pack, home);
+  let commit: string | undefined;
+  let commitDate: string | undefined;
+  try {
+    commit = git(['rev-parse', 'HEAD'], dir).trim();
+    commitDate = git(['log', '-1', '--format=%cI'], dir).trim();
+  } catch {
+    // metadata is best-effort; syncedAt alone still drives staleness
+  }
+  const meta: PackMeta = { git: pack.git, ref: pack.ref, syncedAt: new Date().toISOString(), commit, commitDate };
+  try {
+    writeFileSync(packMetaPath(pack, home), JSON.stringify(meta, null, 2), 'utf8');
+  } catch {
+    // best-effort
+  }
+  return meta;
+}
+
+export interface PackStatus {
+  dir: string;
+  exists: boolean;
+  isGit: boolean;
+  meta: PackMeta | null;
+  /** Days since last sync; null when no meta exists (counts as stale). */
+  ageDays: number | null;
+}
+
+export function packStatus(pack: SkillPack, home?: string): PackStatus {
+  const dir = packDir(pack, home);
+  const exists = existsSync(dir);
+  const meta = readPackMeta(pack, home);
+  let ageDays: number | null = null;
+  if (meta) {
+    const synced = Date.parse(meta.syncedAt);
+    if (!Number.isNaN(synced)) ageDays = (Date.now() - synced) / 86_400_000;
+  }
+  return { dir, exists, isGit: exists && isGitCheckout(dir), meta, ageDays };
+}
+
+export interface EnsureResult {
+  /** Packs whose checkout is present (pre-existing or just cloned). */
+  present: SkillPack[];
+  /** Pack names cloned by THIS call (first use). */
+  cloned: string[];
+  warnings: string[];
+}
+
+/**
+ * Review-time guarantee: clone whatever is missing, never pull (sync is the
+ * explicit update path). Every failure is a warning, never fatal — a review
+ * must run with whatever packs are on disk.
+ */
+export function ensurePacks(packs: SkillPack[], opts: { home?: string; git?: GitExec } = {}): EnsureResult {
+  const present: SkillPack[] = [];
+  const cloned: string[] = [];
+  const warnings: string[] = [];
+  if (packs.length === 0) return { present, cloned, warnings };
+  const git = opts.git ?? defaultGit;
+  const canClone = opts.git ? true : gitAvailable();
+  let warnedNoGit = false;
+
+  for (const pack of packs) {
+    const dir = packDir(pack, opts.home);
+    if (existsSync(dir)) {
+      if (!isGitCheckout(dir)) {
+        warnings.push(
+          `[packs] ${pack.name}: ${dir} exists but is not a git checkout — delete it or rename the pack; skipped`,
+        );
+        continue;
+      }
+      present.push(pack);
+      const st = packStatus(pack, opts.home);
+      if (st.ageDays === null || st.ageDays > STALE_DAYS) {
+        const age = st.ageDays === null ? 'unknown age' : `${Math.floor(st.ageDays)} days old`;
+        warnings.push(`[packs] ${pack.name}: last sync ${age} — run \`pr-review packs sync\` to refresh review knowledge`);
+      }
+      continue;
+    }
+    if (!canClone) {
+      if (!warnedNoGit) {
+        warnings.push('[packs] git not found on PATH — cannot clone missing skill packs; reviewing with what is on disk');
+        warnedNoGit = true;
+      }
+      continue;
+    }
+    try {
+      mkdirSync(packsRoot(opts.home), { recursive: true });
+      const args = ['clone', '--depth', '1', '--single-branch'];
+      if (pack.ref) args.push('--branch', pack.ref);
+      args.push(gitUrl(pack), dir);
+      git(args);
+      writeMeta(pack, opts.home, git);
+      present.push(pack);
+      cloned.push(pack.name);
+    } catch (err) {
+      // git usually removes its own failed target; belt and braces for partials.
+      if (existsSync(dir) && !isGitCheckout(dir)) {
+        try {
+          rmSync(dir, { recursive: true, force: true });
+        } catch {
+          // leave it; the not-a-git-checkout warning will fire next run
+        }
+      }
+      warnings.push(`[packs] ${pack.name}: clone failed — ${firstLine(err)}; continuing without it`);
+    }
+  }
+  return { present, cloned, warnings };
+}
+
+export interface SyncResult {
+  synced: { name: string; commit?: string; commitDate?: string }[];
+  failed: { name: string; error: string }[];
+}
+
+/** `pr-review packs sync`: clone-or-pull every configured pack, rewrite metadata. */
+export function syncPacks(packs: SkillPack[], opts: { home?: string; git?: GitExec } = {}): SyncResult {
+  const result: SyncResult = { synced: [], failed: [] };
+  const git = opts.git ?? defaultGit;
+  if (!opts.git && !gitAvailable()) {
+    for (const pack of packs) result.failed.push({ name: pack.name, error: 'git not found on PATH' });
+    return result;
+  }
+  for (const pack of packs) {
+    const dir = packDir(pack, opts.home);
+    try {
+      if (!existsSync(dir)) {
+        mkdirSync(packsRoot(opts.home), { recursive: true });
+        const args = ['clone', '--depth', '1', '--single-branch'];
+        if (pack.ref) args.push('--branch', pack.ref);
+        args.push(gitUrl(pack), dir);
+        git(args);
+      } else if (!isGitCheckout(dir)) {
+        result.failed.push({ name: pack.name, error: `${dir} exists but is not a git checkout` });
+        continue;
+      } else {
+        git(['pull', '--ff-only', '--quiet'], dir);
+      }
+      const meta = writeMeta(pack, opts.home, git);
+      result.synced.push({ name: pack.name, commit: meta.commit, commitDate: meta.commitDate });
+    } catch (err) {
+      const hint = ` (if upstream force-pushed, delete ${dir} and re-sync)`;
+      result.failed.push({ name: pack.name, error: firstLine(err) + hint });
+    }
+  }
+  return result;
+}

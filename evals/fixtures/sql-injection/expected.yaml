@@ -1,0 +1,3 @@
+# A competent review of this diff MUST flag the string-concatenated SQL.
+must_find:
+  - "sql injection|parameteri[sz]|prepared statement|concatenat"

@@ -4,27 +4,29 @@ import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
-const GLOBAL_PATH = join(homedir(), '.pr-review', 'config.yaml');
+export const GLOBAL_PATH = join(homedir(), '.pr-review', 'config.yaml');
 
-interface RawConfig {
+export interface GlobalRawConfig {
   default_model?: string;
   extra_reviewers_dirs?: string[];
   extra_skills_dirs?: string[];
   companion_warn?: boolean;
+  skill_packs?: unknown[];
 }
 
-function readOrEmpty(): RawConfig {
-  if (!existsSync(GLOBAL_PATH)) return {};
+/** NOTE: yaml round-trip via parse/stringify drops comments (existing behaviour). */
+export function readOrEmpty(path: string = GLOBAL_PATH): GlobalRawConfig {
+  if (!existsSync(path)) return {};
   try {
-    return (parseYaml(readFileSync(GLOBAL_PATH, 'utf8')) as RawConfig) ?? {};
+    return (parseYaml(readFileSync(path, 'utf8')) as GlobalRawConfig) ?? {};
   } catch {
     return {};
   }
 }
 
-function writeConfig(cfg: RawConfig): void {
-  mkdirSync(dirname(GLOBAL_PATH), { recursive: true });
-  writeFileSync(GLOBAL_PATH, stringifyYaml(cfg), 'utf8');
+export function writeConfig(cfg: GlobalRawConfig, path: string = GLOBAL_PATH): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, stringifyYaml(cfg), 'utf8');
 }
 
 export function runConfigureQuick(path: string, opts: { force?: boolean } = {}): void {

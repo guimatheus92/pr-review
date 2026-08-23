@@ -47,7 +47,7 @@ program
   .description('Run the full review pipeline in parallel; print/post findings')
   .option('--dry-run', 'Preview findings without posting comments (posting is the default)', false)
   .option('--publish', '(deprecated: posting is now the default; use --dry-run to preview)', false)
-  .option('--skip <names>', 'Comma-separated reviewer names to skip')
+  .option('--skip <names>', 'Comma-separated pass names to skip (full pack/skill or bare skill name; also: verifier, codex)')
   .option('--reviewer <path...>', 'Include a specific .md file as a reviewer (repeatable)')
   .option('--reviewers-dir <path...>', 'Include a directory of reviewer .md files (repeatable)')
   .option('--skill <path...>', 'Include a specific .md file as a skill (repeatable)')
@@ -64,7 +64,7 @@ program
     '--no-companions',
     'Skip auto-invoking installed companion plugin agents (pr-review-toolkit) for this run',
   )
-  .option('--context-only', 'Prepare pr-context.md + per-reviewer skills files, print the skill routing, and exit', false)
+  .option('--context-only', 'Prepare pr-context.md + the pass files, print the stack + pass table, and exit', false)
   .option('--lang <code>', 'Language for finding titles/bodies (e.g. pt-BR, es)')
   .option('--fail-on <severity>', 'Exit 1 when any finding at/above this severity survives dedupe (critical|high|medium|low|nit)')
   .option('--runtime <name>', 'Agent CLI hosting the session: copilot | claude | auto (probe PATH)', undefined)
@@ -73,6 +73,7 @@ program
   .option('--detach', 'Start the review in the background, print a run-id, and return immediately (poll with `status <run-id>`)', false)
   .option('--force-post', 'Re-post even if this run already recorded a successful post (bypasses the posted.marker idempotency guard)', false)
   .option('--run-dir <path>', 'Internal: use this exact run dir (set by --detach)')
+  .option('--from-gather <path>', 'Internal (eval harness): read the gather JSON from a file instead of the provider APIs; requires --dry-run')
   .action(
     async (
       prUrl: string,
@@ -102,6 +103,7 @@ program
         detach: boolean;
         forcePost: boolean;
         runDir?: string;
+        fromGather?: string;
       },
     ) => {
       try {
@@ -159,6 +161,7 @@ program
           resumeRunId: opts.resume,
           runDir: opts.runDir,
           forcePost: opts.forcePost,
+          fromGather: opts.fromGather,
         });
         process.stdout.write(summary + '\n');
         if (exitCode !== 0) process.exitCode = exitCode;
@@ -316,6 +319,74 @@ plugins
   .action(async (opts: { copilot: string }) => {
     try {
       await pluginsDoctor(opts.copilot);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
+const packs = program.command('packs').description('Manage the external skill packs that supply the review passes');
+packs
+  .command('list')
+  .description('Show configured packs: on-disk state, skill counts, commit, freshness')
+  .action(async () => {
+    try {
+      const { packsList } = await import('./commands/packs.js');
+      packsList();
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+packs
+  .command('sync')
+  .description('Clone or pull every configured pack and refresh the Linguist language data')
+  .action(async () => {
+    try {
+      const { packsSync } = await import('./commands/packs.js');
+      process.exitCode = await packsSync();
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+packs
+  .command('add <source>')
+  .description('Add a pack (owner/repo, git URL, or local path) to the global config and clone it')
+  .action(async (source: string) => {
+    try {
+      const { packsAdd } = await import('./commands/packs.js');
+      process.exitCode = packsAdd(source);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+packs
+  .command('suggest <args...>')
+  .description('Search skills.sh for skills matching stack tags (or the stack of a PR URL). Suggest-only — never installs.')
+  .action(async (args: string[]) => {
+    try {
+      const { packsSuggest } = await import('./commands/packs.js');
+      let tags = args;
+      if (args.length === 1 && /^https?:\/\//.test(args[0]!)) {
+        const { loadLinguist } = await import('./stack/linguist.js');
+        const { detectStack } = await import('./stack/detect.js');
+        const gather = await runGather({ prUrl: args[0]!, useCache: true });
+        const linguist = await loadLinguist({});
+        const stack = detectStack(
+          gather.changedFiles.filter((f) => !f.excluded).map((f) => f.path),
+          { linguist, cwd: process.cwd(), pr: gather.pr },
+        );
+        // Query languages + ecosystems, not every dependency — a query per dep would spam the API.
+        const deps = new Set(stack.dependencies);
+        tags = stack.tags.filter((t) => !deps.has(t)).slice(0, 8);
+        if (tags.length === 0) {
+          console.error('no stack tags detected for that PR — pass tags explicitly (e.g. `packs suggest python django`)');
+          process.exit(1);
+        }
+      }
+      process.exitCode = await packsSuggest(tags);
     } catch (err) {
       console.error((err as Error).message);
       process.exit(1);

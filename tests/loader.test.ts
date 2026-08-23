@@ -188,6 +188,47 @@ test('discovery — a symlinked mirror dir does not double-count skills (realpat
   }
 });
 
+test('loadAll — skills carry their origin; packSkills load from the home packs root', () => {
+  const { cwd, home } = tmpRepoWithSkills();
+  try {
+    // repo skill dir (auto-discovered)
+    mkdirSync(join(cwd, '.claude', 'skills'), { recursive: true });
+    writeFileSync(join(cwd, '.claude', 'skills', 'repo-rule.md'), '---\ndescription: r\napplies_to: ["**/*.ts"]\n---\nbody\n');
+    // pack checkout under the home packs root
+    const packDir = join(home, '.pr-review', 'packs', 'tiny');
+    mkdirSync(join(packDir, 'skills', 'aa'), { recursive: true });
+    writeFileSync(join(packDir, 'skills', 'aa', 'SKILL.md'), '---\nname: aa\ndescription: pack skill\n---\npack body\n');
+    mkdirSync(join(home, '.pr-review'), { recursive: true });
+    writeFileSync(join(home, '.pr-review', 'config.yaml'), 'skill_packs:\n  - git: octo/tiny\n    name: tiny\n');
+
+    const { config } = loadConfig({ cwd, homeOverride: home });
+    const set = loadAll({ cwd, config, skillsOnly: true, home });
+
+    const repoRule = set.skills.find((s) => s.name === 'repo-rule');
+    assert.equal(repoRule?.origin, 'repo');
+    assert.deepEqual(set.packSkills.map((s) => s.name), ['tiny/aa']);
+    assert.equal(set.packSkills[0]!.origin, 'pack');
+    assert.equal(set.packSkills[0]!.pack, 'tiny');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('loadAll — extra_skills_dirs skills carry origin forced', () => {
+  const { cwd, home } = tmpRepoWithSkills();
+  try {
+    const { config } = loadConfig({ cwd, homeOverride: home });
+    config.skillsDirs.push(join(cwd, 'team-skills'));
+    const set = loadAll({ cwd, config, skillsOnly: true, home });
+    const forced = set.skills.find((s) => s.name === 'team-rules');
+    assert.equal(forced?.origin, 'forced');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('parseInstalledPluginsJson — malformed or shapeless JSON yields [] (never throws)', async () => {
   const { parseInstalledPluginsJson } = await import('../src/plugins/companions.js');
   assert.deepEqual(parseInstalledPluginsJson('not json at all'), []);

@@ -4,6 +4,8 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-08-24
+
 ### Fixed (adversarial-review pass over this release, before it shipped)
 - **Project skills are context again, baselines always run** (observed live on a repo with 47 project skills: a single shared cap starved every security/baseline pass out of a security PR): matched repo/forced skills now inject into EVERY pass as authoritative `skills-project.md` (the pre-0.7 injection semantics) instead of consuming pass slots; pack stack passes cap at `MAX_STACK_PASSES` (6) and every baseline pointer ALWAYS dispatches; with no pack passes the project skills become the passes themselves. Codex, companions, and the verifier read the project rules as their authoritative context.
 - **Pass selection quality, observed live:** a bare extension glob (`**/*.ts`) in a pack skill only counts when the skill's own name/tags overlap the detected stack — without this, awesome-copilot's astro/nestjs/svelte/wordpress guides (all claiming `**/*.ts`) filled the 10-pass cap on any TypeScript PR; the skill file's own `.md` extension no longer counts as identity (one changed README used to tag-match every pack skill via Linguist's `md` alias and evict every baseline); and your own content now outranks packs (forced > repo > pack glob > pack tag > baseline).

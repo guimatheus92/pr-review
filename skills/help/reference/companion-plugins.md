@@ -27,37 +27,37 @@ Verify with `/plugin list` inside the session, or `copilot plugin list` from bas
 
 ## How auto-invocation works
 
-Detection depends on the runtime: for the copilot runtime, `pr-review` queries `copilot plugin list` at the start of every `review` run; for the claude runtime it reads `~/.claude/plugins/installed_plugins.json` (keys are `name@marketplace`) — no subprocess. For each installed companion in `KNOWN_COMPANIONS` with `invocable: true`, the CLI registers a single reviewer named `companion:<plugin>` whose prompt body is the plugin's entry slash command plus the PR URL — for example:
+Detection depends on the runtime: for the copilot runtime, `pr-review` queries `copilot plugin list` at the start of every `review` run; for the claude runtime it reads `~/.claude/plugins/installed_plugins.json` (keys are `name@marketplace`) — no subprocess. For each installed companion in `KNOWN_COMPANIONS` with `invocable: true`, the CLI adds dispatch lines to the orchestrator prompt: pr-review-toolkit's six agents are dispatched directly (each recorded as `companion:pr-review-toolkit/<agent>`), while code-review is invoked through its entry slash command plus the PR URL (recorded as `companion:code-review`) — for example:
 
 ```
-/pr-review-toolkit:review-pr https://dev.azure.com/.../pullrequest/12345
+/code-review:code-review https://dev.azure.com/.../pullrequest/12345
 ```
 
-That prompt is dispatched via `task()` / `Task()` inside the same single review session as the built-in reviewers. The companion plugin's own orchestrator handles PR fetching, internal sub-agent dispatch, and finding consolidation. Its output is parsed by `pr-review`'s markdown-findings parser; the findings then flow through dedupe and posting like any other reviewer.
+Each companion reviewer is dispatched via `task()` / `Task()` inside the same single review session as the review passes. The findings come back as JSON (the dispatch prompt asks for the standard finding shape; the markdown parser is the fallback) and flow through dedupe and posting like any other reviewer.
 
 **Companions run analysis-only.** Some companion commands are written to post their verdict straight to the PR (the official `code-review` command allows `gh pr comment` and posts a top-level "### Code review" summary on its own). pr-review's dispatch prompt explicitly forbids that: the subagent must skip any post-a-comment step in the companion's instructions and return the review as output instead — the CLI is the only thing that ever writes to the PR (inline-only, deduped, idempotent). If you ever see a top-level summary comment appear during a review, a dispatch path lost this directive — it's pinned by a session-context test.
 
-Skill routing note: companion agents receive only skills **without** `inject_into` — a skill scoped to specific built-in reviewers is never sent to a companion.
+Skill routing note: companion agents receive `skills-all.md` — the union of every review pass's skill body — as reference context alongside the PR context. They keep their own review criteria; the union file is background, not a mandate.
 
-Each companion appears as one row in the summary:
+pr-review-toolkit’s six agents each get their own summary row (`companion:pr-review-toolkit/<agent>`); the `code-review` slash companion is one row:
 
 ```
-| Reviewer                | Model              | Findings | Duration | Status |
-|-------------------------|--------------------|----------|----------|--------|
-| security                | claude-opus-4.8    |        2 |    14.2s | ✓      |
-| companion:pr-review-toolkit | claude-opus-4.8 |       11 |   8m 32s | ✓      |
-| companion:code-review   | claude-opus-4.8    |        4 |   6m 18s | ✓      |
+| Reviewer                    | Findings | Status |
+|-----------------------------|----------|--------|
+| awesome-copilot/security-and-owasp |  2 | ✓      |
+| companion:pr-review-toolkit/code-reviewer | 11 | ✓ |
+| companion:code-review       |        4 | ✓      |
 ```
 
 ## Why companions are slow
 
 Each companion plugin's slash command kicks off the plugin's internal orchestrator, which dispatches its own sub-agents inside the review session. pr-review-toolkit runs six agents; code-review runs five. Wall-clock time per companion is typically 5–15 minutes.
 
-The default per-reviewer timeout is 5 minutes, but companion reviewers get a 20-minute timeout automatically (`timeoutMs: 20 * 60 * 1000` in [src/plugins/companions.ts](../../src/plugins/companions.ts)).
+There is no per-pass timeout: everything dispatched inside the session — passes and companions alike — shares the orchestrator process timeout (30 minutes).
 
 ## Cost note
 
-Companion plugins roughly **2-3x review cost** because each one runs its entire internal orchestrator inside the review session, spinning up Anthropic's internal agents on top. With pr-review-toolkit + code-review + the codex second-opinion reviewer all present, a run can total up to 15 reviewers (6 built-ins + verifier + 7 companion agents + codex). If review cost matters and the built-ins are sufficient, opt out:
+Companion plugins roughly **2-3x review cost** because each one runs its entire internal orchestrator inside the review session, spinning up Anthropic's internal agents on top. With pr-review-toolkit + code-review + the codex second-opinion reviewer all present, a run can total up to 19 reviewers (up to 10 review passes + verifier + 7 companion agents + codex). If review cost matters and the review passes are sufficient, opt out:
 
 ```bash
 pr-review review <url> --no-companions
@@ -71,7 +71,7 @@ invoke_companions: false
 
 ## Output format
 
-Both plugins return prose findings (markdown), not JSON. The markdown parser at [src/dispatch/parsers.ts](../../src/dispatch/parsers.ts) extracts findings via:
+The dispatch prompt asks every companion for the standard JSON finding shape. When one answers in prose instead, the markdown parser at [src/dispatch/parsers.ts](../../src/dispatch/parsers.ts) is the fallback, extracting findings via:
 
 - `### [SEVERITY] Title` lines
 - `File: path:line` references in the body
@@ -89,17 +89,11 @@ If a companion **is** installed and `invokeCompanions` is on (default), no warni
 ```bash
 pr-review plugins doctor       # shows install state of each companion
 pr-review review <url> --dry-run   # runs everything (including companions) but doesn't post
-pr-review review <url> --no-companions --dry-run   # built-ins only
+pr-review review <url> --no-companions --dry-run   # review passes only
 ```
 
 ## When a companion fails
 
-If a companion plugin throws or times out, its row in the summary will show `✗ <error>`. The CLI continues with the built-in reviewers — companion failures don't abort the run.
+If a companion plugin throws or times out, its row in the summary will show `✗ <error>`. The CLI continues with the review passes — companion failures don't abort the run.
 
-To disable a specific companion without disabling all:
-
-```bash
-pr-review review <url> --skip companion:code-review
-```
-
-Note: companion names use the `companion:` prefix.
+There is no per-companion skip (`--skip` takes pass names, plus `verifier` and `codex`); to turn companions off, use `--no-companions` or `invoke_companions: false`.

@@ -38,7 +38,6 @@ test('loadAll — discovers flat .md and SKILL.md dirs, parses targeting frontma
     assert.deepEqual(names, ['domain-glossary', 'team-rules']);
     const team = skills.find((s) => s.name === 'team-rules')!;
     assert.deepEqual(team.appliesTo, ['**/*.ts']);
-    assert.deepEqual(team.injectInto, ['security']);
     assert.ok(!skills.some((s) => s.name === 'ignored'), 'files under a SKILL.md dir are not loaded');
   } finally {
     rmSync(cwd, { recursive: true, force: true });
@@ -139,8 +138,8 @@ test('catalog — a name that also exists as a targeted (injected) skill is drop
     const claudeDir = join(cwd, '.claude', 'skills');
     mkdirSync(copilotDir, { recursive: true });
     mkdirSync(claudeDir, { recursive: true });
-    // Same name: targeted (frontmatter → injected) in one dir, untargeted in another.
-    writeFileSync(join(copilotDir, 'shared-name.md'), '---\ndescription: t\ninject_into: [security]\n---\nInjected rule body.\n');
+    // Same name: targeted (applies_to → injected) in one dir, untargeted in another.
+    writeFileSync(join(copilotDir, 'shared-name.md'), '---\ndescription: t\napplies_to: ["**/*.ts"]\n---\nInjected rule body.\n');
     writeFileSync(join(claudeDir, 'shared-name.md'), '---\ndescription: dup\n---\nCatalog body.\n');
     const { config } = loadConfig({ cwd, homeOverride: home });
     const { skills, catalog } = loadAll({ cwd, config, skillsOnly: true, home });
@@ -182,6 +181,47 @@ test('discovery — a symlinked mirror dir does not double-count skills (realpat
     assert.deepEqual(catalog.map((s) => s.name).sort(), ['alpha', 'beta'], 'each skill appears once');
     const note = captured.find((l) => l.includes('project skill(s)'));
     assert.ok(note && /\b2 project skill/.test(note), `count should be 2 (not 4), got: ${note}`);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('loadAll — skills carry their origin; packSkills load from the home packs root', () => {
+  const { cwd, home } = tmpRepoWithSkills();
+  try {
+    // repo skill dir (auto-discovered)
+    mkdirSync(join(cwd, '.claude', 'skills'), { recursive: true });
+    writeFileSync(join(cwd, '.claude', 'skills', 'repo-rule.md'), '---\ndescription: r\napplies_to: ["**/*.ts"]\n---\nbody\n');
+    // pack checkout under the home packs root
+    const packDir = join(home, '.pr-review', 'packs', 'tiny');
+    mkdirSync(join(packDir, 'skills', 'aa'), { recursive: true });
+    writeFileSync(join(packDir, 'skills', 'aa', 'SKILL.md'), '---\nname: aa\ndescription: pack skill\n---\npack body\n');
+    mkdirSync(join(home, '.pr-review'), { recursive: true });
+    writeFileSync(join(home, '.pr-review', 'config.yaml'), 'skill_packs:\n  - git: octo/tiny\n    name: tiny\n');
+
+    const { config } = loadConfig({ cwd, homeOverride: home });
+    const set = loadAll({ cwd, config, skillsOnly: true, home });
+
+    const repoRule = set.skills.find((s) => s.name === 'repo-rule');
+    assert.equal(repoRule?.origin, 'repo');
+    assert.deepEqual(set.packSkills.map((s) => s.name), ['tiny/aa']);
+    assert.equal(set.packSkills[0]!.origin, 'pack');
+    assert.equal(set.packSkills[0]!.pack, 'tiny');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('loadAll — extra_skills_dirs skills carry origin forced', () => {
+  const { cwd, home } = tmpRepoWithSkills();
+  try {
+    const { config } = loadConfig({ cwd, homeOverride: home });
+    config.skillsDirs.push(join(cwd, 'team-skills'));
+    const set = loadAll({ cwd, config, skillsOnly: true, home });
+    const forced = set.skills.find((s) => s.name === 'team-rules');
+    assert.equal(forced?.origin, 'forced');
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });

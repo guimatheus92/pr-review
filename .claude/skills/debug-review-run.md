@@ -11,18 +11,20 @@ Every `pr-review review` writes artifacts to `~/.pr-review/runs/<provider>__<own
 | File | Contains |
 |---|---|
 | `pr-review-gather.json` | Raw PR metadata, diff, comments |
-| `pr-context.md` | The shared context file read by the reviewer agents (not by the orchestrator itself) |
-| `skills-<reviewer>.md` | Per-reviewer skill context (one file per reviewer that had skills routed to it) |
-| `skills-codex.md` | Skill context routed to the Codex second-opinion reviewer (when it runs) |
+| `pr-context.md` | The shared context file read by the review passes (not by the orchestrator itself) — includes the `## Stack` tags and a `## More skills (on-demand)` pointer to the index |
+| `pass-<name>.md` | One file per dispatched pass: the pipeline rules header + ONE skill body + a `Source:` line (so relative `references/` resolve) |
+| `skills-all.md` | Union of all pass bodies — read by the Codex sibling, companion agents, and the verifier |
+| `skills-index.md` | On-demand skill list: overflow past the pass cap, unmatched skills, and index-mode packs. Passes read relevant entries — indexed ≠ ignored |
+| `verifier.md` | The verifier's role brief (written when the verifier will be dispatched) |
 | `orchestrator-prompt.md` | The full orchestrator prompt with task()/Task() dispatch instructions |
 | `codex-output.txt` | Raw output of the Codex second-opinion reviewer (sibling `codex exec` process) |
 | `codex-failure.log` | argv, exit code, timing, and full stdout + stderr when the Codex sibling errored (mirrors `orchestrator-failure.log`). This is the one that exists when `codex-output.txt` does not — an early exit never writes the output file |
 | `phase1-findings.json` | Phase 1 findings; the verifier reads this when it's dispatched (only on CRITICAL/HIGH) |
 | `single-session-findings.json` | Raw consolidated findings from the orchestrator |
-| `raw-<reviewer>.json` | Per-reviewer parsed findings |
-| `skill-routing.json` | The skill→reviewer routing (injected skills + catalog), persisted at dispatch so `--resume` can still render the summary's Skills section |
+| `raw-<name>.json` | Parsed findings per output source (pass name, `verifier`, `codex`) |
+| `passes.json` | One row per known skill — `[{name, source, matchedBy}]` where `matchedBy` ∈ glob\|tag\|repo\|forced\|baseline\|index\|skipped — persisted at dispatch so `--resume` can still render the summary's Skills section |
 | `pr-review-findings.json` | Final findings after dedupe |
-| `pr-review-summary.md` | The rendered summary — reviewer table, a `## Skills` section (injected skills + catalog count), and the findings |
+| `pr-review-summary.md` | The rendered summary — a `## Skills` section (pass table + on-demand index count) and the findings |
 
 ## Common issues
 
@@ -32,10 +34,11 @@ Every `pr-review review` writes artifacts to `~/.pr-review/runs/<provider>__<own
 3. Check stderr output for `[single-session]` messages.
 4. Read `orchestrator-prompt.md` to verify the dispatch instructions look correct.
 5. With `--runtime auto` (the default), the CLI probes PATH for `copilot` then `claude` and errors if neither is found — pass `--runtime <name>` or set `PR_REVIEW_RUNTIME` to pin one.
-6. Remember the triage rules: docs-only PRs dispatch only the `quality` reviewer, and the verifier runs only when Phase 1 has a CRITICAL/HIGH finding — a "missing" reviewer may have been deliberately skipped (it's logged).
+6. Remember the triage rules: docs-only PRs run only glob/forced passes (never baseline), and the verifier runs only when Phase 1 has a CRITICAL/HIGH finding — a "missing" pass may have been deliberately skipped (it's logged, and `passes.json` records it as `skipped`).
+7. Zero passes at all: a docs-only PR exits 0 with an explanatory summary; a code PR exits 2 with `error.txt` and the "nothing to review with — no skills matched" message — check `packs list` (are the packs cloned/synced?) and `pr-review packs suggest <url>`.
 
 **Parse errors:**
-1. Check `raw-<reviewer>.json` for the specific reviewer.
+1. Check `raw-<name>.json` for the specific pass.
 2. The parsers in `src/dispatch/parsers.ts` try JSON first, then bracketed-markdown, then section-headers.
 3. Run `npm run test` — the parser tests cover all three formats.
 
@@ -55,10 +58,11 @@ Every `pr-review review` writes artifacts to `~/.pr-review/runs/<provider>__<own
 3. Read `codex-failure.log` first — on an early exit (a rejected flag, an unusable run dir) `codex-output.txt` was never written, and the failure log carries the argv, the exit code, and the full stdout/stderr. If the run got far enough to produce output, inspect `codex-output.txt`; its findings appear under reviewer name `codex`.
 4. `codex exec` exiting **0** with no output is reported as an errored reviewer, not as "found nothing" — it is contracted to print `[]` when it finds nothing, so an empty result means the output file was never written.
 
-**Skills not reaching a reviewer:**
-1. Run `pr-review review <url> --context-only` — prints the skill→reviewer routing table without spawning the runtime (the reviewers line shows "+ codex (sibling process)" when codex would run).
-2. Check `skills-<reviewer>.md` in the run dir; watch stderr for truncation warnings (16 KB per skill body, 64 KB per file) or malformed-frontmatter warnings naming the file.
-3. A live run also reports this without `--context-only`: a `## Skills` block on stderr at dispatch (also in `detached.log`) and the `## Skills` section of `pr-review-summary.md` / `skill-routing.json`. An untargeted repo skill shows up under "Catalog (on-demand)" (not injected) — add `applies_to`/`inject_into` to inject it.
+**A skill not running as a pass:**
+1. Run `pr-review review <url> --context-only` — prints the `## Stack` (languages, dependencies) and the `## Passes` table (`| Pass | Matched by | Matched on | Source |`) without spawning the runtime (the passes line shows "+ codex (sibling process)" when codex would run).
+2. Check `pass-<name>.md` in the run dir; watch stderr for malformed-frontmatter warnings naming the file. `inject_into` is deprecated — it only prints a warning and is ignored (`applies_to` still routes).
+3. A skill missing from the pass table may be in `skills-index.md` instead (overflow past the 10-pass cap, no stack match, or an index-mode pack) — passes still read it on demand. `passes.json` records every known skill with its `matchedBy`.
+4. Pack skills need the pack on disk: `pr-review packs list` shows clone state and freshness; `pr-review packs sync` clones/pulls and refreshes the Linguist cache (stack tags come from it — a missing cache weakens tag matching).
 
 **Cache serving stale data:**
 1. `pr-review cache info` shows what's cached.

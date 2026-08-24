@@ -1,0 +1,3 @@
+# A competent review MUST flag the per-iteration queries (N+1) and/or the sync file read inside the loop.
+must_find:
+  - "N\\+1|per[- ]iteration|inside (the|a) loop|batch|one query per"

@@ -5,7 +5,12 @@ import type { ReviewerDefinition, SkillDefinition } from '../types.js';
 import type { Config } from '../config.js';
 import { autodiscoveryPaths } from '../config.js';
 import { loadReviewerFile, loadSkillFile, loadBuiltInReviewers } from './builtin.js';
+import { loadPackSkills } from '../packs/load.js';
 import type { PluginManifest, PluginReviewerEntry, PluginSkillEntry } from './types.js';
+
+function withOrigin(skills: SkillDefinition[], origin: NonNullable<SkillDefinition['origin']>): SkillDefinition[] {
+  return skills.map((s) => ({ ...s, origin }));
+}
 
 export interface LoadedSet {
   reviewers: ReviewerDefinition[];
@@ -128,7 +133,6 @@ function loadPluginEntries(pluginDir: string, manifest: PluginManifest): LoadedS
       ...def,
       name: s.id,
       appliesTo: s.appliesTo ?? def.appliesTo,
-      injectInto: s.injectInto ?? def.injectInto,
     });
   }
   return { reviewers, skills };
@@ -163,12 +167,14 @@ export interface LoadAllOptions {
   home?: string;
 }
 
-/** A skill opts into explicit (authoritative) routing via targeting frontmatter. */
+/** A skill opts into explicit (authoritative) routing via applies_to globs. */
 function hasReviewTargeting(s: SkillDefinition): boolean {
-  return s.appliesTo.length > 0 || (s.injectInto !== undefined && s.injectInto.length > 0);
+  return s.appliesTo.length > 0;
 }
 
-export function loadAll(opts: LoadAllOptions): LoadedSet & { catalog: SkillDefinition[] } {
+export function loadAll(
+  opts: LoadAllOptions,
+): LoadedSet & { catalog: SkillDefinition[]; packSkills: SkillDefinition[] } {
   const { cwd, config, includeBuiltIn = true, skillsOnly = false } = opts;
   const reviewers: ReviewerDefinition[] = [];
   const skills: SkillDefinition[] = [];
@@ -191,7 +197,7 @@ export function loadAll(opts: LoadAllOptions): LoadedSet & { catalog: SkillDefin
     // against the changed files and injects the relevant ones (see skill-match),
     // leaving the tail available on-demand. Untargeted HOME skills are personal
     // general-purpose helpers (video/design) — not review content — so skipped.
-    const repoGeneric = loadFromPaths(paths.repoSkills, 'skill') as SkillDefinition[];
+    const repoGeneric = withOrigin(loadFromPaths(paths.repoSkills, 'skill') as SkillDefinition[], 'repo');
     skills.push(...repoGeneric.filter(hasReviewTargeting));
     const repoUntargeted = repoGeneric.filter((s) => !hasReviewTargeting(s));
     catalog.push(...repoUntargeted);
@@ -201,12 +207,12 @@ export function loadAll(opts: LoadAllOptions): LoadedSet & { catalog: SkillDefin
       );
     }
 
-    const personalGeneric = loadFromPaths(paths.personalSkills, 'skill') as SkillDefinition[];
+    const personalGeneric = withOrigin(loadFromPaths(paths.personalSkills, 'skill') as SkillDefinition[], 'home');
     skills.push(...personalGeneric.filter(hasReviewTargeting));
     const personalSkipped = personalGeneric.filter((s) => !hasReviewTargeting(s)).length;
     if (personalSkipped > 0) {
       process.stderr.write(
-        `[skills] skipped ${personalSkipped} personal skill(s) from home dirs (~/.claude etc.) — not used for review (add applies_to/inject_into to a repo skill to inject it)\n`,
+        `[skills] skipped ${personalSkipped} personal skill(s) from home dirs (~/.claude etc.) — not used for review (give one applies_to globs, or move it into a repo skill dir, to run it as a pass)\n`,
       );
     }
   }
@@ -218,15 +224,15 @@ export function loadAll(opts: LoadAllOptions): LoadedSet & { catalog: SkillDefin
     reviewers.push(...explicitReviewersDirs);
   }
 
-  const explicitSkills = loadFromPaths(config.skills, 'skill') as SkillDefinition[];
+  const explicitSkills = withOrigin(loadFromPaths(config.skills, 'skill') as SkillDefinition[], 'forced');
   skills.push(...explicitSkills);
-  const explicitSkillsDirs = loadFromPaths(config.skillsDirs, 'skill') as SkillDefinition[];
+  const explicitSkillsDirs = withOrigin(loadFromPaths(config.skillsDirs, 'skill') as SkillDefinition[], 'forced');
   skills.push(...explicitSkillsDirs);
 
   for (const dir of config.pluginDirs) {
     const set = loadPlugin(dir);
     if (!skillsOnly) reviewers.push(...set.reviewers);
-    skills.push(...set.skills);
+    skills.push(...withOrigin(set.skills, 'plugin'));
   }
   for (const name of config.plugins) {
     const resolved = resolveNamedPlugin(name, cwd);
@@ -236,7 +242,7 @@ export function loadAll(opts: LoadAllOptions): LoadedSet & { catalog: SkillDefin
     }
     const set = loadPlugin(resolved);
     if (!skillsOnly) reviewers.push(...set.reviewers);
-    skills.push(...set.skills);
+    skills.push(...withOrigin(set.skills, 'plugin'));
   }
 
   const deduped = dedupeByName({ reviewers, skills });
@@ -248,7 +254,10 @@ export function loadAll(opts: LoadAllOptions): LoadedSet & { catalog: SkillDefin
     if (injectedNames.has(s.name)) continue;
     catalogMap.set(s.name, s); // later wins, mirrors skill dedupe
   }
-  return { ...deduped, catalog: Array.from(catalogMap.values()) };
+  // Pack skills are namespaced `<pack>/<skill>`, so they can never collide with
+  // repo skills or each other — loaded last, never deduped against the rest.
+  const packSkills = loadPackSkills(config.skillPacks, opts.home);
+  return { ...deduped, catalog: Array.from(catalogMap.values()), packSkills };
 }
 
 function dedupeByName(set: LoadedSet): LoadedSet {

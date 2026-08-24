@@ -1,6 +1,6 @@
 ---
-description: Review a GitHub or Azure DevOps pull request using parallel reviewer agents in a single agent session (Copilot CLI or Claude Code) with auto-discovered local skills.
-argument-hint: "<pr-url> [--dry-run | --context-only] [--resume <run-id>] [--skip <name,...>] [--fail-on <severity>] [--lang <code>] [--runtime <copilot|claude>] [--no-companions] [--no-codex] [--skill <file>] [--skills-dir <path>]"
+description: Review a GitHub, Azure DevOps, or GitLab pull request using parallel review passes in a single agent session (Copilot CLI or Claude Code) with auto-discovered local skills.
+argument-hint: "<pr-url> [--dry-run | --context-only] [--resume <run-id>] [--skip <pass,...>] [--fail-on <severity>] [--lang <code>] [--runtime <copilot|claude>] [--no-companions] [--no-codex] [--skill <file>] [--skills-dir <path>]"
 allowed-tools: ["Bash"]
 ---
 
@@ -39,7 +39,7 @@ React to the `status` exit code:
 
 - **0** — done. The final summary can be 10–20 KB and **background/monitor notifications truncate long text — never reproduce the summary from a notification**. Read `~/.pr-review/runs/<run-id>/pr-review-summary.md` (on exit 0 `status` also prints `summary file: <path>` on stderr), or re-run `node "$CLI" status <run-id>` once in the foreground, and print that full content verbatim. Then stop.
 - **20** — still running: show the snapshot, then poll again.
-- **21** — reviewers finished but posting was interrupted. Finish it (fast, no re-review): `node "$CLI" review <pr-url> --resume <run-id>`, then print its summary verbatim.
+- **21** — review passes finished but posting was interrupted. Finish it (fast, no re-review): `node "$CLI" review <pr-url> --resume <run-id>`, then print its summary verbatim.
 - **22** — the run stopped before producing findings. `status` surfaces the recorded fatal error when one exists; report it and point at `~/.pr-review/runs/<run-id>/detached.log`; stop.
 - **1** — run not found: report the error and stop.
 

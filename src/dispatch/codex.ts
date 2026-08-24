@@ -113,6 +113,13 @@ export function mapCodexResult(args: {
   };
 }
 
+/**
+ * The sibling's sandbox argv, exported so a test can pin it: codex is the ONE
+ * dispatch path that cannot carry NO_POSTING_DIRECTIVE semantics through the
+ * orchestrator prompt — `-s read-only` is what keeps it from writing anywhere.
+ */
+export const CODEX_SANDBOX_ARGS = ['exec', '-s', 'read-only', '--skip-git-repo-check'] as const;
+
 /** The failure log body. Pure and exported so its content is testable without spawning. */
 export function formatCodexFailureLog(a: {
   error: string;
@@ -153,17 +160,7 @@ export async function runCodexReviewer(opts: CodexReviewOptions): Promise<Review
     `Output ONLY a JSON array of findings using the shape: ${OUTPUT_SHAPE}. If you find nothing, output []. No prose. No fences.`;
 
   const binary = opts.binary ?? 'codex';
-  const argv = [
-    'exec',
-    '-s',
-    'read-only',
-    '--skip-git-repo-check',
-    '-C',
-    opts.outDir,
-    '-o',
-    outFile,
-    '-',
-  ];
+  const argv = [...CODEX_SANDBOX_ARGS, '-C', opts.outDir, '-o', outFile, '-'];
 
   const result = await new Promise<{ exitCode: number; timedOut: boolean; stderr: string; stdout: string }>((res) => {
     const stderrCap = createCapture();

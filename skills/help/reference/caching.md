@@ -9,7 +9,9 @@ description: "pr-review caching: gather cache, invalidation, bypass flags, and m
 | Layer | Location | Key | Invalidation |
 |---|---|---|---|
 | PR metadata (gather) | `~/.pr-review/cache/<provider>/<owner__repo>/<n>/` | `<headSha>-<lastCommentId>.json` | New commit or new comment |
-| Per-reviewer LLM responses | `~/.pr-review/cache/responses/` | `<reviewer>-<prompt-sha>.json` | **Unused by the single-session review path** — reviewers run as `task()` agents inside one session, so there is no per-reviewer response to cache |
+| Linguist languages.yml | `~/.pr-review/cache/linguist-languages.yml` | — (auto-downloaded on first review) | Refreshed by `pr-review packs sync` |
+| Skill pack clones | `~/.pr-review/packs/<name>/` | pack name | `pr-review packs sync` pulls; >30 days without a sync warns on every review |
+| Per-reviewer LLM responses | `~/.pr-review/cache/responses/` | `<reviewer>-<prompt-sha>.json` | **Unused by the single-session review path** — passes run as `task()` agents inside one session, so there is no per-pass response to cache |
 
 On a gather cache miss, the existing comments fetched to compute the cache key are reused for the run — they are not fetched twice.
 
@@ -31,4 +33,4 @@ pr-review cache clear --all          # clear everything
 
 - Gather cache hits save ~5-10s per run (skips API calls). The key is `headSha` + last comment id, so a new commit or comment auto-busts it.
 - The per-reviewer response cache was removed; only stale files may remain under `responses/` until `pr-review cache clear`.
-- Run artifacts (orchestrator prompt, `pr-context.md`, per-reviewer `skills-<reviewer>.md` files, `phase1-findings.json`, raw outputs, findings JSON, summary) go to `~/.pr-review/runs/<id>/` — these are not cached, just persisted for debugging.
+- Run artifacts (orchestrator prompt, `pr-context.md`, per-pass `pass-<name>.md` files, `skills-all.md`, `skills-index.md`, `passes.json`, `phase1-findings.json`, raw outputs, findings JSON, summary) go to `~/.pr-review/runs/<id>/` — these are not cached, just persisted for debugging.

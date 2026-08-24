@@ -1,38 +1,16 @@
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import type { ReviewerDefinition, SkillDefinition } from '../types.js';
 
-function findPluginRoot(): string {
-  const start = process.argv[1] ? dirname(process.argv[1]) : process.cwd();
-  let cur = start;
-  for (let i = 0; i < 6; i++) {
-    if (existsSync(join(cur, 'plugin.json'))) return cur;
-    const parent = dirname(cur);
-    if (parent === cur) break;
-    cur = parent;
-  }
-  return start;
-}
-
-const PLUGIN_ROOT = findPluginRoot();
-// Built-in reviewers now live as Copilot CLI agents in agents/<name>.md and are
-// registered/dispatched by Copilot CLI itself via the `task` tool. The Node CLI
-// no longer loads them as ReviewerDefinitions.
-const BUILTIN_AGENT_NAMES = [
-  'pr-review-security',
-  'pr-review-quality',
-  'pr-review-architecture',
-  'pr-review-performance',
-  'pr-review-test-coverage',
-  'pr-review-silent-failure',
-  'pr-review-verifier',
-];
-
 interface Frontmatter {
+  name?: unknown;
   description?: string;
-  applies_to?: string[];
-  appliesTo?: string[];
+  applies_to?: string[] | string;
+  appliesTo?: string[] | string;
+  // awesome-copilot convention: CSV string of globs (comma-separated) or a list.
+  applyTo?: string[] | string;
+  tags?: string[] | string;
   model?: string;
   output_format?: 'json' | 'markdown';
   outputFormat?: 'json' | 'markdown';
@@ -55,11 +33,67 @@ export function parseFrontmatter(raw: string, sourcePath?: string): { meta: Fron
   } catch (err) {
     if (sourcePath) {
       process.stderr.write(
-        `[skills] warning: invalid frontmatter YAML in ${sourcePath} — frontmatter ignored (${(err as Error).message.split('\n')[0]})\n`,
+        `[skills] warning: invalid frontmatter YAML in ${printable(sourcePath)} — frontmatter ignored (${printable((err as Error).message.split('\n')[0] ?? '')})\n`,
       );
     }
     return { meta: {}, body: raw };
   }
+}
+
+/**
+ * Normalize a glob-list frontmatter value: a YAML list, or a CSV string
+ * (awesome-copilot writes applyTo as one comma-separated string of globs,
+ * sometimes with spaces after the commas). Anything else → [].
+ */
+export function parseGlobList(v: unknown): string[] {
+  if (typeof v === 'string') {
+    // Split on commas OUTSIDE braces — `**/*.{ts,tsx}` is one glob, not two.
+    const parts: string[] = [];
+    let depth = 0;
+    let cur = '';
+    for (const ch of v) {
+      if (ch === '{') depth++;
+      else if (ch === '}') depth = Math.max(0, depth - 1);
+      if (ch === ',' && depth === 0) {
+        parts.push(cur);
+        cur = '';
+      } else {
+        cur += ch;
+      }
+    }
+    parts.push(cur);
+    return parts.map((s) => s.trim()).filter(Boolean);
+  }
+  if (Array.isArray(v)) {
+    return v.map((s) => String(s).trim()).filter(Boolean);
+  }
+  return [];
+}
+
+/** Strip control characters before echoing third-party (pack) strings to the terminal. */
+export function printable(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[\u0000-\u001f\u007f]/g, '');
+}
+
+/** First `# heading` of the body — the description fallback for files with no frontmatter (OWASP cheat sheets). */
+function firstHeading(body: string): string | undefined {
+  const m = body.match(/^#\s+(.+)$/m);
+  return m ? m[1]!.trim() : undefined;
+}
+
+/**
+ * Skill names are compared against stack tags and used in pass names, so fold
+ * filename conventions into the agentskills.io shape: lowercase, hyphens,
+ * no pack-specific suffixes.
+ */
+// ponytail: the two suffixed packs we ship (awesome-copilot `.instructions`, OWASP `-cheat-sheet`)
+// are the only strip rules; add a suffix here if a new pack needs one.
+export function normalizeSkillName(base: string): string {
+  return base
+    .toLowerCase()
+    .replace(/[_\s]+/g, '-')
+    .replace(/([-.]instructions|-cheat-sheet)$/, '');
 }
 
 export function loadReviewerFile(filePath: string, isBuiltIn = false): ReviewerDefinition {
@@ -71,7 +105,7 @@ export function loadReviewerFile(filePath: string, isBuiltIn = false): ReviewerD
     description: meta.description,
     source: filePath,
     promptBody: body,
-    appliesTo: meta.applies_to ?? meta.appliesTo ?? [],
+    appliesTo: parseGlobList(meta.applies_to ?? meta.appliesTo),
     model: meta.model ?? 'claude-opus-4.8',
     outputFormat: meta.output_format ?? meta.outputFormat ?? 'json',
     skipWhenNoMatch: meta.skip_when_no_match ?? meta.skipWhenNoMatch ?? false,
@@ -82,13 +116,19 @@ export function loadReviewerFile(filePath: string, isBuiltIn = false): ReviewerD
 export function loadSkillFile(filePath: string): SkillDefinition {
   const raw = readFileSync(filePath, 'utf8');
   const { meta, body } = parseFrontmatter(raw, filePath);
+  const declaredName = typeof meta.name === 'string' && meta.name.trim() ? meta.name.trim() : undefined;
+  if (meta.inject_into ?? meta.injectInto) {
+    process.stderr.write(
+      `[skills] warning: ${printable(filePath)}: inject_into is deprecated and ignored — every matched skill now runs as its own review pass (applies_to still scopes it to files)\n`,
+    );
+  }
   return {
-    name: inferNameFromPath(filePath),
-    description: meta.description,
+    name: normalizeSkillName(declaredName ?? inferNameFromPath(filePath)),
+    description: meta.description ?? firstHeading(body),
     source: filePath,
     body,
-    appliesTo: meta.applies_to ?? meta.appliesTo ?? [],
-    injectInto: meta.inject_into ?? meta.injectInto,
+    appliesTo: parseGlobList(meta.applies_to ?? meta.appliesTo ?? meta.applyTo),
+    tags: parseGlobList(meta.tags),
   };
 }
 
@@ -135,14 +175,9 @@ function walkSkillDirs(root: string): string[] {
 }
 
 export function loadBuiltInReviewers(): ReviewerDefinition[] {
-  // Built-in reviewers are Copilot CLI agents (agents/*.md) — registered with
-  // Copilot CLI on plugin install, dispatched via task(agent_type=...) from
-  // the orchestrator. They are not loaded as Node-side ReviewerDefinitions.
+  // There are no built-in reviewers: every review pass is a skill selected at
+  // review time (packs + repo skills). Kept only until the loader drops it.
   return [];
-}
-
-export function getBuiltInAgentNames(): string[] {
-  return [...BUILTIN_AGENT_NAMES];
 }
 
 export function loadFromDir(dirPath: string, type: 'reviewer' | 'skill'): (ReviewerDefinition | SkillDefinition)[] {

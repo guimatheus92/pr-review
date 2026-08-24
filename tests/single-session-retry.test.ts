@@ -24,7 +24,7 @@ function setup() {
     findingsPath: join(dir, 'single-session-findings.json'),
     phase1Path: join(dir, 'phase1-findings.json'),
     orchestratorPrompt: '',
-    dispatchedReviewers: [],
+    passes: [],
     triageSkipped: [],
   } as unknown as SessionContext;
   const opts = { runtime: 'claude', outDir: dir, invokeCompanions: false } as unknown as SingleSessionOptions;

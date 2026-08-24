@@ -139,3 +139,8 @@ test('runCodexReviewer — a failed run leaves a diagnosable log behind', async 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('codex sandbox argv is pinned — the read-only sandbox is the only posting guard on this path', async () => {
+  const { CODEX_SANDBOX_ARGS } = await import('../src/dispatch/codex.js');
+  assert.deepEqual([...CODEX_SANDBOX_ARGS], ['exec', '-s', 'read-only', '--skip-git-repo-check']);
+});

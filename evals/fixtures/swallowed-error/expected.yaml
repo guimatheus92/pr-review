@@ -1,0 +1,3 @@
+# A competent review MUST flag the catch that swallows the save failure while returning ok: true.
+must_find:
+  - "swallow|silent|empty catch|ignored? error|suppress"

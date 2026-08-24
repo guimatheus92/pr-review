@@ -3,8 +3,9 @@ import { strict as assert } from 'node:assert';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { prepareSessionContext } from '../src/dispatch/single-session.js';
-import type { GatherOutput, SkillDefinition } from '../src/types.js';
+import { MAX_TOTAL_PASSES, prepareSessionContext } from '../src/dispatch/single-session.js';
+import type { IndexEntry, ReviewPass } from '../src/dispatch/pass-select.js';
+import type { GatherOutput } from '../src/types.js';
 
 function fixtureGather(paths: string[]): GatherOutput {
   return {
@@ -37,11 +38,25 @@ function fixtureGather(paths: string[]): GatherOutput {
   };
 }
 
-function baseOpts(outDir: string, paths: string[], skills: SkillDefinition[]) {
+function pass(name: string, over: Partial<ReviewPass> = {}): ReviewPass {
+  return {
+    name,
+    source: `/packs/${name}.md`,
+    body: `BODY_OF_${name.replace(/[^a-zA-Z0-9]/g, '_')}`,
+    description: `about ${name}`,
+    matchedBy: 'baseline',
+    matchedOn: [],
+    ...over,
+  };
+}
+
+function baseOpts(outDir: string, paths: string[], passes: ReviewPass[], indexEntries: IndexEntry[] = []) {
   return {
     prUrl: 'https://github.com/o/r/pull/1',
     gather: fixtureGather(paths),
-    skills,
+    passes,
+    indexEntries,
+    stackTags: ['typescript'],
     installedCompanions: [],
     skipReviewers: [],
     outDir,
@@ -49,42 +64,34 @@ function baseOpts(outDir: string, paths: string[], skills: SkillDefinition[]) {
   };
 }
 
-test('skill routing — inject_into and applies_to filter per reviewer; verifier gets the union', () => {
+test('passes — one pass-*.md per pass (rules + ONE body), union has all, prompt records pass names', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
-    const skills: SkillDefinition[] = [
-      { name: 'sec-rules', source: 's1.md', body: 'security rules body', appliesTo: ['**/*.ts'], injectInto: ['security'] },
-      { name: 'global-rules', source: 's2.md', body: 'global rules body', appliesTo: [] },
-      { name: 'frontend-only', source: 's3.md', body: 'frontend body', appliesTo: ['**/*.tsx'] },
+    const passes = [
+      pass('awesome-copilot/go', { matchedBy: 'glob', matchedOn: ['**/*.go'] }),
+      pass('owasp/error-handling'),
     ];
-    const ctx = prepareSessionContext(baseOpts(outDir, ['src/app.ts'], skills));
+    const ctx = prepareSessionContext(baseOpts(outDir, ['src/main.go'], passes));
 
-    const secFile = join(outDir, 'skills-security.md');
-    assert.ok(existsSync(secFile), 'skills-security.md should exist');
-    const secBody = readFileSync(secFile, 'utf8');
-    assert.ok(secBody.includes('security rules body'));
-    assert.ok(secBody.includes('global rules body'));
-    assert.ok(!secBody.includes('frontend body'), 'no .tsx files changed — frontend skill excluded');
+    const goFile = join(outDir, 'pass-awesome-copilot_go.md');
+    assert.ok(existsSync(goFile), 'pass file exists with sanitized name');
+    const goBody = readFileSync(goFile, 'utf8');
+    assert.ok(goBody.includes('# Review pass: awesome-copilot/go'));
+    assert.ok(goBody.includes('Severity scale'), 'pipeline rules present');
+    assert.ok(goBody.includes('BODY_OF_awesome_copilot_go'));
+    assert.ok(!goBody.includes('BODY_OF_owasp_error_handling'), 'exactly one skill per pass file');
 
-    const qualityFile = readFileSync(join(outDir, 'skills-quality.md'), 'utf8');
-    assert.ok(!qualityFile.includes('security rules body'), 'inject_into: [security] must not reach quality');
-    assert.ok(qualityFile.includes('global rules body'));
+    const union = readFileSync(ctx.skillsFiles['all']!, 'utf8');
+    assert.ok(union.includes('BODY_OF_awesome_copilot_go') && union.includes('BODY_OF_owasp_error_handling'));
 
-    const verifierFile = readFileSync(join(outDir, 'skills-verifier.md'), 'utf8');
-    assert.ok(verifierFile.includes('security rules body'), 'verifier gets the union');
-
-    const secRoute = ctx.skillRouting.find((r) => r.skill === 'sec-rules')!;
-    assert.deepEqual(secRoute.targets.filter((t) => t !== 'verifier'), ['security']);
-    const frontendRoute = ctx.skillRouting.find((r) => r.skill === 'frontend-only')!;
-    assert.equal(frontendRoute.targets.length, 0);
-
-    const contextBody = readFileSync(ctx.contextPath, 'utf8');
-    assert.ok(!contextBody.includes('security rules body'), 'skills no longer live in the shared context file');
-    assert.ok(contextBody.includes('UNTRUSTED-COMMENTS'), 'existing comments are fenced');
-
-    assert.ok(ctx.orchestratorPrompt.includes('skills-security.md'));
+    assert.ok(ctx.orchestratorPrompt.includes('record as reviewer name `awesome-copilot/go`'));
+    assert.ok(ctx.orchestratorPrompt.includes('record as reviewer name `owasp/error-handling`'));
     assert.ok(ctx.orchestratorPrompt.includes('phase1-findings.json'));
     assert.ok(ctx.orchestratorPrompt.includes('CRITICAL or HIGH'), 'verifier dispatch is conditional');
+
+    const contextBody = readFileSync(ctx.contextPath, 'utf8');
+    assert.ok(!contextBody.includes('BODY_OF_'), 'skill bodies never live in the shared context file');
+    assert.ok(contextBody.includes('UNTRUSTED-COMMENTS'), 'existing comments are fenced');
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
@@ -94,45 +101,55 @@ test('skill routing — inject_into and applies_to filter per reviewer; verifier
 // `code-review` companion's slash command allows `gh pr comment` and its own
 // instructions post a top-level "### Code review / No issues found" verdict —
 // so the dispatched subagent posted it, bypassing the CLI's inline-only,
-// deduped, idempotent posting. Every dispatch line (built-ins, companion
-// agents, companion slash commands, verifier, and the orchestrator itself)
-// must carry the no-posting directive. This test is the tripwire: if a new
-// dispatch path forgets the directive, it fails.
-test('no-posting directive — reaches the orchestrator and EVERY dispatch line, including companion slash commands', () => {
+// deduped, idempotent posting. Every dispatch line (passes, companion agents,
+// companion slash commands, verifier, and the orchestrator itself) must carry
+// the no-posting directive. This test is the tripwire: if a new dispatch path
+// forgets the directive, it fails.
+test('no-posting directive — reaches the orchestrator and EVERY dispatch line, exact count', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
+    const passes = [pass('p/one'), pass('p/two')];
     const ctx = prepareSessionContext({
-      ...baseOpts(outDir, ['src/app.ts'], []),
+      ...baseOpts(outDir, ['src/app.ts'], passes),
       invokeCompanions: true,
       installedCompanions: ['pr-review-toolkit', 'code-review'],
     });
     const prompt = ctx.orchestratorPrompt;
     const directive = 'do NOT post, comment, review, approve, or write ANYTHING to the pull request';
-    // Every dispatch bullet is a "- <taskCall>" line; each must carry the directive.
     const dispatchLines = prompt.split('\n').filter((l) => /^- .*(task|Task)\(/.test(l));
-    assert.ok(dispatchLines.length >= 8, `expected built-ins + companions + verifier, got ${dispatchLines.length}`);
+    // 2 passes + 6 companion agents + 1 companion slash + 1 verifier — a lost line is a failure too.
+    assert.equal(dispatchLines.length, 10, `expected exactly 10 dispatch lines, got ${dispatchLines.length}`);
+    // Every task-call in the prompt must BE one of those bullet lines — a dispatch
+    // added as prose or a multi-line prompt would escape the per-line assertions.
+    const totalCalls = (prompt.match(/task\(agent_type=|Task\(subagent_type=/g) ?? []).length;
+    assert.equal(totalCalls, dispatchLines.length, 'a task call exists outside the audited dispatch bullets');
     for (const line of dispatchLines) {
       assert.ok(line.includes(directive), `dispatch line missing the no-posting directive: ${line.slice(0, 120)}…`);
     }
-    // The companion slash command additionally runs in analysis-only mode.
     const slashLine = dispatchLines.find((l) => l.includes('/code-review:code-review'));
     assert.ok(slashLine, 'code-review companion slash line present');
     assert.ok(slashLine.includes('analysis-only'), 'slash companions run analysis-only');
     assert.ok(slashLine.includes('SKIP that step'), 'posting steps in the command are explicitly skipped');
-    // The orchestrator itself is bound too.
     assert.ok(prompt.includes(`${directive}`) && prompt.includes('This binds you AND every subagent'), 'orchestrator-level rule present');
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
 });
 
-test('triage — docs-only PR dispatches only quality', () => {
+test('triage — docs-only PR dispatches only file-scoped (glob/forced) passes, never baseline', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
-    const ctx = prepareSessionContext(baseOpts(outDir, ['README.md', 'docs/guide.md'], []));
-    assert.deepEqual(ctx.dispatchedReviewers, ['quality']);
-    assert.ok(ctx.triageSkipped.includes('security'));
-    assert.ok(!ctx.orchestratorPrompt.includes('pr-review:security'));
+    const passes = [
+      pass('p/markdown', { matchedBy: 'glob', matchedOn: ['**/*.md'] }),
+      pass('p/tagged', { matchedBy: 'tag', matchedOn: ['typescript'] }),
+      pass('p/generic', { matchedBy: 'baseline' }),
+      pass('repo/forced-one', { matchedBy: 'forced' }),
+    ];
+    const ctx = prepareSessionContext(baseOpts(outDir, ['README.md', 'docs/guide.md'], passes));
+    assert.deepEqual(ctx.passes.map((p) => p.name), ['p/markdown', 'repo/forced-one']);
+    assert.deepEqual(ctx.triageSkipped, ['p/tagged', 'p/generic']);
+    assert.ok(!ctx.orchestratorPrompt.includes('record as reviewer name `p/generic`'));
+    assert.ok(ctx.orchestratorPrompt.includes('only touches documentation files'));
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
@@ -141,24 +158,35 @@ test('triage — docs-only PR dispatches only quality', () => {
 test('triage — mixed PR dispatches everything', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
-    const ctx = prepareSessionContext(baseOpts(outDir, ['README.md', 'src/app.ts'], []));
+    const passes = [pass('p/generic'), pass('p/tagged', { matchedBy: 'tag' })];
+    const ctx = prepareSessionContext(baseOpts(outDir, ['README.md', 'src/app.ts'], passes));
     assert.equal(ctx.triageSkipped.length, 0);
-    assert.ok(ctx.dispatchedReviewers.includes('security'));
+    assert.equal(ctx.passes.length, 2);
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
 });
 
-test('skill body cap — oversized skill is truncated with a marker', () => {
+test('triage — docs-only PR with no file-scoped pass yields zero passes (review layer decides the exit)', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
-    const skills: SkillDefinition[] = [
-      { name: 'huge', source: 'huge.md', body: 'x'.repeat(20_000), appliesTo: [] },
-    ];
-    prepareSessionContext(baseOpts(outDir, ['src/app.ts'], skills));
-    const qualityFile = readFileSync(join(outDir, 'skills-quality.md'), 'utf8');
-    assert.ok(qualityFile.includes('[truncated: skill body exceeded 16 KB]'));
-    assert.ok(qualityFile.length < 20_000);
+    const ctx = prepareSessionContext(baseOpts(outDir, ['README.md'], [pass('p/generic')]));
+    assert.equal(ctx.passes.length, 0);
+    assert.deepEqual(ctx.triageSkipped, ['p/generic']);
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('pass body cap — oversized skill is truncated with a marker', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const ctx = prepareSessionContext(
+      baseOpts(outDir, ['src/app.ts'], [pass('p/huge', { body: 'x'.repeat(60_000) })]),
+    );
+    const file = readFileSync(ctx.skillsFiles['p/huge']!, 'utf8');
+    assert.ok(file.includes('[truncated: skill body exceeded 48000 bytes]'));
+    assert.ok(file.length < 60_000);
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
@@ -167,7 +195,7 @@ test('skill body cap — oversized skill is truncated with a marker', () => {
 test('language directive lands in the context file when not en', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
-    const ctx = prepareSessionContext({ ...baseOpts(outDir, ['src/app.ts'], []), language: 'pt-BR' });
+    const ctx = prepareSessionContext({ ...baseOpts(outDir, ['src/app.ts'], [pass('p/one')]), language: 'pt-BR' });
     const body = readFileSync(ctx.contextPath, 'utf8');
     assert.ok(body.includes('pt-BR'));
   } finally {
@@ -175,122 +203,62 @@ test('language directive lands in the context file when not en', () => {
   }
 });
 
-test('runtime — claude prompt uses Task(subagent_type=...), copilot uses task(agent_type=...)', () => {
+test('runtime — claude uses Task(subagent_type="general-purpose"), copilot task(agent_type=...); no registered agents', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
-    const claude = prepareSessionContext({ ...baseOpts(outDir, ['src/app.ts'], []), runtime: 'claude' as const });
-    assert.ok(claude.orchestratorPrompt.includes('Task(subagent_type="pr-review:quality"'));
+    const passes = [pass('p/one')];
+    const claude = prepareSessionContext({ ...baseOpts(outDir, ['src/app.ts'], passes), runtime: 'claude' as const });
+    assert.ok(claude.orchestratorPrompt.includes('Task(subagent_type="general-purpose"'));
     assert.ok(claude.orchestratorPrompt.includes('Use the `Task` tool'));
-    const copilot = prepareSessionContext({ ...baseOpts(outDir, ['src/app.ts'], []), runtime: 'copilot' as const });
-    assert.ok(copilot.orchestratorPrompt.includes('task(agent_type="pr-review:quality"'));
+    assert.ok(!claude.orchestratorPrompt.includes('pr-review:'), 'no registered reviewer agents remain');
+    const copilot = prepareSessionContext({ ...baseOpts(outDir, ['src/app.ts'], passes), runtime: 'copilot' as const });
+    assert.ok(copilot.orchestratorPrompt.includes('task(agent_type="general-purpose"'));
     assert.ok(!copilot.orchestratorPrompt.includes('subagent_type'));
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
 });
 
-test('includeCodex — writes skills-codex.md and exposes it in skillsFiles', () => {
+test('codex + companions — both read the union file skills-all.md', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
-    const skills: SkillDefinition[] = [
-      { name: 'global-rules', source: 's.md', body: 'global body', appliesTo: [] },
-      { name: 'codex-only', source: 'c.md', body: 'codex body', appliesTo: [], injectInto: ['codex'] },
-    ];
-    const ctx = prepareSessionContext({ ...baseOpts(outDir, ['src/app.ts'], skills), includeCodex: true });
-    assert.ok(ctx.skillsFiles['codex'], 'skills-codex.md path exposed');
-    const body = readFileSync(ctx.skillsFiles['codex']!, 'utf8');
-    assert.ok(body.includes('global body'));
-    assert.ok(body.includes('codex body'));
-    const qualityBody = readFileSync(ctx.skillsFiles['quality']!, 'utf8');
-    assert.ok(!qualityBody.includes('codex body'), 'inject_into: [codex] must not reach quality');
-  } finally {
-    rmSync(outDir, { recursive: true, force: true });
-  }
-});
-
-test('companions routing — untargeted skills reach skills-companions.md; inject_into-targeted skills never leak there', () => {
-  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
-  try {
-    const skills: SkillDefinition[] = [
-      { name: 'untargeted', source: 'u.md', body: 'untargeted body', appliesTo: [] },
-      { name: 'sec-only', source: 's.md', body: 'sec-only body', appliesTo: [], injectInto: ['security'] },
-    ];
+    const passes = [pass('p/one'), pass('p/two')];
     const ctx = prepareSessionContext({
-      ...baseOpts(outDir, ['src/app.ts'], skills),
-      installedCompanions: ['pr-review-toolkit'],
+      ...baseOpts(outDir, ['src/app.ts'], passes),
+      includeCodex: true,
       invokeCompanions: true,
+      installedCompanions: ['pr-review-toolkit'],
     });
-    const companionsFile = readFileSync(ctx.skillsFiles['companions']!, 'utf8');
-    assert.ok(companionsFile.includes('untargeted body'));
-    assert.ok(!companionsFile.includes('sec-only body'), 'inject_into-targeted skill must not leak to companions');
-    const verifierFile = readFileSync(ctx.skillsFiles['verifier']!, 'utf8');
-    assert.ok(verifierFile.includes('untargeted body'), 'verifier union includes companion skills');
-    assert.ok(ctx.orchestratorPrompt.includes('pr-review-toolkit:code-reviewer'), 'companion agents dispatched');
-    assert.ok(ctx.orchestratorPrompt.includes('skills-companions.md'));
+    assert.ok(ctx.skillsFiles['all']!.endsWith('skills-all.md'));
+    const union = readFileSync(ctx.skillsFiles['all']!, 'utf8');
+    assert.ok(union.includes('BODY_OF_p_one') && union.includes('BODY_OF_p_two'));
+    const companionLine = ctx.orchestratorPrompt
+      .split('\n')
+      .find((l) => l.includes('pr-review-toolkit:code-reviewer'));
+    assert.ok(companionLine, 'companion agents dispatched');
+    assert.ok(companionLine.includes('skills-all.md'), 'companions read the union');
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
 });
 
-test('BUILTIN_AGENTS registry stays in lockstep with agents/*.md files', async () => {
-  const { BUILTIN_AGENTS } = await import('../src/dispatch/single-session.js');
-  const { readdirSync } = await import('node:fs');
-  const files = readdirSync('agents').filter((f) => f.endsWith('.md')).map((f) => f.replace(/\.md$/, ''));
-  const registered = [...BUILTIN_AGENTS.map((a: string) => a.replace(/^pr-review:/, '')), 'verifier'];
-  assert.deepEqual(registered.sort(), files.sort(), 'agents/*.md and BUILTIN_AGENTS(+verifier) must match');
-});
-
-test('triage guard — docs-only PR with quality skipped never dispatches zero reviewers', () => {
+test('verifier — pipeline step: verifier.md written, generic-agent line in a conditional phase; --skip verifier removes both', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
-    const ctx = prepareSessionContext({
-      ...baseOpts(outDir, ['README.md'], []),
-      skipReviewers: ['quality'],
-    });
-    assert.ok(ctx.dispatchedReviewers.length > 0, 'must not triage down to an empty dispatch');
-    assert.equal(ctx.triageSkipped.length, 0, 'triage backs off entirely when its survivor set is empty');
-  } finally {
-    rmSync(outDir, { recursive: true, force: true });
-  }
-});
+    const ctx = prepareSessionContext(baseOpts(outDir, ['src/app.ts'], [pass('p/one')]));
+    assert.ok(ctx.verifierPath && existsSync(ctx.verifierPath));
+    assert.ok(readFileSync(ctx.verifierPath!, 'utf8').includes('Cross-cutting issues'));
+    assert.ok(ctx.orchestratorPrompt.includes('verifier.md'));
+    assert.ok(ctx.orchestratorPrompt.includes('record as reviewer name `verifier`'));
 
-test('triage — never triages down to zero: docs-only PR with quality skipped dispatches everything', () => {
-  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
-  try {
-    const ctx = prepareSessionContext({
-      ...baseOpts(outDir, ['README.md', 'docs/guide.md'], []),
-      skipReviewers: ['quality'],
-    });
-    assert.ok(ctx.dispatchedReviewers.length > 0, 'dispatch list must never be empty');
-    assert.ok(ctx.dispatchedReviewers.includes('security'));
-    assert.equal(ctx.triageSkipped.length, 0);
-  } finally {
-    rmSync(outDir, { recursive: true, force: true });
-  }
-});
-
-test('catalog — renders name/description/path in pr-context.md; body never injected; absent when empty', () => {
-  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
-  try {
-    const catalog: SkillDefinition[] = [
-      { name: 'pp-planos', source: '/abs/.claude/skills/pp-planos/SKILL.md', body: 'CATALOG_BODY_MARKER should never be injected', appliesTo: [], description: 'plan and limit rules' },
-    ];
-    const ctx = prepareSessionContext({ ...baseOpts(outDir, ['src/app.ts'], []), catalog });
-    const contextBody = readFileSync(ctx.contextPath, 'utf8');
-    assert.ok(contextBody.includes('## Workspace Skills Catalog'), 'catalog header present');
-    assert.ok(contextBody.includes('**pp-planos**'), 'catalog entry name present');
-    assert.ok(contextBody.includes('plan and limit rules'), 'catalog description present');
-    assert.ok(contextBody.includes('/abs/.claude/skills/pp-planos/SKILL.md'), 'catalog path present');
-    assert.ok(!contextBody.includes('CATALOG_BODY_MARKER'), 'catalog body is not injected into pr-context.md');
-    for (const f of readdirSync(outDir).filter((n) => n.startsWith('skills-') && n.endsWith('.md'))) {
-      assert.ok(!readFileSync(join(outDir, f), 'utf8').includes('CATALOG_BODY_MARKER'), `catalog body must not leak into ${f}`);
-    }
-
-    // Control: no catalog → no header.
     const outDir2 = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
     try {
-      const ctx2 = prepareSessionContext(baseOpts(outDir2, ['src/app.ts'], []));
-      assert.ok(!readFileSync(ctx2.contextPath, 'utf8').includes('## Workspace Skills Catalog'));
+      const skipped = prepareSessionContext({
+        ...baseOpts(outDir2, ['src/app.ts'], [pass('p/one')]),
+        skipReviewers: ['verifier'],
+      });
+      assert.equal(skipped.verifierPath, undefined);
+      assert.ok(!skipped.orchestratorPrompt.includes('record as reviewer name `verifier`'));
     } finally {
       rmSync(outDir2, { recursive: true, force: true });
     }
@@ -299,82 +267,132 @@ test('catalog — renders name/description/path in pr-context.md; body never inj
   }
 });
 
-test('skill-routing.json — persisted at dispatch time, equal to ctx.skillRouting (for --resume)', () => {
+test('--skip — full pack/skill name and bare suffix both remove the pass; routing says skipped', () => {
+  for (const skipAs of ['awesome-copilot/go', 'go']) {
+    const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+    try {
+      const passes = [pass('awesome-copilot/go', { matchedBy: 'glob' }), pass('p/other')];
+      const ctx = prepareSessionContext({ ...baseOpts(outDir, ['src/app.ts'], passes), skipReviewers: [skipAs] });
+      assert.deepEqual(ctx.passes.map((p) => p.name), ['p/other'], `--skip ${skipAs}`);
+      assert.equal(ctx.routing.find((r) => r.name === 'awesome-copilot/go')?.matchedBy, 'skipped');
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('cap — more passes than MAX_TOTAL_PASSES: overflow goes to the index file and routes as index', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
-    const skills: SkillDefinition[] = [
-      { name: 'sec-rules', source: 's1.md', body: 'b', appliesTo: ['**/*.ts'], injectInto: ['security'] },
-    ];
-    const catalog: SkillDefinition[] = [
-      { name: 'pp-billing', source: '/abs/pp-billing.md', body: 'b', appliesTo: [], description: 'billing' },
-    ];
-    const ctx = prepareSessionContext({ ...baseOpts(outDir, ['src/app.ts'], skills), catalog });
-    const persisted = JSON.parse(readFileSync(join(outDir, 'skill-routing.json'), 'utf8'));
-    assert.deepEqual(persisted, ctx.skillRouting);
+    const passes = Array.from({ length: MAX_TOTAL_PASSES + 2 }, (_, i) => pass(`p/pass-${String(i).padStart(2, '0')}`));
+    const ctx = prepareSessionContext(baseOpts(outDir, ['src/app.ts'], passes));
+    assert.equal(ctx.passes.length, MAX_TOTAL_PASSES);
+    const overflowNames = [`p/pass-${MAX_TOTAL_PASSES}`, `p/pass-${MAX_TOTAL_PASSES + 1}`];
+    const index = readFileSync(join(outDir, 'skills-index.md'), 'utf8');
+    for (const n of overflowNames) {
+      assert.ok(index.includes(`**${n}**`), `${n} listed in the index`);
+      assert.equal(ctx.routing.find((r) => r.name === n)?.matchedBy, 'index');
+      assert.ok(!existsSync(join(outDir, `pass-${n.replace('/', '_')}.md`)), `${n} has no pass file`);
+    }
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
 });
 
-test('catalog — a skill matching the changed files is promoted to injected (not left on-demand)', () => {
+test('stack + index — pr-context carries ## Stack and points at skills-index.md; both absent when empty', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
-    const catalog: SkillDefinition[] = [
-      { name: 'orders-rules', source: '/abs/orders-rules.md', body: 'ORDERS_RULE_BODY', appliesTo: [], description: 'rules for the orders service and checkout' },
-      { name: 'video-helper', source: '/abs/video.md', body: 'VIDEO_BODY', appliesTo: [], description: 'video editing captions and overlays' },
+    const indexEntries: IndexEntry[] = [
+      { name: 'anthropic-cybersecurity/detecting-x', description: 'detects x', source: '/packs/a/x.md', tags: ['x'] },
     ];
-    const ctx = prepareSessionContext({ ...baseOpts(outDir, ['src/orders/service.ts'], []), catalog });
-
-    const orders = ctx.skillRouting.find((r) => r.skill === 'orders-rules')!;
-    assert.ok(!orders.targets.includes('(catalog — on-demand)'), 'matched skill promoted out of catalog');
-    assert.ok(orders.targets.includes('security'), 'promoted skill injected into reviewers');
-    const video = ctx.skillRouting.find((r) => r.skill === 'video-helper')!;
-    assert.deepEqual(video.targets, ['(catalog — on-demand)'], 'unmatched skill stays on-demand');
-
-    const secBody = readFileSync(join(outDir, 'skills-security.md'), 'utf8');
-    assert.ok(secBody.includes('ORDERS_RULE_BODY'), 'promoted skill body is injected');
-    assert.ok(!secBody.includes('VIDEO_BODY'), 'unmatched skill body is not injected');
-    // The on-demand catalog in pr-context.md lists only the unmatched skill.
+    const ctx = prepareSessionContext({
+      ...baseOpts(outDir, ['src/app.ts'], [pass('p/one')], indexEntries),
+      stackTags: ['typescript', 'react'],
+    });
     const contextBody = readFileSync(ctx.contextPath, 'utf8');
-    assert.ok(contextBody.includes('**video-helper**'), 'unmatched skill listed in catalog');
-    assert.ok(!contextBody.includes('**orders-rules**'), 'promoted skill no longer in the catalog list');
+    assert.ok(contextBody.includes('## Stack'));
+    assert.ok(contextBody.includes('typescript, react'));
+    assert.ok(contextBody.includes('## More skills (on-demand)'));
+    assert.ok(contextBody.includes('skills-index.md'));
+    const index = readFileSync(join(outDir, 'skills-index.md'), 'utf8');
+    assert.ok(index.includes('**anthropic-cybersecurity/detecting-x** — detects x'));
+    // Index bodies never leak into pass files.
+    for (const f of readdirSync(outDir).filter((n) => n.startsWith('pass-'))) {
+      assert.ok(!readFileSync(join(outDir, f), 'utf8').includes('detecting-x'));
+    }
+
+    const outDir2 = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+    try {
+      const empty = prepareSessionContext({ ...baseOpts(outDir2, ['src/app.ts'], [pass('p/one')]), stackTags: [] });
+      const body2 = readFileSync(empty.contextPath, 'utf8');
+      assert.ok(body2.includes('(none detected)'));
+      assert.ok(!body2.includes('## More skills'));
+      assert.ok(!existsSync(join(outDir2, 'skills-index.md')));
+    } finally {
+      rmSync(outDir2, { recursive: true, force: true });
+    }
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
 });
 
-test('catalog — routing table rows carry the (catalog — on-demand) target', () => {
+test('project rules — skills-project.md injected into every pass line, companions, verifier, and routing', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
-    const catalog: SkillDefinition[] = [
-      { name: 'pp-billing', source: '/abs/.claude/skills/pp-billing.md', body: 'b', appliesTo: [], description: 'billing' },
+    const projectSkills = [
+      { name: 'pp-regras-plano', description: 'plan rules', source: '/repo/.agents/skills/pp-regras-plano/SKILL.md', body: 'PROJECT_RULE_MARKER', appliesTo: [] },
     ];
-    const ctx = prepareSessionContext({ ...baseOpts(outDir, ['src/app.ts'], []), catalog });
-    const row = ctx.skillRouting.find((r) => r.skill === 'pp-billing')!;
-    assert.deepEqual(row.targets, ['(catalog — on-demand)']);
+    const ctx = prepareSessionContext({
+      ...baseOpts(outDir, ['src/app.ts'], [pass('p/one'), pass('p/two')]),
+      projectSkills,
+      invokeCompanions: true,
+      installedCompanions: ['pr-review-toolkit'],
+    });
+    const projectFile = ctx.skillsFiles['project']!;
+    assert.ok(projectFile.endsWith('skills-project.md'));
+    const body = readFileSync(projectFile, 'utf8');
+    assert.ok(body.includes('PROJECT_RULE_MARKER'));
+    assert.ok(body.includes('authoritative and OVERRIDE'), 'project rules keep the authoritative wording');
+
+    const prompt = ctx.orchestratorPrompt;
+    const passLines = prompt.split('\n').filter((l) => l.includes('record as reviewer name `p/'));
+    assert.equal(passLines.length, 2);
+    for (const l of passLines) assert.ok(l.includes('skills-project.md'), 'every pass reads the project rules');
+    const companionLine = prompt.split('\n').find((l) => l.includes('pr-review-toolkit:code-reviewer'))!;
+    assert.ok(companionLine.includes('skills-project.md'), 'companions get the authoritative rules');
+    const verifierLine = prompt.split('\n').find((l) => l.includes('record as reviewer name `verifier`'))!;
+    assert.ok(verifierLine.includes('skills-project.md'), 'verifier gets the authoritative rules');
+
+    assert.equal(ctx.routing.find((r) => r.name === 'pp-regras-plano')?.matchedBy, 'context');
+    // --skip drops a project rule from the context file too.
+    const outDir2 = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+    try {
+      const skipped = prepareSessionContext({
+        ...baseOpts(outDir2, ['src/app.ts'], [pass('p/one')]),
+        projectSkills,
+        skipReviewers: ['pp-regras-plano'],
+      });
+      assert.equal(skipped.skillsFiles['project'], undefined);
+      assert.equal(skipped.routing.find((r) => r.name === 'pp-regras-plano')?.matchedBy, 'skipped');
+    } finally {
+      rmSync(outDir2, { recursive: true, force: true });
+    }
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
 });
 
-test('catalog caps — description truncates at 200 chars and the section stops with an omitted note', () => {
+test('passes.json — persisted at dispatch time, equal to ctx.routing (for --resume)', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
-    const longDesc = 'D'.repeat(1000);
-    const catalog: SkillDefinition[] = Array.from({ length: 300 }, (_, i) => ({
-      name: `skill-${i}`,
-      source: `/abs/.claude/skills/skill-${i}.md`,
-      body: 'b',
-      appliesTo: [],
-      description: longDesc,
-    }));
-    const ctx = prepareSessionContext({ ...baseOpts(outDir, ['src/app.ts'], []), catalog });
-    const contextBody = readFileSync(ctx.contextPath, 'utf8');
-    // First entry's description is capped to 200 D's (201 would exceed the cap).
-    assert.ok(contextBody.includes(`**skill-0** — ${'D'.repeat(200)} `), 'description truncated at 200 chars');
-    assert.ok(!contextBody.includes('D'.repeat(201)), 'no description exceeds 200 chars');
-    assert.ok(/\(\+\d+ more skills omitted\)/.test(contextBody), 'overflow note present');
-    assert.ok(!contextBody.includes('skill-299'), 'later skills omitted by the section cap');
+    const indexEntries: IndexEntry[] = [{ name: 'p/indexed', description: '', source: '/x.md', tags: [] }];
+    const ctx = prepareSessionContext(baseOpts(outDir, ['src/app.ts'], [pass('p/one', { matchedBy: 'glob' })], indexEntries));
+    const persisted = JSON.parse(readFileSync(join(outDir, 'passes.json'), 'utf8'));
+    assert.deepEqual(persisted, ctx.routing);
+    assert.deepEqual(
+      ctx.routing.map((r) => `${r.name}:${r.matchedBy}`),
+      ['p/one:glob', 'p/indexed:index'],
+    );
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }

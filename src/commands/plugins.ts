@@ -7,14 +7,17 @@ export async function pluginsList(opts: { reviewersDir?: string[]; skillsDir?: s
     cliOverrides: { reviewersDirs: opts.reviewersDir, skillsDirs: opts.skillsDir },
   });
   const set = loadAll({ cwd: process.cwd(), config });
-  console.log(`Reviewers (${set.reviewers.length}):`);
-  for (const r of set.reviewers) {
-    console.log(`  - ${r.name}${r.isBuiltIn ? ' (built-in)' : ''}  model=${r.model}  source=${r.source}`);
+  // No reviewers listing: standalone reviewer .md files parse but are never
+  // dispatched — every review pass is a skill.
+  console.log(`Skills (${set.skills.length + set.catalog.length}):`);
+  for (const s of [...set.skills, ...set.catalog]) {
+    console.log(`  - ${s.name}  applies_to=${JSON.stringify(s.appliesTo)}  source=${s.source}`);
   }
-  console.log(`\nSkills (${set.skills.length}):`);
-  for (const s of set.skills) {
-    const inject = s.injectInto?.length ? ` inject_into=${s.injectInto.join(',')}` : '';
-    console.log(`  - ${s.name}  applies_to=${JSON.stringify(s.appliesTo)}${inject}  source=${s.source}`);
+  const byPack = new Map<string, number>();
+  for (const s of set.packSkills) byPack.set(s.pack ?? '?', (byPack.get(s.pack ?? '?') ?? 0) + 1);
+  console.log(`\nPack skills (${set.packSkills.length}):`);
+  for (const [pack, count] of byPack) {
+    console.log(`  - ${pack}: ${count} skill(s)`);
   }
 }
 

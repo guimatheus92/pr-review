@@ -1,0 +1,22 @@
+diff --git a/src/reports/summary.js b/src/reports/summary.js
+index 5555555..6666666 100644
+--- a/src/reports/summary.js
++++ b/src/reports/summary.js
+@@ -5,6 +5,18 @@ const { readFileSync } = require('node:fs');
+
+ const TEMPLATE_PATH = './templates/row.html';
+
++async function buildSummary(accountIds) {
++  const rows = [];
++  for (const id of accountIds) {
++    const account = await db.query('SELECT * FROM accounts WHERE id = $1', [id]);
++    const orders = await db.query('SELECT * FROM orders WHERE account_id = $1', [id]);
++    const template = readFileSync(TEMPLATE_PATH, 'utf8');
++    rows.push(render(template, { account: account.rows[0], orders: orders.rows }));
++  }
++  return rows.join('\n');
++}
++
+ function render(template, data) {
+   return template.replace(/\{(\w+)\}/g, (_, key) => String(data[key] ?? ''));
+ }

@@ -12,3 +12,6 @@ dist/*
 !dist/cli.cjs
 !dist/cli.cjs.map
 
+
+# personal command for another project, never ship it
+.claude/commands/fix.md

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 interface InitOptions {
@@ -7,42 +7,12 @@ interface InitOptions {
   withConfig?: boolean;
 }
 
-interface StackProfile {
-  name: string;
-  globs: string[];
-  marker: string;
-}
-
-const STACK_PROFILES: StackProfile[] = [
-  { name: 'csharp', marker: '*.csproj', globs: ['**/*.cs', '**/*.csproj'] },
-  { name: 'typescript', marker: 'tsconfig.json', globs: ['**/*.ts', '**/*.tsx'] },
-  { name: 'javascript', marker: 'package.json', globs: ['**/*.js', '**/*.jsx', '**/*.mjs'] },
-  { name: 'python', marker: 'pyproject.toml', globs: ['**/*.py'] },
-  { name: 'python-req', marker: 'requirements.txt', globs: ['**/*.py'] },
-  { name: 'rust', marker: 'Cargo.toml', globs: ['**/*.rs'] },
-  { name: 'go', marker: 'go.mod', globs: ['**/*.go'] },
-];
-
-function detectStack(cwd: string): StackProfile | null {
-  for (const profile of STACK_PROFILES) {
-    const direct = join(cwd, profile.marker);
-    try {
-      if (statSync(direct).isFile()) return profile;
-    } catch {
-      // not a direct match
-    }
-  }
-  return null;
-}
-
-const STARTER_SKILL_TEMPLATE = (stack: StackProfile | null): string => {
-  const globsLine = stack
-    ? `applies_to:\n${stack.globs.map((g) => `  - "${g}"`).join('\n')}`
-    : `applies_to: []   # leave empty to apply to all files`;
-  return `---
+// No stack detection here: the pack system owns stack knowledge at review time
+// (Linguist + manifests). A starter template guessing globs from a marker file
+// would be exactly the hand-written stack table this tool no longer carries.
+const STARTER_SKILL_TEMPLATE = `---
 description: Team-specific rules for code review. Fill this in with your team's conventions, business rules, and architectural constraints.
-${globsLine}
-# inject_into: [security, architecture]   # optional — restrict to specific reviewers; omit to reach all
+applies_to: []   # e.g. ["**/*.cs"] — leave empty to run on every PR
 ---
 
 # Team Rules
@@ -54,27 +24,28 @@ This is a starter template. Replace this content with your team's rules. Example
 - **Forbidden patterns**: e.g. "Direct \`HttpClient\` instantiation is banned; use \`IHttpClientFactory\`."
 - **Required test patterns**: e.g. "Every controller action must have at least one integration test."
 
-pr-review injects this file into each reviewer whose name matches \`inject_into\` (all reviewers when omitted), whenever a changed file matches \`applies_to\` (all PRs when empty). Preview exactly which reviewers receive it with:
+Each matching skill runs as its own review pass (\`applies_to\` scopes it to files; empty = every PR). Preview the passes with:
 
     pr-review review <pr-url> --context-only
 `;
-};
 
 const CONFIG_TEMPLATE = `# .pr-review.yaml — per-repo config (committed; shared with the team)
 # All keys are optional. Delete what you don't need.
 
-# Default model for reviewers that don't specify their own.
+# Default model for review passes.
 # default_model: claude-opus-4.8
 
-# Extra directories to load skills/reviewers from (beyond the auto-discovered skill dirs).
+# External skill packs (git repos) supplying the review passes. REPLACES the
+# built-in default list entirely — 'skill_packs: []' disables packs.
+# skill_packs:
+#   - github/awesome-copilot
+#   - OWASP/CheatSheetSeries
+
+# Extra directories to load skills from (every skill in them runs as a forced pass).
 # extra_skills_dirs:
 #   - ./docs/conventions
-# extra_reviewers_dirs:
-#   - ./docs/code-review
 
 # Single files to include.
-# extra_reviewers:
-#   - ./SECURITY-CHECKLIST.md
 # extra_skills:
 #   - ./ARCHITECTURE.md
 
@@ -88,7 +59,6 @@ export interface InitResult {
   createdDirs: string[];
   createdFiles: string[];
   skippedFiles: string[];
-  detectedStack: string | null;
 }
 
 export function runInit(opts: InitOptions = {}): InitResult {
@@ -97,7 +67,6 @@ export function runInit(opts: InitOptions = {}): InitResult {
     createdDirs: [],
     createdFiles: [],
     skippedFiles: [],
-    detectedStack: null,
   };
 
   // Scaffold into a dir the review path actually discovers (.claude/skills is the
@@ -108,14 +77,11 @@ export function runInit(opts: InitOptions = {}): InitResult {
     result.createdDirs.push(skillsDir);
   }
 
-  const stack = detectStack(cwd);
-  result.detectedStack = stack?.name ?? null;
-
   const starterPath = join(skillsDir, 'team-rules.md');
   if (existsSync(starterPath) && !opts.force) {
     result.skippedFiles.push(starterPath);
   } else {
-    writeFileSync(starterPath, STARTER_SKILL_TEMPLATE(stack), 'utf8');
+    writeFileSync(starterPath, STARTER_SKILL_TEMPLATE, 'utf8');
     result.createdFiles.push(starterPath);
   }
 

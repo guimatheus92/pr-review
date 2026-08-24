@@ -64,6 +64,35 @@ export async function runDoctor(): Promise<number> {
     adoPat ? 'PAT env var' : az ? 'az CLI available for bearer token' : 'set AZURE_DEVOPS_PAT or install az (only needed for ADO PRs)',
   );
 
+  process.stdout.write('Skill packs\n');
+  const { existsSync } = await import('node:fs');
+  const { gitAvailable, packStatus, STALE_DAYS } = await import('../packs/sync.js');
+  const { listPackFiles } = await import('../packs/load.js');
+  const { linguistCachePath } = await import('../stack/linguist.js');
+  const { maskUrl } = await import('../stack/detect.js');
+  (gitAvailable() ? ok : bad)('git on PATH', gitAvailable() ? '' : 'install git — packs cannot clone/sync without it');
+  if (config.skillPacks.length === 0) {
+    ok('skill_packs: [] — packs disabled (review passes come from repo skills only)');
+  }
+  for (const pack of config.skillPacks) {
+    const st = packStatus(pack);
+    if (!st.exists) {
+      bad(`pack ${pack.name}`, `not cloned (${maskUrl(pack.git)}) — clones on the next review, or run \`pr-review packs sync\``);
+      continue;
+    }
+    const n = listPackFiles(st.dir, pack.include, pack.exclude).length;
+    const age = st.ageDays === null ? 'never synced' : `synced ${Math.floor(st.ageDays)}d ago`;
+    const stale = st.ageDays === null || st.ageDays > STALE_DAYS;
+    (stale ? bad : ok)(
+      `pack ${pack.name}${pack.mode === 'index' ? ' (index-only)' : ''}`,
+      `${n} skill(s), ${st.meta?.commit?.slice(0, 7) ?? '?'}, ${age}${stale ? ' — run `pr-review packs sync`' : ''}`,
+    );
+  }
+  (existsSync(linguistCachePath()) ? ok : bad)(
+    'Linguist languages.yml cache',
+    existsSync(linguistCachePath()) ? '' : 'downloads on first review or `pr-review packs sync`',
+  );
+
   process.stdout.write('Config\n');
   ok(`language=${config.language}, dedupe=${config.dedupeMode}, autodiscover=${config.autodiscover}`);
   for (const [k, v] of Object.entries(sources)) {

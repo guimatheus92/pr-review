@@ -1,0 +1,19 @@
+diff --git a/src/routes/users.js b/src/routes/users.js
+index 1111111..2222222 100644
+--- a/src/routes/users.js
++++ b/src/routes/users.js
+@@ -10,6 +10,14 @@ const router = express.Router();
+ router.get('/health', (req, res) => {
+   res.json({ ok: true });
+ });
++
++router.get('/users/:id', async (req, res) => {
++  const query = "SELECT * FROM users WHERE id = " + req.params.id;
++  const result = await db.query(query);
++  if (result.rows.length === 0) return res.status(404).json({ error: 'not found' });
++  res.json(result.rows[0]);
++});
++
+ router.get('/version', (req, res) => {
+   res.json({ version: process.env.APP_VERSION });
+ });

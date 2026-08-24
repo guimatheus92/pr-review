@@ -4,10 +4,14 @@ import { runGather } from './gather.js';
 import { runPost } from './post.js';
 import { loadAll } from '../plugins/loader.js';
 import { loadConfig, type ConfigOverrides } from '../config.js';
-import { CATALOG_TARGET, parseFindingsFile, prepareSessionContext, REVIEWER_OUTPUT_FILES, runSingleSession, type SkillRoute } from '../dispatch/single-session.js';
+import { parseFindingsFile, prepareSessionContext, REVIEWER_OUTPUT_FILES, runSingleSession } from '../dispatch/single-session.js';
+import { selectPasses, type PassRoute } from '../dispatch/pass-select.js';
+import { ensurePacks } from '../packs/sync.js';
+import { loadLinguist } from '../stack/linguist.js';
+import { detectStack } from '../stack/detect.js';
 import { resolveRuntime, type Runtime, type RuntimeChoice } from '../dispatch/runtime.js';
 import { detectCodex, runCodexReviewer } from '../dispatch/codex.js';
-import { ensureRunDir, ERROR_FILE, RUNS_ROOT } from '../util/tmp.js';
+import { ensureRunDir, ERROR_FILE, RUNS_ROOT, sanitizeForFilename } from '../util/tmp.js';
 import { appendProgress } from '../util/progress.js';
 import { readPostedMarker, writePostedMarker } from '../util/posted-marker.js';
 import { withRetry } from '../util/retry.js';
@@ -16,10 +20,6 @@ import { dedupeAgainstExisting, dedupeWithinBatch } from '../dedupe.js';
 import { detectCompanions, formatWarning } from '../plugins/companions.js';
 import type { PrProvider } from '../providers/types.js';
 import type { Finding, GatherOutput, ReviewerOutput, Severity } from '../types.js';
-
-function sanitizeForFilename(name: string): string {
-  return name.replace(/[\\\/:*?"<>|]/g, '_');
-}
 
 interface ReviewCmdOptions {
   prUrl: string;
@@ -53,6 +53,12 @@ interface ReviewCmdOptions {
   forcePost?: boolean;
   /** Test seam — when omitted, resolved via detectProvider(prUrl): in runReview for a fresh run, in runPost on --resume. */
   provider?: PrProvider;
+  /** Eval hook: read the gather JSON from this file instead of the provider APIs. Requires --dry-run. */
+  fromGather?: string;
+  /** Test seam — replaces the pass-selection step. */
+  selectPassesFn?: typeof selectPasses;
+  /** Test seam — isolates config/packs/Linguist from the developer's real home dir. */
+  homeOverride?: string;
 }
 
 export interface ReviewResult {
@@ -110,49 +116,36 @@ function earlyExitGate(gather: GatherOutput): string | null {
   return null;
 }
 
-/** Shown when a skill reached no dispatched reviewer — globs matched nothing, or its
- *  inject_into named a reviewer that was skipped/triaged away. Shared with --context-only. */
-const NO_ROUTE_LABEL = '(nobody — no matching files/reviewers)';
-
 /**
- * Split skill routing into injected (rules) vs catalog (on-demand), and render
- * both a compact one-liner (`brief`, for the live progress feed) and the full
- * `## Skills` markdown section. `verifier` is filtered out of a skill's displayed
- * targets — when it runs it receives the union of what the other reviewers got, so
- * repeating it on every row is noise. The one exception: a skill whose *only* target
- * is verifier still shows it, otherwise the row would misreport as unrouted.
+ * Render the pass routing as both a compact one-liner (`brief`, for the live
+ * progress feed) and the full `## Skills` markdown section: which skills ran as
+ * their own pass (and why they matched), which sit in the on-demand index, and
+ * which were skipped.
  */
-export function summarizeSkills(skillRouting: SkillRoute[]): { section: string[]; brief: string } {
-  const isCatalog = (r: SkillRoute) => r.targets.length === 1 && r.targets[0] === CATALOG_TARGET;
-  const injected = skillRouting.filter((r) => !isCatalog(r));
-  const catalog = skillRouting.filter(isCatalog);
-  const reviewers = new Set<string>();
-  for (const r of injected) for (const t of r.targets) if (t !== 'verifier' && t !== CATALOG_TARGET) reviewers.add(t);
+export function summarizePasses(routing: PassRoute[]): { section: string[]; brief: string } {
+  const ran = routing.filter((r) => r.matchedBy !== 'index' && r.matchedBy !== 'skipped' && r.matchedBy !== 'context');
+  const context = routing.filter((r) => r.matchedBy === 'context');
+  const index = routing.filter((r) => r.matchedBy === 'index');
+  const skipped = routing.filter((r) => r.matchedBy === 'skipped');
 
-  const brief = `${injected.length} skill(s) → ${reviewers.size} reviewer(s) · ${catalog.length} catalog`;
+  const brief = `${ran.length} pass(es)${context.length ? ` · ${context.length} project rule(s)` : ''} · ${index.length} on-demand`;
   const section = [
     `## Skills`,
     ``,
-    `**Injected:** ${injected.length} (into ${reviewers.size} reviewer${reviewers.size === 1 ? '' : 's'}) · **Catalog (on-demand):** ${catalog.length}`,
+    `**Passes:** ${ran.length}${context.length ? ` · **Project rules (in every pass):** ${context.length}` : ''} · **On-demand (index):** ${index.length}${skipped.length ? ` · **Skipped:** ${skipped.length}` : ''}`,
   ];
-  if (injected.length > 0) {
-    section.push(``, `| Skill | Injected into |`, `|---|---|`);
-    for (const r of injected) {
-      // Same predicate as the reviewer count above, so a row can never disagree with the total.
-      const into = r.targets.filter((t) => t !== 'verifier' && t !== CATALOG_TARGET);
-      let label = NO_ROUTE_LABEL;
-      if (into.length > 0) label = into.join(', ');
-      else if (r.targets.includes('verifier')) label = 'verifier';
-      section.push(`| ${r.skill} | ${label} |`);
-    }
+  if (ran.length > 0) {
+    section.push(``, `| Pass | Matched by |`, `|---|---|`);
+    for (const r of ran) section.push(`| ${r.name} | ${r.matchedBy} |`);
   }
-  if (catalog.length > 0) {
-    // Make clear that catalog ≠ ignored — "Injected: 0" must not read as "skills unused".
+  if (context.length > 0) {
+    section.push(``, `_Project rules injected into every pass: ${context.map((r) => r.name).join(', ')}._`);
+  }
+  if (index.length > 0) {
+    // Make clear that indexed ≠ ignored — passes read the relevant ones on demand.
     section.push(
       ``,
-      injected.length > 0
-        ? `_Injected skills matched the changed files. The other ${catalog.length} are available on-demand — reviewers open the relevant ones as needed; not ignored._`
-        : `_${catalog.length} skill(s) available on-demand — reviewers open the relevant ones as needed (none matched the changed files strongly enough to force-inject). Not ignored._`,
+      `_${index.length} skill(s) listed in skills-index.md — passes open the relevant ones as needed; not ignored._`,
     );
   }
   section.push('');
@@ -166,7 +159,8 @@ export function renderSummary(
   droppedCount: number,
   elapsedMs: number,
   postResult?: { posted: number; attempted: number; skipped: number; errors: { error: string }[]; verified?: boolean },
-  skillRouting?: SkillRoute[],
+  passRouting?: PassRoute[],
+  degraded?: string[],
 ): string {
   const totalRaw = outputs.reduce((n, o) => n + o.findings.length, 0);
   const lines: string[] = [
@@ -196,7 +190,15 @@ export function renderSummary(
   }
   lines.push('');
 
-  if (skillRouting) lines.push(...summarizeSkills(skillRouting).section);
+  if (degraded && degraded.length > 0) {
+    lines.push(
+      ``,
+      `> **Degraded:** ${degraded.length} pack/baseline warning(s) — coverage may be reduced:`,
+      ...degraded.map((d) => `> - ${d}`),
+    );
+  }
+
+  if (passRouting) lines.push(...summarizePasses(passRouting).section);
 
   const sorted = finalFindings
     .slice()
@@ -275,7 +277,9 @@ export async function finalizeReview(a: {
   forcePost?: boolean;
   overallStart: number;
   provider?: PrProvider;
-  skillRouting?: SkillRoute[];
+  passRouting?: PassRoute[];
+  /** Pack/baseline degradation notes — surfaced in the summary, not just stderr. */
+  degraded?: string[];
 }): Promise<ReviewResult> {
   for (const out of a.outputs) {
     try {
@@ -421,7 +425,7 @@ export async function finalizeReview(a: {
     }
     appendProgress(a.outDir, 'error', 'orchestrator produced no parseable findings');
   } else {
-    summary = renderSummary(a.prUrl, a.outputs, finalFindings, droppedCount, Date.now() - a.overallStart, postResult, a.skillRouting);
+    summary = renderSummary(a.prUrl, a.outputs, finalFindings, droppedCount, Date.now() - a.overallStart, postResult, a.passRouting, a.degraded);
     writeFileSync(join(a.outDir, 'pr-review-summary.md'), summary, 'utf8');
     writeFileSync(
       join(a.outDir, 'pr-review-findings.json'),
@@ -483,24 +487,24 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
 
   process.stderr.write(`[review] resuming run ${runId} from ${outDir}\n`);
   appendProgress(outDir, 'resume', `run ${runId}`);
-  const { config } = loadConfig({ cwd: process.cwd(), cliOverrides: toConfigOverrides(opts) });
-  // The live run persisted routing here; absent (old runs) → Skills section omitted.
-  let skillRouting: SkillRoute[] | undefined;
-  const routingPath = join(outDir, 'skill-routing.json');
+  const { config } = loadConfig({ cwd: process.cwd(), homeOverride: opts.homeOverride, cliOverrides: toConfigOverrides(opts) });
+  // The live run persisted routing here; absent (old / pre-0.7 runs) → Skills section omitted.
+  let passRouting: PassRoute[] | undefined;
+  const routingPath = join(outDir, 'passes.json');
   if (existsSync(routingPath)) {
     try {
       // Validate the shape, not just the syntax: JSON that parses to a non-array
-      // ({}, null, "x") would otherwise reach summarizeSkills and throw there —
+      // ({}, null, "x") would otherwise reach summarizePasses and throw there —
       // i.e. AFTER posting — losing the summary on an otherwise successful resume.
       const parsed: unknown = JSON.parse(readFileSync(routingPath, 'utf8'));
-      if (Array.isArray(parsed) && parsed.every((r) => r && typeof r.skill === 'string' && Array.isArray(r.targets))) {
-        skillRouting = parsed as SkillRoute[];
+      if (Array.isArray(parsed) && parsed.every((r) => r && typeof r.name === 'string' && typeof r.matchedBy === 'string')) {
+        passRouting = parsed as PassRoute[];
       } else {
-        process.stderr.write(`[review] resume: skill-routing.json has an unexpected shape — Skills section omitted\n`);
+        process.stderr.write(`[review] resume: passes.json has an unexpected shape — Skills section omitted\n`);
       }
     } catch (err) {
       // An absent file is expected (old runs); one that exists but fails to load is not.
-      process.stderr.write(`[review] resume: skill-routing.json unreadable (${(err as Error).message}) — Skills section omitted\n`);
+      process.stderr.write(`[review] resume: passes.json unreadable (${(err as Error).message}) — Skills section omitted\n`);
     }
   }
   return finalizeReview({
@@ -520,7 +524,7 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     forcePost: opts.forcePost,
     overallStart,
     provider: opts.provider,
-    skillRouting,
+    passRouting,
   });
 }
 
@@ -541,10 +545,23 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     // best-effort — status falls back to artifact heuristics without it
   }
 
-  const { config } = loadConfig({ cwd, cliOverrides: toConfigOverrides(opts) });
+  const { config } = loadConfig({ cwd, homeOverride: opts.homeOverride, cliOverrides: toConfigOverrides(opts) });
+
+  if (opts.fromGather && !opts.dryRun) {
+    throw new Error('--from-gather requires --dry-run (offline eval hook; posting from a fabricated gather is not allowed)');
+  }
 
   // CLI --skip replaces the config list for the run (same rule the session uses).
   const effectiveSkip = opts.skip?.length ? opts.skip : config.skipReviewers;
+
+  // Packs + Linguist resolve alongside gather/companion detection. Review-time is
+  // clone-if-missing ONLY (`packs sync` is the explicit update path); every
+  // failure is a warning — a review runs with whatever is on disk.
+  const packsPromise = Promise.resolve().then(() => ensurePacks(config.skillPacks, { home: opts.homeOverride }));
+  // No packs configured → language tags feed nothing glob/tag-matched; skip the
+  // (possibly network) Linguist load entirely.
+  const linguistPromise =
+    config.skillPacks.length > 0 ? loadLinguist({ home: opts.homeOverride }) : Promise.resolve(null);
 
   let runtime: Runtime;
   try {
@@ -583,11 +600,13 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     })();
   }
 
-  const gather = await runGather({
-    prUrl: opts.prUrl,
-    useCache: opts.useCache,
-    extraExcludes: config.diffExcludes,
-  });
+  const gather = opts.fromGather
+    ? (JSON.parse(readFileSync(opts.fromGather, 'utf8')) as GatherOutput)
+    : await runGather({
+        prUrl: opts.prUrl,
+        useCache: opts.useCache,
+        extraExcludes: config.diffExcludes,
+      });
   writeFileSync(join(outDir, 'pr-review-gather.json'), JSON.stringify(gather, null, 2), 'utf8');
 
   const earlyExitReason = earlyExitGate(gather);
@@ -608,26 +627,70 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   }
   appendProgress(outDir, 'gather', `${gather.changedFiles.filter((f) => !f.excluded).length} files`);
 
-  await Promise.all([companionPromise, codexDetectPromise]);
+  const [packsResult, linguist] = await Promise.all([
+    packsPromise,
+    linguistPromise,
+    companionPromise,
+    codexDetectPromise,
+  ]);
+  for (const name of packsResult.cloned) {
+    process.stderr.write(`[packs] cloned ${name} (first use) — refresh later with \`pr-review packs sync\`\n`);
+  }
+  for (const w of packsResult.warnings) process.stderr.write(w + '\n');
   const includeCodex = wantCodex && codexAvailable;
   if (wantCodex && !codexAvailable) {
     process.stderr.write(`[codex] codex CLI not found on PATH — skipping the second-opinion reviewer\n`);
   }
 
-  // Single-session mode dispatches runtime-registered agents only; user-authored
-  // context goes in skills, so reviewer .md loading is skipped entirely.
-  const loaded = loadAll({ cwd, config, skillsOnly: true });
-  // Discovery count only — the relevant ones are injected per-change by the heuristic in
-  // prepareSessionContext, and the accurate injected/catalog split is reported in the
-  // `## Skills` summary block. (Don't print an "injected" number here — it would read 0.)
-  const discovered = loaded.skills.length + loaded.catalog.length;
-  process.stderr.write(`[review] discovered ${discovered} project skill(s) — relevant ones injected per change (see the Skills summary)\n`);
+  // Every review pass is a skill: user-authored reviewer .md files are never loaded.
+  const loaded = loadAll({ cwd, config, skillsOnly: true, home: opts.homeOverride });
+  process.stderr.write(
+    `[review] discovered ${loaded.skills.length + loaded.catalog.length} project skill(s) + ${loaded.packSkills.length} pack skill(s)\n`,
+  );
+
+  const inScopeFiles = gather.changedFiles.filter((f) => !f.excluded);
+  const stack = detectStack(inScopeFiles, { linguist, cwd, pr: ref });
+  for (const n of stack.notes) process.stderr.write(`[stack] ${n}\n`);
+
+  // The checkout's skills carry authority ONLY when the checkout IS the PR's
+  // repo — reviewing repo A from inside repo B must not inject B's rules.
+  // Explicitly forced dirs (--skills-dir / extra_skills_dirs) always apply.
+  const projectEligible = stack.cwdIsPrRepo;
+  const skillsForSelection = projectEligible ? loaded.skills : loaded.skills.filter((s) => s.origin === 'forced');
+  const catalogForSelection = projectEligible ? loaded.catalog : [];
+  if (!projectEligible && (loaded.skills.some((s) => s.origin !== 'forced') || loaded.catalog.length > 0)) {
+    process.stderr.write(
+      `[skills] cwd is not the PR's repo — its skills are not used as project rules (forced dirs still apply)\n`,
+    );
+  }
+
+  const selection = (opts.selectPassesFn ?? selectPasses)({
+    skills: skillsForSelection,
+    catalog: catalogForSelection,
+    packSkills: loaded.packSkills,
+    inScopeFiles,
+    stackTags: stack.tags,
+    baseline: config.skillPacks.flatMap((p) => p.baseline.map((b) => `${p.name}/${b}`)),
+  });
+  for (const b of selection.missingBaseline) {
+    process.stderr.write(
+      `[packs] WARNING: baseline skill '${b}' not found after sync — renamed upstream? Run \`pr-review packs sync\` or fix skill_packs[].baseline\n`,
+    );
+  }
+  // Degradation must reach the summary, not only stderr — a detached run's
+  // reader never sees detached.log unless told to look.
+  const degraded = [
+    ...packsResult.warnings,
+    ...selection.missingBaseline.map((b) => `baseline skill '${b}' not found — renamed upstream?`),
+  ];
 
   const sessionOpts = {
     prUrl: opts.prUrl,
     gather,
-    skills: loaded.skills,
-    catalog: loaded.catalog,
+    passes: selection.passes,
+    projectSkills: selection.projectSkills,
+    indexEntries: selection.indexEntries,
+    stackTags: selection.stackTags,
     installedCompanions,
     skipReviewers: effectiveSkip,
     outDir,
@@ -647,39 +710,81 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
       `**Run dir:** ${outDir}`,
       `**Context file:** ${ctx.contextPath}`,
       `**Runtime:** ${runtime}`,
-      `**Reviewers to dispatch:** ${ctx.dispatchedReviewers.join(', ') || '(none)'}${includeCodex ? ' + codex (sibling process)' : ''}`,
+      `**Passes to dispatch:** ${ctx.passes.map((p) => p.name).join(', ') || '(none)'}${includeCodex ? ' + codex (sibling process)' : ''}`,
     ];
     if (ctx.triageSkipped.length > 0) {
       lines.push(`**Skipped by triage (docs-only PR):** ${ctx.triageSkipped.join(', ')}`);
     }
-    lines.push(``, `## Skill routing`, ``);
-    if (ctx.skillRouting.length === 0) {
-      lines.push('_No skills loaded._');
+    lines.push(``, `## Stack`, ``);
+    lines.push(`- **Languages:** ${stack.languages.join(', ') || '(none)'}`);
+    lines.push(
+      `- **Dependencies:** ${stack.dependencies.slice(0, 30).join(', ') || '(none)'}${stack.dependencies.length > 30 ? ` (+${stack.dependencies.length - 30} more)` : ''}`,
+    );
+    for (const n of stack.notes) lines.push(`- _${n}_`);
+    lines.push(``, `## Passes`, ``);
+    if (ctx.passes.length === 0) {
+      lines.push('_No passes — no skill matched this PR and no baseline is configured._');
     } else {
-      lines.push(`| Skill | Injected into | Source |`, `|---|---|---|`);
-      for (const r of ctx.skillRouting) {
-        lines.push(`| ${r.skill} | ${r.targets.length ? r.targets.join(', ') : NO_ROUTE_LABEL} | ${r.source} |`);
+      lines.push(`| Pass | Matched by | Matched on | Source |`, `|---|---|---|---|`);
+      for (const p of ctx.passes) {
+        lines.push(`| ${p.name} | ${p.matchedBy} | ${p.matchedOn.join(', ') || '—'} | ${p.source} |`);
       }
     }
+    const projectRows = ctx.routing.filter((r) => r.matchedBy === 'context');
+    if (projectRows.length > 0) {
+      lines.push(
+        ``,
+        `**Project rules (injected into every pass):** ${projectRows.map((r) => r.name).join(', ')} → \`${join(outDir, 'skills-project.md')}\``,
+      );
+    }
+    const idxCount = ctx.routing.filter((r) => r.matchedBy === 'index').length;
+    if (idxCount > 0) lines.push(``, `**Index (on-demand):** ${idxCount} skill(s) → \`${join(outDir, 'skills-index.md')}\``);
     const summary = lines.join('\n');
-    writeFileSync(join(outDir, 'pr-review-summary.md'), summary, 'utf8');
-    return { outputs: [], summary, exitCode: 0 };
+    // Zero passes on a code PR is the "nothing to review with" failure (exit 2):
+    // status treats pr-review-summary.md as done/exit-0 the moment it exists, so
+    // the failed preview writes error.txt instead of the done-state artifact.
+    const zeroPasses = ctx.passes.length === 0 && ctx.triageSkipped.length === 0;
+    writeFileSync(join(outDir, zeroPasses ? ERROR_FILE : 'pr-review-summary.md'), summary, 'utf8');
+    return { outputs: [], summary, exitCode: zeroPasses ? 2 : 0 };
   }
-
-  process.stderr.write(
-    `[review] single-session dispatch: built-ins + verifier + ` +
-      `${config.invokeCompanions ? `${installedCompanions.length} companion(s)` : '0 companions'}` +
-      `${includeCodex ? ' + codex' : ''}\n`,
-  );
 
   // Context is prepared exactly once and shared by the session and the codex
   // sibling — a second prepare would rewrite every context/skills file.
   const sessionCtx = prepareSessionContext(sessionOpts);
+
+  if (sessionCtx.passes.length === 0) {
+    if (sessionCtx.triageSkipped.length > 0) {
+      // Docs-only PR and nothing doc-scoped to run — benign, not a failure.
+      const line = `docs-only PR with no doc-scoped review skill — nothing to review (skipped passes: ${sessionCtx.triageSkipped.join(', ')})`;
+      process.stderr.write(`[review] ${line}\n`);
+      const summary = [`# PR Review Summary`, ``, `**PR:** ${opts.prUrl}`, ``, line].join('\n');
+      writeFileSync(join(outDir, 'pr-review-summary.md'), summary, 'utf8');
+      appendProgress(outDir, 'done', 'docs-only, no passes');
+      return { outputs: [], summary, exitCode: 0 };
+    }
+    // Never a silent 0: an empty review is not a clean PR.
+    const line = `nothing to review with — no skills matched this PR (stack tags: ${selection.stackTags.join(', ') || 'none'}); run \`pr-review packs suggest ${opts.prUrl}\` or configure skill_packs`;
+    process.stderr.write(`[review] ${line}\n`);
+    try {
+      writeFileSync(join(outDir, ERROR_FILE), line + '\n', 'utf8');
+    } catch (err) {
+      process.stderr.write(`[review] could not write ${ERROR_FILE}: ${(err as Error).message}\n`);
+    }
+    appendProgress(outDir, 'error', 'no review passes');
+    return { outputs: [], summary: line, exitCode: 2 };
+  }
+
+  process.stderr.write(
+    `[review] single-session dispatch: ${sessionCtx.passes.length} pass(es) + verifier + ` +
+      `${config.invokeCompanions ? `${installedCompanions.length} companion(s)` : '0 companions'}` +
+      `${includeCodex ? ' + codex' : ''}\n`,
+  );
+
   // Heads-up at the start: print the Skills section (foreground console + detached.log)
   // and fold a compact count into the dispatch progress event (the live `status` snapshot).
-  const skills = summarizeSkills(sessionCtx.skillRouting);
+  const skills = summarizePasses(sessionCtx.routing);
   process.stderr.write(skills.section.join('\n') + '\n');
-  appendProgress(outDir, 'dispatch', `${sessionCtx.dispatchedReviewers.length} reviewers · ${skills.brief}`);
+  appendProgress(outDir, 'dispatch', skills.brief);
 
   // Codex runs as a sibling process, in parallel with the orchestrator session.
   // runCodexReviewer resolves on every failure path with `error` set — spawn
@@ -691,7 +796,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   if (includeCodex) {
     codexPromise = runCodexReviewer({
       contextPath: sessionCtx.contextPath,
-      skillsPath: sessionCtx.skillsFiles['codex'],
+      skillsPath: sessionCtx.skillsFiles['project'] ?? sessionCtx.skillsFiles['all'],
       outDir,
     });
   }
@@ -716,9 +821,10 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     failOn: opts.failOn,
     findingsUnavailable: session.findingsUnavailable,
     forcePost: opts.forcePost,
+    degraded,
     overallStart,
     provider,
-    skillRouting: sessionCtx.skillRouting,
+    passRouting: sessionCtx.routing,
   });
 
   if (result.exitCode === 2) {

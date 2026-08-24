@@ -70,6 +70,17 @@ test('selectPasses — a promiscuous extension glob without stack identity is de
   });
   assert.ok(!sel.passes.some((p) => p.name === 'pk/astro'), 'astro has no stack identity here → index');
   assert.ok(sel.indexEntries.some((e) => e.name === 'pk/astro'));
+  // The brace form is still extension-only matching (observed live: pcf-*/aws-appsync).
+  const brace = packSkill('pcf-alm', { appliesTo: ['**/*.{ts,tsx,js,json,xml,pcfproj,csproj,sln}'] });
+  const braceSel = selectPasses({
+    skills: [],
+    catalog: [],
+    packSkills: [brace],
+    inScopeFiles: [{ path: 'src/app.ts' }],
+    stackTags: ['typescript', 'ts'],
+    baseline: [],
+  });
+  assert.ok(!braceSel.passes.some((p) => p.name === 'pk/pcf-alm'), 'brace extension glob without identity → index');
   const cs = sel.passes.find((p) => p.name === 'pk/csharp')!;
   assert.equal(cs.matchedBy, 'glob', 'csharp is stack-consistent → its extension glob counts');
 });

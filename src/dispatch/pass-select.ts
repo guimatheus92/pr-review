@@ -63,7 +63,9 @@ function isMatchAll(g: string): boolean {
  * 10 slots with framework guides for frameworks the repo doesn't use.
  */
 function isLanguageGlob(g: string): boolean {
-  return /^(\*\*\/)?\*{1,2}\.[a-z0-9_-]+$/i.test(g);
+  // `**/*.ts`, `**.ts`, `*.md` — and the brace form `**/*.{ts,tsx,js,json}`
+  // (pcf-*/aws-appsync in awesome-copilot), which is still type-only matching.
+  return /^(\*\*\/)?\*{1,2}\.(\{[\w ,.-]+\}|[a-z0-9_-]+)$/i.test(g);
 }
 
 const DESC_CAP = 200;

@@ -136,12 +136,29 @@ test('selectPasses — stack passes capped at MAX_STACK_PASSES, baselines ALWAYS
   }
 });
 
-test('selectPasses — index-only packs never become passes; missing baseline reported', () => {
+test('selectPasses — index-only packs never become passes; missing baseline reported (incl. index-mode pointers)', () => {
   const idx = packSkill('detecting-x', { mode: 'index', appliesTo: ['**/*.go'] });
-  const sel = base({ packSkills: [idx], baseline: ['pk/renamed-upstream'] });
+  const sel = base({ packSkills: [idx], baseline: ['pk/renamed-upstream', 'pk/detecting-x'] });
   assert.equal(sel.passes.length, 0);
   assert.ok(sel.indexEntries.some((e) => e.name === 'pk/detecting-x'));
-  assert.deepEqual(sel.missingBaseline, ['pk/renamed-upstream']);
+  // A pointer into an index-mode pack can never dispatch — reported as missing too.
+  assert.deepEqual(sel.missingBaseline.sort(), ['pk/detecting-x', 'pk/renamed-upstream']);
+});
+
+test('selectPasses — a baseline that stack-matches but loses the stack cap STILL dispatches as baseline', () => {
+  const packSkills: SkillDefinition[] = [];
+  for (let i = 0; i < MAX_STACK_PASSES; i++) {
+    // Stronger stack hits (2 matchedOn each) that fill the whole cap.
+    packSkills.push(packSkill(`strong-${i}`, { appliesTo: ['**/main.go', 'infra/main.tf'] }));
+  }
+  // The baseline ALSO glob-matches (1 hit) — it loses the cap tie-break…
+  const dual = packSkill('security-and-owasp', { appliesTo: ['**/main.go'] });
+  const sel = base({ packSkills: [...packSkills, dual], baseline: ['pk/security-and-owasp'] });
+  const row = sel.passes.find((p) => p.name === 'pk/security-and-owasp');
+  // …but must never be silently evicted: it rides as a baseline pass.
+  assert.equal(row?.matchedBy, 'baseline', 'evicted stack hit falls back to its baseline seat');
+  assert.equal(sel.passes.length, MAX_STACK_PASSES + 1);
+  assert.ok(!sel.indexEntries.some((e) => e.name === 'pk/security-and-owasp'), 'not double-listed in the index');
 });
 
 test('selectPasses — repo skills: targeted globs route as glob, untargeted go through the heuristic', () => {

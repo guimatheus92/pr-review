@@ -31,6 +31,7 @@ Dockerfile:
   aliases: [Containerfile]
   extensions: ['.dockerfile']
   filenames: [Dockerfile, Containerfile]
+${Array.from({ length: 120 }, (_, i) => `Synth${i}:\n  extensions: ['.synth${i}']`).join('\n')}
 `;
 
 test('parseLinguist + languageTags — extensions, filenames, aliases, dotted suffixes, unions', () => {

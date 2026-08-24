@@ -375,7 +375,7 @@ packs
         const gather = await runGather({ prUrl: args[0]!, useCache: true });
         const linguist = await loadLinguist({});
         const stack = detectStack(
-          gather.changedFiles.filter((f) => !f.excluded).map((f) => f.path),
+          gather.changedFiles.filter((f) => !f.excluded),
           { linguist, cwd: process.cwd(), pr: gather.pr },
         );
         // Query languages + ecosystems, not every dependency — a query per dep would spam the API.

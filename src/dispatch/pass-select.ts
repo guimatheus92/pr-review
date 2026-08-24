@@ -207,12 +207,18 @@ export function selectPasses(input: {
   const stackKept = stackCandidates.slice(0, MAX_STACK_PASSES);
   const stackOverflow = stackCandidates.slice(MAX_STACK_PASSES);
 
-  // Baselines ALWAYS dispatch (deduped against a baseline that already
-  // stack-matched) — they are the generic lenses of every code review.
+  // Baselines ALWAYS dispatch — they are the generic lenses of every code
+  // review. Two sources: pointers that matched nothing else, and pointers that
+  // stack-matched but LOST the stack cap (without re-adding those, a baseline
+  // that also glob-matched would be silently evicted — dogfood finding).
   const keptNames = new Set(stackKept.map((c) => c.pass.name));
-  const baselines = candidates.filter(
-    (c) => c.pass.matchedBy === 'baseline' && !keptNames.has(c.pass.name),
-  );
+  const evictedBaselines = stackOverflow
+    .filter((c) => baselineSet.has(c.pass.name))
+    .map((c) => candidate(c.skill, 'baseline', []));
+  const baselines = [
+    ...candidates.filter((c) => c.pass.matchedBy === 'baseline' && !keptNames.has(c.pass.name)),
+    ...evictedBaselines,
+  ];
 
   let kept = [...stackKept, ...baselines];
   let projectSkills = project.map((c) => c.skill);
@@ -236,7 +242,8 @@ export function selectPasses(input: {
     .map((s) => ({ s, score: [...tokensOf(s)].filter((t) => stackSet.has(t)).length }))
     .sort((a, b) => b.score - a.score || a.s.name.localeCompare(b.s.name));
   const indexEntries = [
-    ...stackOverflow.map((c) => toIndexEntry(c.skill)),
+    // Overflowed baselines still dispatch as baseline passes — don't double-list them.
+    ...stackOverflow.filter((c) => !baselineSet.has(c.pass.name)).map((c) => toIndexEntry(c.skill)),
     ...scored.map(({ s }) => toIndexEntry(s)),
   ];
 
@@ -247,8 +254,9 @@ export function selectPasses(input: {
     ...indexEntries.map((e) => ({ name: e.name, source: e.source, matchedBy: 'index' as const })),
   ];
 
-  const packNames = new Set(input.packSkills.map((s) => s.name));
-  const missingBaseline = input.baseline.filter((b) => !packNames.has(b));
+  // A pointer into an index-mode pack can never dispatch — that is "missing" too.
+  const eligible = new Set(input.packSkills.filter((s) => s.mode !== 'index').map((s) => s.name));
+  const missingBaseline = input.baseline.filter((b) => !eligible.has(b));
 
   return { passes, projectSkills, indexEntries, stackTags: [...stackSet].sort(), routes, missingBaseline };
 }

@@ -57,7 +57,7 @@ export interface SingleSessionOptions {
   language?: string;
   /** Which agent CLI hosts the session. Defaults to copilot. */
   runtime?: Runtime;
-  /** When the Codex sibling reviewer will run, it reads the union skills file too. */
+  /** Accepted for parity with the caller; the codex sibling is wired in review.ts. */
   includeCodex?: boolean;
 }
 
@@ -81,8 +81,9 @@ export function isTransientOrchestratorFailure(stdout: string, stderr = ''): boo
 }
 
 // One pass carries ONE skill body, so the per-body cap is per-file (OWASP cheat
-// sheets run ~25 KB). The union file (codex/companions/verifier) concatenates up
-// to MAX_PASSES bodies, so it gets a larger budget. Truncation always warns.
+// sheets run ~25 KB). The union file concatenates every pass body (it is the
+// authoritative-context FALLBACK for codex/companions/verifier when no project
+// skills matched), so it gets a larger budget. Truncation always warns.
 export const PASS_BODY_CAP = 48_000;
 export const UNION_FILE_CAP = 96_000;
 // The project-rules file is injected into EVERY pass, so its budget multiplies
@@ -431,6 +432,12 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
   // Last line of defence — the selection module already caps, but this file owns the token budget.
   const passes = afterTriage.slice(0, MAX_TOTAL_PASSES);
   const capOverflow = afterTriage.slice(MAX_TOTAL_PASSES);
+  if (capOverflow.length > 0) {
+    process.stderr.write(
+      `[skills] warning: ${capOverflow.length} pass(es) beyond the ${MAX_TOTAL_PASSES}-pass ceiling moved to the on-demand index: ${capOverflow.map((p) => p.name).join(', ')}
+`,
+    );
+  }
   const wantVerifier = !skip.has('verifier');
   // Project rules: --skip drops one from the context file too.
   const projectAll = opts.projectSkills ?? [];
@@ -459,15 +466,17 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
     writeFileSync(path, renderPassFile(p), 'utf8');
     skillsFiles[p.name] = path;
   }
-  if (passes.length > 0) {
-    const unionPath = resolve(opts.outDir, 'skills-all.md');
-    writeFileSync(unionPath, renderUnionFile(passes), 'utf8');
-    skillsFiles['all'] = unionPath;
-  }
   if (projectSkills.length > 0) {
     const projectPath = resolve(opts.outDir, 'skills-project.md');
     writeFileSync(projectPath, renderProjectFile(projectSkills), 'utf8');
     skillsFiles['project'] = projectPath;
+  } else if (passes.length > 0) {
+    // The union is the authoritative-context FALLBACK (codex/companions/verifier)
+    // when no project skills matched — with project rules present, nothing reads
+    // it, so it is not written.
+    const unionPath = resolve(opts.outDir, 'skills-all.md');
+    writeFileSync(unionPath, renderUnionFile(passes), 'utf8');
+    skillsFiles['all'] = unionPath;
   }
 
   let verifierPath: string | undefined;

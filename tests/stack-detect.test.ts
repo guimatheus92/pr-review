@@ -29,7 +29,7 @@ test('detectStack — language tags from changed paths + dependency tags from a 
   const cwd = mkdtempSync(join(tmpdir(), 'pr-review-stack-'));
   try {
     writeFileSync(join(cwd, 'package.json'), JSON.stringify({ dependencies: { express: '4' } }));
-    const info = detectStack(['src/app.ts', 'infra/main.tf'], {
+    const info = detectStack([{ path: 'src/app.ts' }, { path: 'infra/main.tf' }], {
       linguist: LINGUIST,
       cwd,
       pr: { owner: 'octo', repo: 'app' },
@@ -48,25 +48,45 @@ test('detectStack — cwd that is not the PR repo skips dependency tags with a n
   const cwd = mkdtempSync(join(tmpdir(), 'pr-review-stack-'));
   try {
     writeFileSync(join(cwd, 'package.json'), JSON.stringify({ dependencies: { express: '4' } }));
-    const info = detectStack(['src/app.ts'], {
+    const info = detectStack([{ path: 'src/app.ts' }], {
       linguist: LINGUIST,
       cwd,
       pr: { owner: 'octo', repo: 'app' },
       gitRemote: () => 'https://github.com/octo/unrelated.git',
     });
     assert.deepEqual(info.dependencies, []);
-    assert.ok(info.notes.some((n) => n.includes('dependency tags skipped')));
+    assert.ok(info.notes.some((n) => n.includes('manifests and skills are not used')));
     assert.ok(info.tags.includes('typescript'), 'language tags unaffected');
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
 });
 
+test('detectStack — the PR’s own manifest diff contributes dependency tags (framework added IN the PR)', () => {
+  const info = detectStack(
+    [
+      { path: 'package.json', patch: '@@ -1,3 +1,4 @@\n {\n+  "dependencies": { "svelte": "^4" },\n }' },
+      { path: 'src/app.ts' },
+    ],
+    { linguist: LINGUIST },
+  );
+  assert.ok(info.dependencies.includes('svelte'), 'dep parsed from the + lines of the manifest patch');
+  assert.ok(info.tags.includes('node'), 'manifest kind contributes ecosystem tags');
+  assert.equal(info.cwdIsPrRepo, false);
+});
+
+test('maskUrl — credentials embedded in origin URLs never print', async () => {
+  const { maskUrl } = await import('../src/stack/detect.js');
+  assert.equal(maskUrl('https://user:tok3n@github.com/o/r.git'), 'https://***@github.com/o/r.git');
+  assert.equal(maskUrl('https://github.com/o/r.git'), 'https://github.com/o/r.git');
+  assert.equal(maskUrl(null), null);
+});
+
 test('detectStack — no Linguist: languages empty with a note, dependencies still work', () => {
   const cwd = mkdtempSync(join(tmpdir(), 'pr-review-stack-'));
   try {
     writeFileSync(join(cwd, 'package.json'), JSON.stringify({ dependencies: { express: '4' } }));
-    const info = detectStack(['src/app.ts'], {
+    const info = detectStack([{ path: 'src/app.ts' }], {
       linguist: null,
       cwd,
       pr: { owner: 'octo', repo: 'app' },

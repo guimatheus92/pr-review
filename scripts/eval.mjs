@@ -17,10 +17,11 @@
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 
-const ROOT = resolve(new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const CLI = join(ROOT, 'dist', 'cli.cjs');
 const FIXTURES = join(ROOT, 'evals', 'fixtures');
 const PLACEHOLDER_PR = 'https://github.com/pr-review/eval/pull/1';
@@ -102,7 +103,12 @@ function runCase(name, extra) {
     : (findings.finalFindings ?? []);
 
   let ok = true;
-  for (const pattern of expected.must_find ?? []) {
+  const patterns = expected?.must_find;
+  if (!Array.isArray(patterns) || patterns.length === 0) {
+    console.error(`  x ${name}: expected.yaml has no must_find patterns - a fixture that asserts nothing proves nothing`);
+    return false;
+  }
+  for (const pattern of patterns) {
     const re = new RegExp(pattern, 'i');
     const hit = inScope.find((f) => re.test(`${f.title}\n${f.body}`));
     if (hit) {

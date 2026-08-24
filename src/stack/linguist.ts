@@ -94,14 +94,27 @@ export async function loadLinguist(
     const res = await fetchFn(LINGUIST_URL, { signal: AbortSignal.timeout(opts.timeoutMs ?? 10_000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const text = await res.text();
-    const index = parseLinguist(text); // validate before caching
+    const index = parseLinguist(text);
+    // Actually validate before caching: a 200 serving an HTML error page parses
+    // to an empty index and would poison the cache permanently. Real
+    // languages.yml carries ~1000 languages; hundreds of extensions is the floor.
+    if (index.byExt.size < 100) {
+      throw new Error(`response does not look like languages.yml (${index.byExt.size} extensions parsed)`);
+    }
     mkdirSync(dirname(cache), { recursive: true });
     writeFileSync(cache, text, 'utf8');
     return index;
   } catch (err) {
     if (existsSync(cache)) {
       const cached = readCache();
-      if (cached) return cached;
+      if (cached) {
+        if (opts.force) {
+          process.stderr.write(
+            `[stack] Linguist refresh failed (${((err as Error).message ?? '').split('\n')[0]}) — keeping the cached copy\n`,
+          );
+        }
+        return cached;
+      }
     }
     const msg = ((err as Error).message ?? String(err)).split('\n')[0];
     process.stderr.write(

@@ -189,8 +189,10 @@ test('--context-only with zero passes on a code PR — exit 2 and error.txt, nev
 // orchestrator scaffold, and the codex prompt — none may hardcode a framework.
 test('prompt text in the repo stays stack-agnostic (no framework names)', async () => {
   const { PASS_RULES, VERIFIER_BRIEF } = await import('../src/dispatch/single-session.js');
-  const codexSrc = readFileSync(join(process.cwd(), 'src', 'dispatch', 'codex.ts'), 'utf8');
-  const singleSrc = readFileSync(join(process.cwd(), 'src', 'dispatch', 'single-session.ts'), 'utf8');
+  const { fileURLToPath } = await import('node:url');
+  const srcDir = fileURLToPath(new URL('../src/dispatch/', import.meta.url));
+  const codexSrc = readFileSync(join(srcDir, 'codex.ts'), 'utf8');
+  const singleSrc = readFileSync(join(srcDir, 'single-session.ts'), 'utf8');
   const DENY = /\b(React|Vue|Angular|Django|Rails|Spring|Express|Next\.js|Flask|Laravel|Terraform|Kubernetes|Docker)\b/;
   for (const [label, text] of [
     ['PASS_RULES', PASS_RULES],

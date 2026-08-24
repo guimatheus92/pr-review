@@ -146,14 +146,25 @@ function normalizePack(raw: string | ({ git?: string } & Partial<SkillPack>)): S
     return null;
   }
   const inferredName = obj.name ?? obj.git.replace(/\/+$/, '').split('/').pop() ?? 'pack';
+  const asList = (v: unknown): string[] | null => (Array.isArray(v) ? v.map(String) : typeof v === 'string' ? [v] : null);
+  if (obj.mode !== undefined && obj.mode !== 'auto' && obj.mode !== 'index') {
+    process.stderr.write(`[config] warning: skill_packs['${inferredName}'].mode '${String(obj.mode)}' is not auto|index — using auto
+`);
+  }
+  const include = asList(obj.include);
+  const baseline = asList(obj.baseline) ?? [];
+  if (obj.mode === 'index' && baseline.length > 0) {
+    process.stderr.write(`[config] warning: skill_packs['${inferredName}'] is mode:index — its baseline pointers can never dispatch
+`);
+  }
   return {
     name: safeSegment(inferredName),
     git: obj.git,
     ref: obj.ref,
-    include: obj.include && obj.include.length > 0 ? obj.include : ['**/SKILL.md'],
-    exclude: obj.exclude ?? [],
+    include: include && include.length > 0 ? include : ['**/SKILL.md'],
+    exclude: asList(obj.exclude) ?? [],
     mode: obj.mode === 'index' ? 'index' : 'auto',
-    baseline: obj.baseline ?? [],
+    baseline,
   };
 }
 
@@ -207,7 +218,7 @@ function applyRaw(target: Config, raw: RawConfig, baseDir: string): void {
             // Two different repos inferring the same name would silently share
             // one checkout dir — first wins, loudly.
             process.stderr.write(
-              `[config] warning: duplicate skill pack name '${p.name}' (${p.git}) — first entry wins; set a distinct name: on one of them\n`,
+              `[config] warning: duplicate skill pack name '${p.name}' (${p.git.replace(/\/\/[^@/]+@/, '//***@')}) — first entry wins; set a distinct name: on one of them\n`,
             );
             return false;
           }

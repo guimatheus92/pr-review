@@ -69,6 +69,7 @@ export async function runDoctor(): Promise<number> {
   const { gitAvailable, packStatus, STALE_DAYS } = await import('../packs/sync.js');
   const { listPackFiles } = await import('../packs/load.js');
   const { linguistCachePath } = await import('../stack/linguist.js');
+  const { maskUrl } = await import('../stack/detect.js');
   (gitAvailable() ? ok : bad)('git on PATH', gitAvailable() ? '' : 'install git — packs cannot clone/sync without it');
   if (config.skillPacks.length === 0) {
     ok('skill_packs: [] — packs disabled (review passes come from repo skills only)');
@@ -76,7 +77,7 @@ export async function runDoctor(): Promise<number> {
   for (const pack of config.skillPacks) {
     const st = packStatus(pack);
     if (!st.exists) {
-      bad(`pack ${pack.name}`, `not cloned (${pack.git}) — clones on the next review, or run \`pr-review packs sync\``);
+      bad(`pack ${pack.name}`, `not cloned (${maskUrl(pack.git)}) — clones on the next review, or run \`pr-review packs sync\``);
       continue;
     }
     const n = listPackFiles(st.dir, pack.include, pack.exclude).length;

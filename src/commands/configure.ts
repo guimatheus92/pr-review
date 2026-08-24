@@ -19,8 +19,11 @@ export function readOrEmpty(path: string = GLOBAL_PATH): GlobalRawConfig {
   if (!existsSync(path)) return {};
   try {
     return (parseYaml(readFileSync(path, 'utf8')) as GlobalRawConfig) ?? {};
-  } catch {
-    return {};
+  } catch (err) {
+    // An UNPARSEABLE config must not read as "empty" — a caller that writes the
+    // result back would silently destroy the user's file.
+    const first = (err as Error).message.split('\n')[0];
+    throw new Error(`cannot parse ${path}: ${first} — fix it before changing config`);
   }
 }
 
@@ -54,13 +57,7 @@ export async function runConfigureInteractive(): Promise<void> {
   };
   try {
     cfg.default_model = await ask('Default model', cfg.default_model ?? 'claude-opus-4.8');
-    const extraRev = await ask(
-      'Extra reviewers dirs (comma-separated)',
-      (cfg.extra_reviewers_dirs ?? []).join(','),
-    );
-    cfg.extra_reviewers_dirs = extraRev
-      ? extraRev.split(',').map((s) => resolve(s.trim().replace(/^~/, homedir()))).filter(Boolean)
-      : [];
+    // No reviewer dirs: standalone reviewers are never dispatched — skills are the only content.
     const extraSk = await ask(
       'Extra skills dirs (comma-separated)',
       (cfg.extra_skills_dirs ?? []).join(','),

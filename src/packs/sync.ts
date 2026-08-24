@@ -88,7 +88,13 @@ function isGitCheckout(dir: string): boolean {
 function firstLine(err: unknown): string {
   const e = err as Error & { stderr?: string };
   const text = (e.stderr ?? e.message ?? String(err)).toString().trim();
-  return text.split('\n')[0] ?? 'unknown error';
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  // git prints progress banners ("Cloning into…") before the real error —
+  // prefer the fatal/error line, then fall back to the last line.
+  const real = lines.find((l) => /^(fatal|error):/i.test(l)) ?? lines[lines.length - 1] ?? 'unknown error';
+  // Third-party stderr goes to the terminal — strip control chars (log forging).
+  // eslint-disable-next-line no-control-regex
+  return real.replace(/[\u0000-\u001f\u007f]/g, '');
 }
 
 function writeMeta(pack: SkillPack, home: string | undefined, git: GitExec): PackMeta {
@@ -235,19 +241,38 @@ export function syncPacks(packs: SkillPack[], opts: { home?: string; git?: GitEx
         const args = ['clone', '--depth', '1', '--single-branch'];
         if (pack.ref) args.push('--branch', pack.ref);
         args.push(url, dir);
-        git(args);
-        git(['rev-parse', '--verify', 'HEAD'], dir);
+        try {
+          git(args);
+          git(['rev-parse', '--verify', 'HEAD'], dir);
+        } catch (cloneErr) {
+          // Same belt-and-braces as ensurePacks: never leave a wedged half-clone.
+          if (existsSync(dir)) {
+            try {
+              rmSync(dir, { recursive: true, force: true });
+            } catch {
+              // next run's not-a-git-checkout warning covers it
+            }
+          }
+          throw cloneErr;
+        }
       } else if (!isGitCheckout(dir)) {
         result.failed.push({ name: pack.name, error: `${dir} exists but is not a git checkout` });
         continue;
       } else {
         const prior = readPackMeta(pack, opts.home);
+        // pull keeps tracking whatever the clone was made from — a config ref
+        // OR source change would silently not take effect.
         if (prior && (prior.ref ?? null) !== (pack.ref ?? null)) {
-          // pull keeps tracking the branch the clone was made from — a config
-          // ref change silently would not take effect.
           result.failed.push({
             name: pack.name,
             error: `configured ref changed (${prior.ref ?? 'default'} → ${pack.ref ?? 'default'}) — delete ${dir} and re-sync`,
+          });
+          continue;
+        }
+        if (prior && prior.git !== pack.git) {
+          result.failed.push({
+            name: pack.name,
+            error: `configured git source changed (${prior.git} → ${pack.git}) — delete ${dir} and re-sync`,
           });
           continue;
         }
@@ -256,8 +281,12 @@ export function syncPacks(packs: SkillPack[], opts: { home?: string; git?: GitEx
       const meta = writeMeta(pack, opts.home, git);
       result.synced.push({ name: pack.name, commit: meta.commit, commitDate: meta.commitDate });
     } catch (err) {
-      const hint = ` (if upstream force-pushed, delete ${dir} and re-sync)`;
-      result.failed.push({ name: pack.name, error: firstLine(err) + hint });
+      const line = firstLine(err);
+      // The force-push hint only fits an actual failed pull on an existing checkout.
+      const hint = /non-fast-forward|not possible to fast-forward|rejected/i.test(line)
+        ? ` (upstream rewrote history — delete ${dir} and re-sync)`
+        : '';
+      result.failed.push({ name: pack.name, error: line + hint });
     }
   }
   return result;

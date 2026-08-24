@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { DEFAULT_PACKS, loadConfig, type SkillPack } from '../config.js';
 import { listPackFiles } from '../packs/load.js';
@@ -12,6 +12,7 @@ import {
   type GitExec,
 } from '../packs/sync.js';
 import { linguistCachePath, loadLinguist } from '../stack/linguist.js';
+import { maskUrl } from '../stack/detect.js';
 import { GLOBAL_PATH, readOrEmpty, writeConfig } from './configure.js';
 
 function skillCount(pack: SkillPack, home?: string): number {
@@ -31,7 +32,7 @@ export function packsList(opts: { home?: string } = {}): void {
   for (const pack of config.skillPacks) {
     const st = packStatus(pack, opts.home);
     if (!st.exists) {
-      console.log(`  ✗ ${pack.name} — not cloned yet (${pack.git}); clones on the next review, or run \`pr-review packs sync\``);
+      console.log(`  ✗ ${pack.name} — not cloned yet (${maskUrl(pack.git)}); clones on the next review, or run \`pr-review packs sync\``);
       continue;
     }
     const commit = st.meta?.commit ? st.meta.commit.slice(0, 7) : '???????';
@@ -58,8 +59,12 @@ export async function packsSync(opts: { home?: string; fetchFn?: typeof fetch } 
   for (const f of result.failed) {
     console.error(`  ✗ ${f.name} — ${f.error}`);
   }
+  const before = existsSync(linguistCachePath(opts.home)) ? statSync(linguistCachePath(opts.home)).mtimeMs : 0;
   const linguist = await loadLinguist({ home: opts.home, fetchFn: opts.fetchFn, force: true });
-  console.log(linguist ? '  ✓ Linguist languages.yml refreshed' : '  ✗ Linguist languages.yml refresh failed (kept cache if any)');
+  const after = existsSync(linguistCachePath(opts.home)) ? statSync(linguistCachePath(opts.home)).mtimeMs : 0;
+  if (linguist && after > before) console.log('  ✓ Linguist languages.yml refreshed');
+  else if (linguist) console.log('  ⚠ Linguist refresh failed — kept the cached copy (see warning above)');
+  else console.log('  ✗ Linguist languages.yml unavailable (no cache, refresh failed)');
   return result.failed.length > 0 ? 1 : 0;
 }
 
@@ -75,7 +80,14 @@ export function packsAdd(spec: string, opts: { home?: string; git?: GitExec } = 
     return 1;
   }
   const path = opts.home ? join(opts.home, '.pr-review', 'config.yaml') : GLOBAL_PATH;
-  const cfg = readOrEmpty(path);
+  let cfg;
+  try {
+    cfg = readOrEmpty(path);
+  } catch (err) {
+    // Never rewrite a config we could not parse — that would destroy it.
+    console.error((err as Error).message);
+    return 1;
+  }
   if (!Array.isArray(cfg.skill_packs)) {
     cfg.skill_packs = DEFAULT_PACKS.map((p) => ({ ...p }));
     console.log('(skill_packs was not set — materialized the default pack list into the config first)');

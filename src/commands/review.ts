@@ -160,6 +160,7 @@ export function renderSummary(
   elapsedMs: number,
   postResult?: { posted: number; attempted: number; skipped: number; errors: { error: string }[]; verified?: boolean },
   passRouting?: PassRoute[],
+  degraded?: string[],
 ): string {
   const totalRaw = outputs.reduce((n, o) => n + o.findings.length, 0);
   const lines: string[] = [
@@ -188,6 +189,14 @@ export function renderSummary(
     lines.push(`| ${o.reviewerName} | ${o.findings.length} | ${status} |`);
   }
   lines.push('');
+
+  if (degraded && degraded.length > 0) {
+    lines.push(
+      ``,
+      `> **Degraded:** ${degraded.length} pack/baseline warning(s) — coverage may be reduced:`,
+      ...degraded.map((d) => `> - ${d}`),
+    );
+  }
 
   if (passRouting) lines.push(...summarizePasses(passRouting).section);
 
@@ -269,6 +278,8 @@ export async function finalizeReview(a: {
   overallStart: number;
   provider?: PrProvider;
   passRouting?: PassRoute[];
+  /** Pack/baseline degradation notes — surfaced in the summary, not just stderr. */
+  degraded?: string[];
 }): Promise<ReviewResult> {
   for (const out of a.outputs) {
     try {
@@ -414,7 +425,7 @@ export async function finalizeReview(a: {
     }
     appendProgress(a.outDir, 'error', 'orchestrator produced no parseable findings');
   } else {
-    summary = renderSummary(a.prUrl, a.outputs, finalFindings, droppedCount, Date.now() - a.overallStart, postResult, a.passRouting);
+    summary = renderSummary(a.prUrl, a.outputs, finalFindings, droppedCount, Date.now() - a.overallStart, postResult, a.passRouting, a.degraded);
     writeFileSync(join(a.outDir, 'pr-review-summary.md'), summary, 'utf8');
     writeFileSync(
       join(a.outDir, 'pr-review-findings.json'),
@@ -638,12 +649,24 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   );
 
   const inScopeFiles = gather.changedFiles.filter((f) => !f.excluded);
-  const stack = detectStack(inScopeFiles.map((f) => f.path), { linguist, cwd, pr: ref });
+  const stack = detectStack(inScopeFiles, { linguist, cwd, pr: ref });
   for (const n of stack.notes) process.stderr.write(`[stack] ${n}\n`);
 
+  // The checkout's skills carry authority ONLY when the checkout IS the PR's
+  // repo — reviewing repo A from inside repo B must not inject B's rules.
+  // Explicitly forced dirs (--skills-dir / extra_skills_dirs) always apply.
+  const projectEligible = stack.cwdIsPrRepo;
+  const skillsForSelection = projectEligible ? loaded.skills : loaded.skills.filter((s) => s.origin === 'forced');
+  const catalogForSelection = projectEligible ? loaded.catalog : [];
+  if (!projectEligible && (loaded.skills.some((s) => s.origin !== 'forced') || loaded.catalog.length > 0)) {
+    process.stderr.write(
+      `[skills] cwd is not the PR's repo — its skills are not used as project rules (forced dirs still apply)\n`,
+    );
+  }
+
   const selection = (opts.selectPassesFn ?? selectPasses)({
-    skills: loaded.skills,
-    catalog: loaded.catalog,
+    skills: skillsForSelection,
+    catalog: catalogForSelection,
     packSkills: loaded.packSkills,
     inScopeFiles,
     stackTags: stack.tags,
@@ -654,6 +677,12 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
       `[packs] WARNING: baseline skill '${b}' not found after sync — renamed upstream? Run \`pr-review packs sync\` or fix skill_packs[].baseline\n`,
     );
   }
+  // Degradation must reach the summary, not only stderr — a detached run's
+  // reader never sees detached.log unless told to look.
+  const degraded = [
+    ...packsResult.warnings,
+    ...selection.missingBaseline.map((b) => `baseline skill '${b}' not found — renamed upstream?`),
+  ];
 
   const sessionOpts = {
     prUrl: opts.prUrl,
@@ -792,6 +821,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     failOn: opts.failOn,
     findingsUnavailable: session.findingsUnavailable,
     forcePost: opts.forcePost,
+    degraded,
     overallStart,
     provider,
     passRouting: sessionCtx.routing,

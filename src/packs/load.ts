@@ -60,7 +60,16 @@ export function loadPackSkills(packs: SkillPack[], home?: string): SkillDefiniti
     if (!existsSync(dir)) continue;
     const byName = new Map<string, SkillDefinition>();
     for (const rel of listPackFiles(dir, pack.include, pack.exclude)) {
-      const def = loadSkillFile(join(dir, rel));
+      let def: SkillDefinition;
+      try {
+        def = loadSkillFile(join(dir, rel));
+      } catch (err) {
+        // One unreadable file in a 600-skill third-party pack must not abort the review.
+        process.stderr.write(
+          `[packs] warning: could not read ${printable(`${pack.name}/${rel}`)} (${printable((err as Error).message.split('\n')[0] ?? '')}) — skipped\n`,
+        );
+        continue;
+      }
       const name = `${pack.name}/${def.name}`;
       if (byName.has(name)) {
         process.stderr.write(`[packs] warning: duplicate skill name '${printable(name)}' in pack — later file wins (${printable(rel)})\n`);

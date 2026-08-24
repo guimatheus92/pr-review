@@ -22,15 +22,15 @@ Each pass gets a `pass-<name>.md` file in the run dir (`~/.pr-review/runs/<id>/`
 
 ## How passes are selected
 
-Selection is ranked (`src/dispatch/pass-select.ts`) — your own content always outranks pack content:
+Selection separates LENSES from CONTEXT. Your own skills (repo dirs, forced dirs) are CONTEXT: every matched one is injected into EVERY pass as authoritative project rules (`skills-project.md`) - they override generic judgement and never consume pass slots. The PASSES are pack skills: stack hits (glob/tag, capped at `MAX_STACK_PASSES = 6`) plus EVERY baseline pointer (the generic lenses always run on a code PR). With no pack passes at all (`skill_packs: []`), your skills become the passes themselves.
 
-1. **forced** — everything from `extra_skills_dirs` / `--skills-dir` / `--skill` (the most explicit opt-in).
-2. **repo** — your repo's own skills: `applies_to`-targeted ones (shown as `glob` in the table), and untargeted ones promoted by the `name` + `description` relevance heuristic against the changed files and diff.
-3. **pack glob** — a pack skill whose `applies_to`/`applyTo` globs match a changed file. A bare `**` never counts, and a bare extension wildcard (`**/*.ts`) only counts when the skill's name/tags also overlap the stack — pack authors use those promiscuously (awesome-copilot's astro/nestjs/svelte guides all claim `**/*.ts`).
-4. **pack tag** — EXACT token match between the skill's name/filename/frontmatter `tags` and the PR's stack tags (languages from the GitHub Linguist database, dependency names from manifests, ecosystem tags like `nodejs`/`dotnet`).
-5. **baseline** — each pack's baseline pointer list (e.g. `awesome-copilot/code-review-generic`, `owasp/error-handling`); runs on every code PR when slots remain.
+Pass selection within the packs:
 
-**Cap:** at most `MAX_PASSES = 10` passes dispatch. Overflow, unmatched skills, and index-mode packs land in `skills-index.md` — an on-demand list every pass can read from when an entry is relevant. Indexed skills are surfaced, not ignored.
+1. **glob** - `applies_to`/`applyTo` matches a changed file. A bare `**` never counts, and a bare extension wildcard (`**/*.ts`, `**/*.{ts,js}`) only counts when the skill's name/tags also overlap the stack.
+2. **tag** - EXACT token match between the skill's name/filename/frontmatter `tags` and the PR's stack tags (Linguist languages, dependency names, ecosystem tags like `nodejs`/`dotnet`).
+3. **baseline** - each pack's baseline pointer list (e.g. `awesome-copilot/security-and-owasp`, `owasp/error-handling`); ALWAYS dispatched on a code PR, on top of the stack cap.
+
+**Cap:** at most `MAX_STACK_PASSES = 6` stack passes dispatch; baselines ride on top (typically 7, so <=13 passes). Overflow, unmatched skills, and index-mode packs land in `skills-index.md` — an on-demand list every pass can read from when an entry is relevant. Indexed skills are surfaced, not ignored.
 
 Docs-only PRs run only glob/forced passes (never baseline). Zero passes on a code PR is exit 2 with a `packs suggest` hint; on a docs-only PR it's a clean exit 0.
 

@@ -22,7 +22,7 @@ Node CLI (deterministic plumbing)
   6. earlyExitGate()            → abort if PR is malformed/too large
   7. loadAll({ skillsOnly })    → discover repo skills + pack skills (reviewer .md files are never loaded)
   8. detectStack()              → Linguist language tags for the changed files + dependency/ecosystem tags from manifests
-  9. selectPasses()             → forced > repo (your own skills, targeted or heuristic) > pack glob > pack tag > baseline, capped at 10; overflow/unmatched/index-mode packs → skills-index.md
+  9. selectPasses()             → project skills = context in every pass; passes = pack glob/tag (cap 6) + every baseline; overflow/unmatched/index-mode → skills-index.md
  10. prepareSessionContext()    → pr-context.md + one pass-<name>.md per pass + skills-all.md + skills-index.md + verifier.md + passes.json
  11. runSingleSession()         → one runtime session, one generic agent per pass via task()/Task(); verifier only if Phase 1 has CRITICAL/HIGH
      └─ runCodex()              → optional Codex second-opinion reviewer as a parallel sibling process
@@ -73,7 +73,7 @@ src/
 │   └── detect.ts            # detectStack: language + dependency + ecosystem tags for the PR
 ├── dispatch/
 │   ├── single-session.ts    # prepareSessionContext (pr-context.md + pass-*.md + skills-all.md + skills-index.md + verifier.md + passes.json), PASS_RULES + VERIFIER_BRIEF, orchestrator prompt, runs the runtime (parseFindingsFile is reused by --resume)
-│   ├── pass-select.ts       # selectPasses: forced > repo (your own skills, targeted or heuristic) > pack glob > pack tag > baseline; MAX_PASSES cap, index overflow
+│   ├── pass-select.ts       # selectPasses: project skills → context; pack glob/tag (MAX_STACK_PASSES cap) + baselines always; index overflow
 │   ├── skill-match.ts       # name/description relevance heuristic for untargeted repo skills
 │   ├── runtime.ts           # resolveRuntime, runtimeSpawnArgs, taskCall, normalizeModel (copilot | claude | auto)
 │   ├── codex.ts             # optional Codex second-opinion reviewer (sibling process, codex exec)

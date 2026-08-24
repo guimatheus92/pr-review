@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import type { SkillDefinition } from '../src/types.js';
-import { MAX_PASSES, selectPasses } from '../src/dispatch/pass-select.js';
+import { MAX_STACK_PASSES, selectPasses } from '../src/dispatch/pass-select.js';
 
 function packSkill(name: string, over: Partial<SkillDefinition> = {}): SkillDefinition {
   return {
@@ -109,24 +109,30 @@ test('selectPasses — exact tag match, never prefixes: java ≠ javascript, ter
   assert.ok(sel.indexEntries.some((e) => e.name === 'pk/java'));
 });
 
-test('selectPasses — order forced > repo > pack glob > tag > baseline; cap sends overflow to the index head', () => {
+test('selectPasses — stack passes capped at MAX_STACK_PASSES, baselines ALWAYS ride, project skills become context', () => {
   const packSkills: SkillDefinition[] = [];
-  for (let i = 0; i < 6; i++) packSkills.push(packSkill(`glob-${i}`, { appliesTo: ['**/main.go'] }));
-  for (let i = 0; i < 3; i++) packSkills.push(packSkill(`tag-${i}`, { tags: ['terraform'] }));
+  for (let i = 0; i < 8; i++) packSkills.push(packSkill(`glob-${i}`, { appliesTo: ['**/main.go'] }));
   for (let i = 0; i < 3; i++) packSkills.push(packSkill(`base-${i}`));
   const forced = repoSkill('forced-one', { origin: 'forced' });
+  const targeted = repoSkill('team-rules', { appliesTo: ['**/*.go'] });
   const sel = base({
     packSkills,
-    skills: [forced],
+    skills: [forced, targeted],
     baseline: ['pk/base-0', 'pk/base-1', 'pk/base-2'],
   });
-  assert.equal(sel.passes.length, MAX_PASSES);
   const kinds = sel.passes.map((p) => p.matchedBy);
-  assert.deepEqual(kinds, ['forced', 'glob', 'glob', 'glob', 'glob', 'glob', 'glob', 'tag', 'tag', 'tag']);
-  // 3 baseline passes overflowed → head of the index, and routed as 'index'
-  assert.deepEqual(sel.indexEntries.slice(0, 3).map((e) => e.name), ['pk/base-0', 'pk/base-1', 'pk/base-2']);
-  for (const name of ['pk/base-0', 'pk/base-1', 'pk/base-2']) {
-    assert.equal(sel.routes.find((r) => r.name === name)?.matchedBy, 'index');
+  assert.deepEqual(
+    kinds,
+    ['glob', 'glob', 'glob', 'glob', 'glob', 'glob', 'baseline', 'baseline', 'baseline'],
+    'MAX_STACK_PASSES glob + every baseline — baselines can no longer be starved out',
+  );
+  assert.equal(sel.passes.length, MAX_STACK_PASSES + 3);
+  // 2 stack passes overflowed → head of the index
+  assert.deepEqual(sel.indexEntries.slice(0, 2).map((e) => e.name), ['pk/glob-6', 'pk/glob-7']);
+  // The user's own skills are context in every pass, not pass slots.
+  assert.deepEqual(sel.projectSkills.map((s) => s.name).sort(), ['forced-one', 'team-rules']);
+  for (const name of ['forced-one', 'team-rules']) {
+    assert.equal(sel.routes.find((r) => r.name === name)?.matchedBy, 'context');
   }
 });
 
@@ -163,15 +169,26 @@ test('selectPasses — baseline dedupe keeps the higher tier; description capped
   assert.equal(entry.description.length, 200);
 });
 
-test('selectPasses — the repo’s own skills outrank pack glob hits under the cap', () => {
+test('selectPasses — project skills never consume pass slots; heuristic-matched ones inject as context', () => {
   const packSkills: SkillDefinition[] = [];
-  for (let i = 0; i < MAX_PASSES; i++) packSkills.push(packSkill(`pg-${i}`, { appliesTo: ['**/main.go'] }));
+  for (let i = 0; i < 10; i++) packSkills.push(packSkill(`pg-${i}`, { appliesTo: ['**/main.go'] }));
   // Untargeted repo skill promoted by the relevance heuristic ('infra' stems 'infra/main.tf').
   const mine = repoSkill('infra-conventions', { description: 'conventions for infra modules' });
   const sel = base({ packSkills, catalog: [mine] });
-  assert.equal(sel.passes[0]!.name, 'infra-conventions', 'user content first');
-  assert.equal(sel.passes.length, MAX_PASSES);
-  assert.ok(sel.indexEntries.some((e) => e.name.startsWith('pk/pg-')), 'one pack hit overflowed instead');
+  assert.ok(!sel.passes.some((p) => p.name === 'infra-conventions'), 'not a pass slot');
+  assert.deepEqual(sel.projectSkills.map((s) => s.name), ['infra-conventions']);
+  assert.equal(sel.passes.length, MAX_STACK_PASSES, 'stack cap unaffected by project skills');
+  assert.equal(sel.routes.find((r) => r.name === 'infra-conventions')?.matchedBy, 'context');
+});
+
+test('selectPasses — fallback with no pack passes: project skills become the passes themselves', () => {
+  const targeted = repoSkill('db-access-layer', { appliesTo: ['src/**/*.go'] });
+  const heuristic = repoSkill('infra-conventions', { description: 'conventions for infra modules' });
+  const sel = base({ skills: [targeted], catalog: [heuristic], packSkills: [] });
+  assert.deepEqual(sel.passes.map((p) => p.name).sort(), ['db-access-layer', 'infra-conventions']);
+  assert.deepEqual(sel.projectSkills, [], 'promoted — no separate context set');
+  assert.equal(sel.passes.find((p) => p.name === 'db-access-layer')?.matchedBy, 'glob');
+  assert.equal(sel.passes.find((p) => p.name === 'infra-conventions')?.matchedBy, 'repo');
 });
 
 test('selectPasses — the skill file’s own .md extension is never identity: a changed README must not tag-match every pack skill', () => {

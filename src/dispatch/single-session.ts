@@ -1,7 +1,7 @@
 import { assertSafeArg, spawnCli } from '../util/spawn.js';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import type { GatherOutput, ReviewerOutput } from '../types.js';
+import type { GatherOutput, ReviewerOutput, SkillDefinition } from '../types.js';
 import { matchesAny } from '../util/globs.js';
 import { sanitizeForFilename } from '../util/tmp.js';
 import { parseReviewerOutput } from './parsers.js';
@@ -40,6 +40,8 @@ export interface SingleSessionOptions {
   gather: GatherOutput;
   /** The review passes to dispatch — every pass is one skill applied by a generic agent. */
   passes: ReviewPass[];
+  /** The user's own matched skills: authoritative context injected into EVERY pass. */
+  projectSkills?: SkillDefinition[];
   /** On-demand entries listed in skills-index.md (overflow, unmatched, index-only packs). */
   indexEntries: IndexEntry[];
   /** The PR's detected stack tags, rendered into pr-context.md. */
@@ -83,11 +85,15 @@ export function isTransientOrchestratorFailure(stdout: string, stderr = ''): boo
 // to MAX_PASSES bodies, so it gets a larger budget. Truncation always warns.
 export const PASS_BODY_CAP = 48_000;
 export const UNION_FILE_CAP = 96_000;
+// The project-rules file is injected into EVERY pass, so its budget multiplies
+// across the fan-out — same numbers the old per-reviewer injection used.
+export const PROJECT_BODY_CAP = 16_000;
+export const PROJECT_FILE_CAP = 64_000;
+/** Hard ceiling on dispatched passes (stack cap + every baseline fits below it). */
+export const MAX_TOTAL_PASSES = 16;
 // skills-index.md is its own on-demand file — never competes with pr-context.
 const INDEX_CAP = 96_000;
 
-/** The dispatch-side cap mirror: prepareSessionContext is the last line of defence. */
-export const MAX_PASSES = 10;
 
 // ponytail: docs-only heuristic — anything ambiguous dispatches everything.
 const DOCS_ONLY_GLOBS = ['**/*.md', '**/*.markdown', '**/*.txt', '**/*.rst', 'docs/**', 'LICENSE*', 'CHANGELOG*'];
@@ -285,13 +291,44 @@ export const NO_POSTING_DIRECTIVE =
   'no `gh pr comment`/`gh pr review`/`gh api` writes, no `glab`/`az repos` writes. Read-only commands are fine. ' +
   'The pr-review CLI is the only thing that posts; your findings JSON is your entire output.';
 
-/** One review pass: a generic agent reads the PR context, then applies exactly one skill. */
-function passTaskPrompt(contextPath: string, passPath: string): string {
+/** One review pass: a generic agent reads the PR context + the project rules, then applies exactly one skill. */
+function passTaskPrompt(contextPath: string, passPath: string, projectPath: string | undefined): string {
   return (
-    `Read the PR context at \`${contextPath}\`, then read your review pass at \`${passPath}\` and apply ONLY that pass's rules to the diff. ` +
+    `Read the PR context at \`${contextPath}\`, then read your review pass at \`${passPath}\` and apply ONLY that pass's rules to the diff.` +
+    `${skillsRulesSentence(projectPath)} ` +
     `Output ONLY a JSON array of findings using the shape: ${OUTPUT_SHAPE}. If you find nothing, output []. No prose. No fences. ` +
     NO_POSTING_DIRECTIVE
   );
+}
+
+/** The user's own rules — same authoritative wording (and caps) the per-reviewer injection used. */
+function renderProjectFile(skills: SkillDefinition[]): string {
+  const lines: string[] = [
+    `# Project-Specific Rules`,
+    ``,
+    `The following project conventions, business rules, and team standards apply to this review. They are authoritative and OVERRIDE generic judgement.`,
+  ];
+  let total = lines.join('\n').length;
+  for (const s of skills) {
+    let body = s.body.trim();
+    if (body.length > PROJECT_BODY_CAP) {
+      body = body.slice(0, PROJECT_BODY_CAP) + `\n\n[truncated: skill body exceeded ${PROJECT_BODY_CAP} bytes]`;
+      process.stderr.write(
+        `[skills] warning: project skill '${s.name}' body exceeds ${PROJECT_BODY_CAP} bytes — truncated in reviewer context\n`,
+      );
+    }
+    const section = ['', `## ${s.name}`, s.description ? `_${s.description}_` : '', '', body].join('\n');
+    if (total + section.length > PROJECT_FILE_CAP) {
+      process.stderr.write(
+        `[skills] warning: skills-project.md exceeds ${PROJECT_FILE_CAP} bytes — skill '${s.name}' and later skills omitted\n`,
+      );
+      lines.push('', `[omitted: remaining skills exceeded the ${PROJECT_FILE_CAP}-byte context budget]`);
+      break;
+    }
+    lines.push(section);
+    total += section.length;
+  }
+  return lines.join('\n');
 }
 
 /** Companion agents keep their own criteria; the union skills file is optional context. */
@@ -392,9 +429,13 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
   const afterSkip = opts.passes.filter((p) => !isSkipped(skip, p.name));
   const { dispatch: afterTriage, skipped: triaged } = triagePasses(afterSkip, inScopePaths);
   // Last line of defence — the selection module already caps, but this file owns the token budget.
-  const passes = afterTriage.slice(0, MAX_PASSES);
-  const capOverflow = afterTriage.slice(MAX_PASSES);
+  const passes = afterTriage.slice(0, MAX_TOTAL_PASSES);
+  const capOverflow = afterTriage.slice(MAX_TOTAL_PASSES);
   const wantVerifier = !skip.has('verifier');
+  // Project rules: --skip drops one from the context file too.
+  const projectAll = opts.projectSkills ?? [];
+  const projectSkipped = projectAll.filter((s) => isSkipped(skip, s.name));
+  const projectSkills = projectAll.filter((s) => !isSkipped(skip, s.name));
 
   const indexEntries: IndexEntry[] = [
     ...capOverflow.map((p) => ({
@@ -423,6 +464,11 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
     writeFileSync(unionPath, renderUnionFile(passes), 'utf8');
     skillsFiles['all'] = unionPath;
   }
+  if (projectSkills.length > 0) {
+    const projectPath = resolve(opts.outDir, 'skills-project.md');
+    writeFileSync(projectPath, renderProjectFile(projectSkills), 'utf8');
+    skillsFiles['project'] = projectPath;
+  }
 
   let verifierPath: string | undefined;
   if (wantVerifier) {
@@ -432,9 +478,11 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
 
   const routing: PassRoute[] = [
     ...passes.map((p) => ({ name: p.name, source: p.source, matchedBy: p.matchedBy as PassRoute['matchedBy'] })),
+    ...projectSkills.map((s) => ({ name: s.name, source: s.source, matchedBy: 'context' as const })),
     ...capOverflow.map((p) => ({ name: p.name, source: p.source, matchedBy: 'index' as const })),
     ...opts.indexEntries.map((e) => ({ name: e.name, source: e.source, matchedBy: 'index' as const })),
     ...[...skippedByFlag, ...triaged].map((p) => ({ name: p.name, source: p.source, matchedBy: 'skipped' as const })),
+    ...projectSkipped.map((s) => ({ name: s.name, source: s.source, matchedBy: 'skipped' as const })),
   ];
   // Persist the routing so a --resume (which never re-runs prepareSessionContext) can
   // still render the Skills section. Best-effort: this artifact is display-only, so a
@@ -488,6 +536,8 @@ function buildOrchestratorPrompt(
 ): string {
   const runtime = opts.runtime ?? 'copilot';
   const unionSkills = ctx.skillsFiles['all'];
+  // Project rules are the authoritative context; the union of pass bodies is the fallback.
+  const authoritativeSkills = ctx.skillsFiles['project'] ?? unionSkills;
   const companionDispatchLines: string[] = [];
   const companionSlashLines: string[] = [];
   if (opts.invokeCompanions) {
@@ -496,7 +546,7 @@ function buildOrchestratorPrompt(
       for (const agent of c.agents) {
         const shortAgent = agent.replace(/^[^:]+:/, '');
         companionDispatchLines.push(
-          `- ${taskCall(runtime, agent, companionTaskPrompt(ctx.contextPath, unionSkills))} — record as reviewer name \`companion:${c.pluginId}/${shortAgent}\``,
+          `- ${taskCall(runtime, agent, companionTaskPrompt(ctx.contextPath, authoritativeSkills))} — record as reviewer name \`companion:${c.pluginId}/${shortAgent}\``,
         );
       }
     }
@@ -509,7 +559,7 @@ function buildOrchestratorPrompt(
   }
 
   const passDispatchLines = ctx.passes.map((p) => {
-    return `- ${taskCall(runtime, GENERIC_AGENT, passTaskPrompt(ctx.contextPath, ctx.skillsFiles[p.name]!))} — record as reviewer name \`${p.name}\``;
+    return `- ${taskCall(runtime, GENERIC_AGENT, passTaskPrompt(ctx.contextPath, ctx.skillsFiles[p.name]!, ctx.skillsFiles['project']))} — record as reviewer name \`${p.name}\``;
   });
 
   const allParallel = [...passDispatchLines, ...companionDispatchLines, ...companionSlashLines];
@@ -563,7 +613,7 @@ function buildOrchestratorPrompt(
   );
 
   if (ctx.wantVerifier) {
-    const verifierRules = skillsRulesSentence(unionSkills);
+    const verifierRules = skillsRulesSentence(authoritativeSkills);
     lines.push(
       ``,
       `## Phase 3 — Verifier (conditional)`,

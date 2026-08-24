@@ -123,19 +123,23 @@ function earlyExitGate(gather: GatherOutput): string | null {
  * which were skipped.
  */
 export function summarizePasses(routing: PassRoute[]): { section: string[]; brief: string } {
-  const ran = routing.filter((r) => r.matchedBy !== 'index' && r.matchedBy !== 'skipped');
+  const ran = routing.filter((r) => r.matchedBy !== 'index' && r.matchedBy !== 'skipped' && r.matchedBy !== 'context');
+  const context = routing.filter((r) => r.matchedBy === 'context');
   const index = routing.filter((r) => r.matchedBy === 'index');
   const skipped = routing.filter((r) => r.matchedBy === 'skipped');
 
-  const brief = `${ran.length} pass(es) · ${index.length} on-demand`;
+  const brief = `${ran.length} pass(es)${context.length ? ` · ${context.length} project rule(s)` : ''} · ${index.length} on-demand`;
   const section = [
     `## Skills`,
     ``,
-    `**Passes:** ${ran.length} · **On-demand (index):** ${index.length}${skipped.length ? ` · **Skipped:** ${skipped.length}` : ''}`,
+    `**Passes:** ${ran.length}${context.length ? ` · **Project rules (in every pass):** ${context.length}` : ''} · **On-demand (index):** ${index.length}${skipped.length ? ` · **Skipped:** ${skipped.length}` : ''}`,
   ];
   if (ran.length > 0) {
     section.push(``, `| Pass | Matched by |`, `|---|---|`);
     for (const r of ran) section.push(`| ${r.name} | ${r.matchedBy} |`);
+  }
+  if (context.length > 0) {
+    section.push(``, `_Project rules injected into every pass: ${context.map((r) => r.name).join(', ')}._`);
   }
   if (index.length > 0) {
     // Make clear that indexed ≠ ignored — passes read the relevant ones on demand.
@@ -655,6 +659,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     prUrl: opts.prUrl,
     gather,
     passes: selection.passes,
+    projectSkills: selection.projectSkills,
     indexEntries: selection.indexEntries,
     stackTags: selection.stackTags,
     installedCompanions,
@@ -695,6 +700,13 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
       for (const p of ctx.passes) {
         lines.push(`| ${p.name} | ${p.matchedBy} | ${p.matchedOn.join(', ') || '—'} | ${p.source} |`);
       }
+    }
+    const projectRows = ctx.routing.filter((r) => r.matchedBy === 'context');
+    if (projectRows.length > 0) {
+      lines.push(
+        ``,
+        `**Project rules (injected into every pass):** ${projectRows.map((r) => r.name).join(', ')} → \`${join(outDir, 'skills-project.md')}\``,
+      );
     }
     const idxCount = ctx.routing.filter((r) => r.matchedBy === 'index').length;
     if (idxCount > 0) lines.push(``, `**Index (on-demand):** ${idxCount} skill(s) → \`${join(outDir, 'skills-index.md')}\``);
@@ -755,7 +767,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   if (includeCodex) {
     codexPromise = runCodexReviewer({
       contextPath: sessionCtx.contextPath,
-      skillsPath: sessionCtx.skillsFiles['all'],
+      skillsPath: sessionCtx.skillsFiles['project'] ?? sessionCtx.skillsFiles['all'],
       outDir,
     });
   }

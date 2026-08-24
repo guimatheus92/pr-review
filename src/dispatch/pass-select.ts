@@ -8,6 +8,11 @@ import { selectRelevantSkills } from './skill-match.js';
  * repo's own skill dirs, or forced dirs — dispatched to a generic agent.
  */
 
+/** Cap on stack-matched (glob/tag) pack passes. Baselines ride on top — they are
+ *  the generic lenses that must run on every code PR (observed live: a repo with
+ *  47 project skills otherwise starved security/baseline coverage entirely). */
+export const MAX_STACK_PASSES = 6;
+/** Fallback cap when project skills ARE the passes (no packs configured). */
 export const MAX_PASSES = 10;
 
 export type MatchedBy = 'glob' | 'tag' | 'repo' | 'forced' | 'baseline';
@@ -31,16 +36,23 @@ export interface IndexEntry {
   pack?: string;
 }
 
-/** One row per known skill — dispatched, indexed, or skipped — for the summary and --resume. */
+/** One row per known skill — dispatched, project context, indexed, or skipped. */
 export interface PassRoute {
   name: string;
   source: string;
-  matchedBy: MatchedBy | 'index' | 'skipped';
+  matchedBy: MatchedBy | 'context' | 'index' | 'skipped';
 }
 
 export interface PassSelection {
-  /** Ranked forced > repo (user content) > pack glob > pack tag > baseline, capped at MAX_PASSES. */
+  /** Stack passes (pack glob/tag, capped) + every baseline. With no packs, the project skills. */
   passes: ReviewPass[];
+  /**
+   * The user's own matched skills: NOT individual passes — authoritative
+   * context injected into EVERY pass (the product's original core value:
+   * project rules override generic judgement). Empty when they became the
+   * passes themselves (fallback with no packs).
+   */
+  projectSkills: SkillDefinition[];
   /** Overflow first, then stack-relevant entries, then the rest (incl. index-only packs). */
   indexEntries: IndexEntry[];
   stackTags: string[];
@@ -158,69 +170,85 @@ export function selectPasses(input: {
     indexSkills.push(s);
   }
 
+  // The user's own skills are CONTEXT, not lenses: they carry the business
+  // rules every pass must apply, so they inject into all passes instead of
+  // consuming pass slots 1:1 (a repo with 47 skills used to starve every
+  // baseline/stack pass out of the cap). They keep a matchedBy label for the
+  // routing table.
+  const project: Candidate[] = [];
   for (const s of input.skills) {
     if (s.origin === 'forced') {
-      candidates.push(candidate(s, 'forced', []));
+      project.push(candidate(s, 'forced', []));
       continue;
     }
-    // Today's targeted-skill semantics: empty applies_to = always applies.
+    // Targeted-skill semantics: empty applies_to = always applies.
     if (s.appliesTo.length === 0) {
-      candidates.push(candidate(s, 'glob', []));
+      project.push(candidate(s, 'glob', []));
     } else {
       const hits = s.appliesTo.filter((g) => inScopePaths.some((p) => matchesAny(p, [g])));
-      if (hits.length > 0) candidates.push(candidate(s, 'glob', hits));
+      if (hits.length > 0) project.push(candidate(s, 'glob', hits));
       else indexSkills.push(s);
     }
   }
 
   const { matched, rest } = selectRelevantSkills(input.catalog, input.inScopeFiles);
-  for (const s of matched) candidates.push(candidate(s, 'repo', []));
+  for (const s of matched) project.push(candidate(s, 'repo', []));
   indexSkills.push(...rest);
 
-  // The user's own content outranks any pack: repo/plugin skills carry the
-  // business rules this tool exists to apply (forced dirs are the most explicit
-  // opt-in of all). Packs fill the remaining slots; baseline fills last.
-  const rankOf = (c: Candidate): number => {
-    if (c.pass.matchedBy === 'forced') return 0;
-    if (c.skill.origin !== 'pack' && (c.pass.matchedBy === 'glob' || c.pass.matchedBy === 'repo')) return 1;
-    if (c.pass.matchedBy === 'glob') return 2;
-    if (c.pass.matchedBy === 'tag') return 3;
-    return 4; // baseline
-  };
-  const ordered = [...candidates].sort(
-    (a, b) =>
-      rankOf(a) - rankOf(b) ||
-      b.pass.matchedOn.length - a.pass.matchedOn.length ||
-      a.pass.name.localeCompare(b.pass.name),
+  // Stack passes: pack glob/tag hits, most specific first, capped.
+  const stackCandidates = candidates
+    .filter((c) => c.pass.matchedBy === 'glob' || c.pass.matchedBy === 'tag')
+    .sort(
+      (a, b) =>
+        (a.pass.matchedBy === 'glob' ? 0 : 1) - (b.pass.matchedBy === 'glob' ? 0 : 1) ||
+        b.pass.matchedOn.length - a.pass.matchedOn.length ||
+        a.pass.name.localeCompare(b.pass.name),
+    );
+  const stackKept = stackCandidates.slice(0, MAX_STACK_PASSES);
+  const stackOverflow = stackCandidates.slice(MAX_STACK_PASSES);
+
+  // Baselines ALWAYS dispatch (deduped against a baseline that already
+  // stack-matched) — they are the generic lenses of every code review.
+  const keptNames = new Set(stackKept.map((c) => c.pass.name));
+  const baselines = candidates.filter(
+    (c) => c.pass.matchedBy === 'baseline' && !keptNames.has(c.pass.name),
   );
-  // One pass per name; a baseline pointer that also glob/tag-matched keeps its higher tier.
-  const seen = new Set<string>();
-  const deduped: Candidate[] = [];
-  for (const c of ordered) {
-    if (seen.has(c.pass.name)) continue;
-    seen.add(c.pass.name);
-    deduped.push(c);
+
+  let kept = [...stackKept, ...baselines];
+  let projectSkills = project.map((c) => c.skill);
+  let projectRoutes: PassRoute[] = project.map((c) => ({
+    name: c.pass.name,
+    source: c.pass.source,
+    matchedBy: 'context' as const,
+  }));
+
+  // Fallback: with no pack passes at all (skill_packs: [] or nothing matched),
+  // the project skills ARE the review — each runs as its own pass, as before.
+  if (kept.length === 0 && project.length > 0) {
+    kept = project.slice(0, MAX_PASSES);
+    for (const c of project.slice(MAX_PASSES)) indexSkills.push(c.skill);
+    projectSkills = [];
+    projectRoutes = [];
   }
-  const kept = deduped.slice(0, MAX_PASSES);
-  const overflow = deduped.slice(MAX_PASSES);
 
   // Index order: overflow (most specific first), then stack-relevant, then the rest.
   const scored = indexSkills
     .map((s) => ({ s, score: [...tokensOf(s)].filter((t) => stackSet.has(t)).length }))
     .sort((a, b) => b.score - a.score || a.s.name.localeCompare(b.s.name));
   const indexEntries = [
-    ...overflow.map((c) => toIndexEntry(c.skill)),
+    ...stackOverflow.map((c) => toIndexEntry(c.skill)),
     ...scored.map(({ s }) => toIndexEntry(s)),
   ];
 
   const passes = kept.map((c) => c.pass);
   const routes: PassRoute[] = [
     ...passes.map((p) => ({ name: p.name, source: p.source, matchedBy: p.matchedBy as PassRoute['matchedBy'] })),
+    ...projectRoutes,
     ...indexEntries.map((e) => ({ name: e.name, source: e.source, matchedBy: 'index' as const })),
   ];
 
   const packNames = new Set(input.packSkills.map((s) => s.name));
   const missingBaseline = input.baseline.filter((b) => !packNames.has(b));
 
-  return { passes, indexEntries, stackTags: [...stackSet].sort(), routes, missingBaseline };
+  return { passes, projectSkills, indexEntries, stackTags: [...stackSet].sort(), routes, missingBaseline };
 }

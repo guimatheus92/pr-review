@@ -3,7 +3,7 @@ import { strict as assert } from 'node:assert';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { MAX_PASSES, prepareSessionContext } from '../src/dispatch/single-session.js';
+import { MAX_TOTAL_PASSES, prepareSessionContext } from '../src/dispatch/single-session.js';
 import type { IndexEntry, ReviewPass } from '../src/dispatch/pass-select.js';
 import type { GatherOutput } from '../src/types.js';
 
@@ -281,13 +281,13 @@ test('--skip — full pack/skill name and bare suffix both remove the pass; rout
   }
 });
 
-test('cap — more passes than MAX_PASSES: overflow goes to the index file and routes as index', () => {
+test('cap — more passes than MAX_TOTAL_PASSES: overflow goes to the index file and routes as index', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
-    const passes = Array.from({ length: MAX_PASSES + 2 }, (_, i) => pass(`p/pass-${String(i).padStart(2, '0')}`));
+    const passes = Array.from({ length: MAX_TOTAL_PASSES + 2 }, (_, i) => pass(`p/pass-${String(i).padStart(2, '0')}`));
     const ctx = prepareSessionContext(baseOpts(outDir, ['src/app.ts'], passes));
-    assert.equal(ctx.passes.length, MAX_PASSES);
-    const overflowNames = [`p/pass-${MAX_PASSES}`, `p/pass-${MAX_PASSES + 1}`];
+    assert.equal(ctx.passes.length, MAX_TOTAL_PASSES);
+    const overflowNames = [`p/pass-${MAX_TOTAL_PASSES}`, `p/pass-${MAX_TOTAL_PASSES + 1}`];
     const index = readFileSync(join(outDir, 'skills-index.md'), 'utf8');
     for (const n of overflowNames) {
       assert.ok(index.includes(`**${n}**`), `${n} listed in the index`);
@@ -328,6 +328,52 @@ test('stack + index — pr-context carries ## Stack and points at skills-index.m
       assert.ok(body2.includes('(none detected)'));
       assert.ok(!body2.includes('## More skills'));
       assert.ok(!existsSync(join(outDir2, 'skills-index.md')));
+    } finally {
+      rmSync(outDir2, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('project rules — skills-project.md injected into every pass line, companions, verifier, and routing', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const projectSkills = [
+      { name: 'pp-regras-plano', description: 'plan rules', source: '/repo/.agents/skills/pp-regras-plano/SKILL.md', body: 'PROJECT_RULE_MARKER', appliesTo: [] },
+    ];
+    const ctx = prepareSessionContext({
+      ...baseOpts(outDir, ['src/app.ts'], [pass('p/one'), pass('p/two')]),
+      projectSkills,
+      invokeCompanions: true,
+      installedCompanions: ['pr-review-toolkit'],
+    });
+    const projectFile = ctx.skillsFiles['project']!;
+    assert.ok(projectFile.endsWith('skills-project.md'));
+    const body = readFileSync(projectFile, 'utf8');
+    assert.ok(body.includes('PROJECT_RULE_MARKER'));
+    assert.ok(body.includes('authoritative and OVERRIDE'), 'project rules keep the authoritative wording');
+
+    const prompt = ctx.orchestratorPrompt;
+    const passLines = prompt.split('\n').filter((l) => l.includes('record as reviewer name `p/'));
+    assert.equal(passLines.length, 2);
+    for (const l of passLines) assert.ok(l.includes('skills-project.md'), 'every pass reads the project rules');
+    const companionLine = prompt.split('\n').find((l) => l.includes('pr-review-toolkit:code-reviewer'))!;
+    assert.ok(companionLine.includes('skills-project.md'), 'companions get the authoritative rules');
+    const verifierLine = prompt.split('\n').find((l) => l.includes('record as reviewer name `verifier`'))!;
+    assert.ok(verifierLine.includes('skills-project.md'), 'verifier gets the authoritative rules');
+
+    assert.equal(ctx.routing.find((r) => r.name === 'pp-regras-plano')?.matchedBy, 'context');
+    // --skip drops a project rule from the context file too.
+    const outDir2 = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+    try {
+      const skipped = prepareSessionContext({
+        ...baseOpts(outDir2, ['src/app.ts'], [pass('p/one')]),
+        projectSkills,
+        skipReviewers: ['pp-regras-plano'],
+      });
+      assert.equal(skipped.skillsFiles['project'], undefined);
+      assert.equal(skipped.routing.find((r) => r.name === 'pp-regras-plano')?.matchedBy, 'skipped');
     } finally {
       rmSync(outDir2, { recursive: true, force: true });
     }

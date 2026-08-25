@@ -4,6 +4,8 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-08-25
+
 ### Changed
 - **Project rules are never lost to a budget anymore** (observed live on Preco-Pratico Backend#616 / Frontend#1067: a 47-skill repo saturated the injection cap at exactly 10 every run, and the 16KB/64KB delivery caps then cut that to 3–4 skills, two of them mid-body — the summary never said so): the relevance heuristic's `MAX_HEURISTIC_INJECT` cap is gone (EVERY relevant untargeted repo skill injects) and `skills-project.md` inlines every matched skill body WHOLE (`PROJECT_BODY_CAP`/`PROJECT_FILE_CAP` removed, no `[truncated:]`/`[omitted:]` markers possible). The review pays the token cost by design rather than silently dropping a business rule.
 - Relevance heuristic `THRESHOLD` raised 1 → 3 distinct stem hits: measured on real 55/66-file PRs, business skills score 4–115 while non-review content (tool-internal docs, loose readmes) scores 0–2 — threshold 1 marked 47/47 skills relevant on any large diff, making "relevant" meaningless. Small PRs still clear the bar via name+description stems (fixture-backed).

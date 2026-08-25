@@ -26,6 +26,8 @@ export interface ReviewPass {
   matchedBy: MatchedBy;
   /** What hit: the matching globs (glob) or stack tags (tag); [] for repo/forced/baseline. */
   matchedOn: string[];
+  /** Where the skill came from — project-origin pass bodies are never truncated; 'pack' bodies cap. */
+  origin?: SkillDefinition['origin'];
 }
 
 export interface IndexEntry {
@@ -118,7 +120,7 @@ interface Candidate {
 function candidate(s: SkillDefinition, matchedBy: MatchedBy, matchedOn: string[]): Candidate {
   return {
     skill: s,
-    pass: { name: s.name, source: s.source, body: s.body, description: s.description, matchedBy, matchedOn },
+    pass: { name: s.name, source: s.source, body: s.body, description: s.description, matchedBy, matchedOn, origin: s.origin },
   };
 }
 
@@ -229,12 +231,14 @@ export function selectPasses(input: {
   }));
 
   // Fallback: with no pack passes at all (skill_packs: [] or nothing matched),
-  // the project skills ARE the review — each runs as its own pass, as before.
+  // the project skills ARE the review — each runs as its own pass. Overflow
+  // beyond the pass cap stays CONTEXT (injected whole into every pass), never
+  // the index: the no-rule-lost guarantee holds in this mode too.
   if (kept.length === 0 && project.length > 0) {
     kept = project.slice(0, MAX_PASSES);
-    for (const c of project.slice(MAX_PASSES)) indexSkills.push(c.skill);
-    projectSkills = [];
-    projectRoutes = [];
+    const overflow = project.slice(MAX_PASSES);
+    projectSkills = overflow.map((c) => c.skill);
+    projectRoutes = overflow.map((c) => ({ name: c.pass.name, source: c.pass.source, matchedBy: 'context' as const }));
   }
 
   // Index order: overflow (most specific first), then stack-relevant, then the rest.

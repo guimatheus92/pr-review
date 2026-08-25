@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { selectRelevantSkills, MAX_HEURISTIC_INJECT } from '../src/dispatch/skill-match.js';
+import { selectRelevantSkills } from '../src/dispatch/skill-match.js';
 import type { SkillDefinition } from '../src/types.js';
 
 function skill(name: string, description: string): SkillDefinition {
@@ -28,12 +28,30 @@ test('selectRelevantSkills — a skill with no topical overlap is not injected',
   assert.equal(rest.length, 1);
 });
 
-test('selectRelevantSkills — caps injected count; overflow falls back to catalog', () => {
-  // 15 skills that all match "plans"; only MAX get injected, the rest stay catalog.
+test('selectRelevantSkills — no numeric cap: every relevant skill is injected', () => {
+  // 15 skills that all match "plans"; ALL inject — project rules are never dropped for budget.
   const catalog = Array.from({ length: 15 }, (_, i) => skill(`plan-rule-${i}`, 'planos e créditos e billing e cadastro'));
   const { matched, rest } = selectRelevantSkills(catalog, PLANS_PR);
-  assert.equal(matched.length, MAX_HEURISTIC_INJECT, 'injected count is capped');
-  assert.equal(rest.length, 15 - MAX_HEURISTIC_INJECT, 'overflow stays available on-demand');
+  assert.equal(matched.length, 15, 'every relevant skill injected');
+  assert.equal(rest.length, 0, 'nothing relevant left behind in the catalog');
+});
+
+test('selectRelevantSkills — the bar is THRESHOLD distinct hits for richly-described skills', () => {
+  // 6 needles, exactly 2 hit (plan, bill) → below the bar of 3 → catalog.
+  const twoHits = skill('mobile-tokens', 'planos e billing para spacing tipografia mobile');
+  // Same shape with a 3rd hit (créditos) → injected.
+  const threeHits = skill('mobile-rules', 'planos e billing e créditos para tipografia mobile');
+  const { matched, rest } = selectRelevantSkills([twoHits, threeHits], PLANS_PR);
+  assert.deepEqual(matched.map((s) => s.name), ['mobile-rules']);
+  assert.deepEqual(rest.map((s) => s.name), ['mobile-tokens']);
+});
+
+test('selectRelevantSkills — terse metadata adapts the bar: fewer needles than THRESHOLD still match', () => {
+  // Only 2 usable needles (planos, créditos) — both hit, so the skill injects
+  // even though it can never reach THRESHOLD.
+  const terse = skill('pp-planos', 'créditos');
+  const { matched } = selectRelevantSkills([terse], PLANS_PR);
+  assert.deepEqual(matched.map((s) => s.name), ['pp-planos'], 'short metadata is not structurally unmatchable');
 });
 
 test('selectRelevantSkills — empty catalog and no files are safe', () => {

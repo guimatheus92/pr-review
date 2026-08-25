@@ -30,7 +30,7 @@ Skills are standard `SKILL.md` reference docs, so they load from every conventio
 How each skill routes (see [`reviewers-vs-skills`](reviewers-vs-skills.md) for the full tier list):
 
 - **Targeted** (`applies_to` globs match a changed file) → becomes its own **pass**, authoritatively.
-- **Untargeted repo skill** → run through the relevance heuristic matching its `name` + `description` against the changed file paths and the diff (accent-insensitive, stem/prefix matching, so Portuguese "planos/créditos" matches English `plans`/`Credits`). A **match** makes it a pass; **no match** lists it in `skills-index.md`, the on-demand index passes read from when an entry is relevant — surfaced, never dropped.
+- **Untargeted repo skill** → run through the relevance heuristic matching its `name` + `description` against the changed file paths and the diff (accent-insensitive, stem/prefix matching, so Portuguese "planos/créditos" matches English `plans`/`Credits`). A **match** injects it into EVERY pass as authoritative project context (`skills-project.md`) — every match, no numeric cap, body inlined whole; **no match** lists it in `skills-index.md`, the on-demand index passes read from when an entry is relevant — surfaced, never dropped.
 - **Pack skills** → glob/tag/baseline tiers; index-mode packs go straight to the index.
 - **Untargeted, in a home dir** (`~/.claude/skills/` etc.) → skipped (with a stderr note); these are personal general-purpose helpers, not review content.
 

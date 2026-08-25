@@ -164,8 +164,8 @@ test('selectPasses — a baseline that stack-matches but loses the stack cap STI
 test('selectPasses — repo skills: targeted globs route as glob, untargeted go through the heuristic', () => {
   const targeted = repoSkill('auth-rules', { appliesTo: ['**/*.go'] });
   const missed = repoSkill('css-rules', { appliesTo: ['**/*.css'] });
-  // Heuristic needles match 4-char stems of the changed paths/diff: 'infra' hits 'infra/main.tf'.
-  const relevant = repoSkill('infra-conventions', { description: 'conventions for infra modules' });
+  // Heuristic needles match 4-char stems of the changed paths/diff: 'infra'/'main'/'resources'/'buckets' clear THRESHOLD.
+  const relevant = repoSkill('infra-conventions', { description: 'conventions for infra modules: main terraform resources and s3 buckets' });
   const unrelated = repoSkill('billing-glossary', { description: 'billing domain terms' });
   const sel = base({ skills: [targeted, missed], catalog: [relevant, unrelated] });
   assert.equal(sel.passes.find((p) => p.name === 'auth-rules')?.matchedBy, 'glob');
@@ -189,8 +189,8 @@ test('selectPasses — baseline dedupe keeps the higher tier; description capped
 test('selectPasses — project skills never consume pass slots; heuristic-matched ones inject as context', () => {
   const packSkills: SkillDefinition[] = [];
   for (let i = 0; i < 10; i++) packSkills.push(packSkill(`pg-${i}`, { appliesTo: ['**/main.go'] }));
-  // Untargeted repo skill promoted by the relevance heuristic ('infra' stems 'infra/main.tf').
-  const mine = repoSkill('infra-conventions', { description: 'conventions for infra modules' });
+  // Untargeted repo skill promoted by the relevance heuristic (4 stem hits clear THRESHOLD).
+  const mine = repoSkill('infra-conventions', { description: 'conventions for infra modules: main terraform resources and s3 buckets' });
   const sel = base({ packSkills, catalog: [mine] });
   assert.ok(!sel.passes.some((p) => p.name === 'infra-conventions'), 'not a pass slot');
   assert.deepEqual(sel.projectSkills.map((s) => s.name), ['infra-conventions']);
@@ -200,12 +200,23 @@ test('selectPasses — project skills never consume pass slots; heuristic-matche
 
 test('selectPasses — fallback with no pack passes: project skills become the passes themselves', () => {
   const targeted = repoSkill('db-access-layer', { appliesTo: ['src/**/*.go'] });
-  const heuristic = repoSkill('infra-conventions', { description: 'conventions for infra modules' });
+  const heuristic = repoSkill('infra-conventions', { description: 'conventions for infra modules: main terraform resources and s3 buckets' });
   const sel = base({ skills: [targeted], catalog: [heuristic], packSkills: [] });
   assert.deepEqual(sel.passes.map((p) => p.name).sort(), ['db-access-layer', 'infra-conventions']);
   assert.deepEqual(sel.projectSkills, [], 'promoted — no separate context set');
   assert.equal(sel.passes.find((p) => p.name === 'db-access-layer')?.matchedBy, 'glob');
   assert.equal(sel.passes.find((p) => p.name === 'infra-conventions')?.matchedBy, 'repo');
+});
+
+test('selectPasses — fallback overflow beyond MAX_PASSES stays CONTEXT, never the index (no rule lost)', () => {
+  const many = Array.from({ length: 12 }, (_, i) => repoSkill(`rule-${String(i).padStart(2, '0')}`, { appliesTo: ['**/*.go'] }));
+  const sel = base({ skills: many, catalog: [], packSkills: [] });
+  assert.equal(sel.passes.length, 10, 'passes cap at MAX_PASSES');
+  assert.equal(sel.projectSkills.length, 2, 'overflow injects as context into every pass');
+  for (const s of sel.projectSkills) {
+    assert.equal(sel.routes.find((r) => r.name === s.name)?.matchedBy, 'context');
+  }
+  assert.ok(!sel.indexEntries.some((e) => e.name.startsWith('rule-')), 'no project rule demoted to the on-demand index');
 });
 
 test('selectPasses — the skill file’s own .md extension is never identity: a changed README must not tag-match every pack skill', () => {

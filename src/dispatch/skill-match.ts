@@ -2,17 +2,24 @@ import type { SkillDefinition } from '../types.js';
 
 // Relevance heuristic: which untargeted (catalog) skills are worth force-injecting
 // for THIS PR. A skill's name+description is matched against the changed file paths
-// and diff text. Matches are injected (shown as "Injected: N"); the rest stay in the
-// on-demand catalog. Deterministic, no LLM, no tokens — a false negative just falls
-// back to the catalog, and a false positive costs one extra (capped) skill body.
+// and diff text. EVERY match is injected — project rules are business knowledge a
+// review must not lose, so there is deliberately no numeric cap (a repo with 38
+// skills used to saturate a cap of 10 with readdir-order ties, every run). The rest
+// stay in the on-demand catalog. Deterministic, no LLM, no tokens.
 
 const MIN_TOKEN_LEN = 4; // ignore short/noise tokens
 const STEM_PREFIX = 4; // shared-prefix length that counts as a match (plano↔plans, credito↔credits)
-const THRESHOLD = 1; // distinct needle matches needed to call a skill relevant
-export const MAX_HEURISTIC_INJECT = 10; // cap injected count; overflow → catalog (token budget)
+// Distinct needle matches needed to call a skill relevant. Measured on real
+// 55/66-file PRs against a 47-skill corpus: with a bar of 1 every skill matched
+// (47/47 — "relevant" meant nothing on a large diff); at 3, richly-described
+// business skills (scoring 4-115 there) all pass while most low-signal loose
+// files drop. The bar adapts down for terse skills: a skill whose name +
+// description yield fewer needles than THRESHOLD only needs to hit all of
+// them — otherwise short metadata would be structurally unmatchable.
+const THRESHOLD = 3;
 
 // Small pt+en stopword set — words too common to signal a topic. Not exhaustive by
-// design: over-filtering costs recall, and the cap+catalog absorb the noise.
+// design: over-filtering costs recall, and the on-demand catalog absorbs the noise.
 const STOPWORDS = new Set([
   // pt
   'para', 'pela', 'pelo', 'este', 'esta', 'esse', 'essa', 'isso', 'como', 'quando', 'sempre',
@@ -55,13 +62,15 @@ export function selectRelevantSkills(
     );
     let score = 0;
     for (const n of needles) if (haystackPrefixes.has(n.slice(0, STEM_PREFIX))) score++;
-    return { skill, score };
+    // Terse metadata lowers the bar to what the skill can actually score.
+    const bar = Math.max(1, Math.min(THRESHOLD, needles.size));
+    return { skill, score, bar };
   });
 
   const relevant = scored
-    .filter((s) => s.score >= THRESHOLD)
+    .filter((s) => s.score >= s.bar)
     .sort((a, b) => b.score - a.score);
-  const matched = relevant.slice(0, MAX_HEURISTIC_INJECT).map((s) => s.skill);
+  const matched = relevant.map((s) => s.skill);
   const matchedSet = new Set(matched);
   const rest = catalog.filter((s) => !matchedSet.has(s));
   return { matched, rest };

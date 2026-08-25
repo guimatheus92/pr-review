@@ -178,7 +178,7 @@ test('triage — docs-only PR with no file-scoped pass yields zero passes (revie
   }
 });
 
-test('pass body cap — oversized skill is truncated with a marker', () => {
+test('pass body cap — oversized PACK skill is truncated with a marker', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
     const ctx = prepareSessionContext(
@@ -187,6 +187,20 @@ test('pass body cap — oversized skill is truncated with a marker', () => {
     const file = readFileSync(ctx.skillsFiles['p/huge']!, 'utf8');
     assert.ok(file.includes('[truncated: skill body exceeded 48000 bytes]'));
     assert.ok(file.length < 60_000);
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('pass body cap — a PROJECT skill running as a pass (skill_packs: [] fallback) is never truncated', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const ctx = prepareSessionContext(
+      baseOpts(outDir, ['src/app.ts'], [pass('my-rules', { body: 'r'.repeat(60_000) + 'RULE-END', matchedBy: 'repo', origin: 'repo' })]),
+    );
+    const file = readFileSync(ctx.skillsFiles['my-rules']!, 'utf8');
+    assert.ok(file.includes('RULE-END'), 'body lands whole');
+    assert.ok(!file.includes('[truncated:'), 'no truncation marker for project-origin passes');
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
@@ -377,6 +391,31 @@ test('project rules — skills-project.md injected into every pass line, compani
     } finally {
       rmSync(outDir2, { recursive: true, force: true });
     }
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('project rules — large skill bodies land WHOLE: no byte cap, no truncation markers', () => {
+  // Regression: a 63KB skills-project.md used to deliver 3 of 10 selected skills,
+  // two of them cut at 16KB (live runs BE#616/FE#1067). Business rules never truncate.
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const big = (name: string) => ({
+      name,
+      description: 'big rule',
+      source: `/repo/.agents/skills/${name}/SKILL.md`,
+      body: `${name}-START ` + 'x'.repeat(30_000) + ` ${name}-END`,
+      appliesTo: [],
+    });
+    const projectSkills = [big('rule-a'), big('rule-b'), big('rule-c')]; // ~90KB total, each body > old 16KB cap
+    const ctx = prepareSessionContext({ ...baseOpts(outDir, ['src/app.ts'], [pass('p/one')]), projectSkills });
+    const body = readFileSync(ctx.skillsFiles['project']!, 'utf8');
+    for (const s of projectSkills) {
+      assert.ok(body.includes(`${s.name}-START`) && body.includes(`${s.name}-END`), `${s.name} body is complete`);
+    }
+    assert.ok(!body.includes('[truncated:'), 'no per-skill truncation');
+    assert.ok(!body.includes('[omitted:'), 'no whole-skill omission');
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }

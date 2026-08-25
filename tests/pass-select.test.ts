@@ -208,6 +208,17 @@ test('selectPasses — fallback with no pack passes: project skills become the p
   assert.equal(sel.passes.find((p) => p.name === 'infra-conventions')?.matchedBy, 'repo');
 });
 
+test('selectPasses — fallback overflow beyond MAX_PASSES stays CONTEXT, never the index (no rule lost)', () => {
+  const many = Array.from({ length: 12 }, (_, i) => repoSkill(`rule-${String(i).padStart(2, '0')}`, { appliesTo: ['**/*.go'] }));
+  const sel = base({ skills: many, catalog: [], packSkills: [] });
+  assert.equal(sel.passes.length, 10, 'passes cap at MAX_PASSES');
+  assert.equal(sel.projectSkills.length, 2, 'overflow injects as context into every pass');
+  for (const s of sel.projectSkills) {
+    assert.equal(sel.routes.find((r) => r.name === s.name)?.matchedBy, 'context');
+  }
+  assert.ok(!sel.indexEntries.some((e) => e.name.startsWith('rule-')), 'no project rule demoted to the on-demand index');
+});
+
 test('selectPasses — the skill file’s own .md extension is never identity: a changed README must not tag-match every pack skill', () => {
   // Every pack file ends in .md and Linguist aliases Markdown as 'md' — without
   // stripping the extension, one changed README.md made all 604 awesome-copilot

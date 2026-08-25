@@ -36,6 +36,24 @@ test('selectRelevantSkills — no numeric cap: every relevant skill is injected'
   assert.equal(rest.length, 0, 'nothing relevant left behind in the catalog');
 });
 
+test('selectRelevantSkills — the bar is THRESHOLD distinct hits for richly-described skills', () => {
+  // 6 needles, exactly 2 hit (plan, bill) → below the bar of 3 → catalog.
+  const twoHits = skill('mobile-tokens', 'planos e billing para spacing tipografia mobile');
+  // Same shape with a 3rd hit (créditos) → injected.
+  const threeHits = skill('mobile-rules', 'planos e billing e créditos para tipografia mobile');
+  const { matched, rest } = selectRelevantSkills([twoHits, threeHits], PLANS_PR);
+  assert.deepEqual(matched.map((s) => s.name), ['mobile-rules']);
+  assert.deepEqual(rest.map((s) => s.name), ['mobile-tokens']);
+});
+
+test('selectRelevantSkills — terse metadata adapts the bar: fewer needles than THRESHOLD still match', () => {
+  // Only 2 usable needles (planos, créditos) — both hit, so the skill injects
+  // even though it can never reach THRESHOLD.
+  const terse = skill('pp-planos', 'créditos');
+  const { matched } = selectRelevantSkills([terse], PLANS_PR);
+  assert.deepEqual(matched.map((s) => s.name), ['pp-planos'], 'short metadata is not structurally unmatchable');
+});
+
 test('selectRelevantSkills — empty catalog and no files are safe', () => {
   assert.deepEqual(selectRelevantSkills([], PLANS_PR), { matched: [], rest: [] });
   assert.deepEqual(selectRelevantSkills([skill('x', 'planos')], []), { matched: [], rest: [skill('x', 'planos')] });

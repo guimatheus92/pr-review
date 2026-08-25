@@ -10,14 +10,16 @@ import type { SkillDefinition } from '../types.js';
 const MIN_TOKEN_LEN = 4; // ignore short/noise tokens
 const STEM_PREFIX = 4; // shared-prefix length that counts as a match (plano↔plans, credito↔credits)
 // Distinct needle matches needed to call a skill relevant. Measured on real
-// 55/66-file PRs against a 47-skill corpus: business skills score 4-115, while
-// non-review content (tool-internal docs, loose readmes) scores 0-2 — a bar of
-// 3 cuts exactly that noise while keeping every business skill, and small PRs
-// with narrow diffs still clear it via name+description stems.
+// 55/66-file PRs against a 47-skill corpus: with a bar of 1 every skill matched
+// (47/47 — "relevant" meant nothing on a large diff); at 3, richly-described
+// business skills (scoring 4-115 there) all pass while most low-signal loose
+// files drop. The bar adapts down for terse skills: a skill whose name +
+// description yield fewer needles than THRESHOLD only needs to hit all of
+// them — otherwise short metadata would be structurally unmatchable.
 const THRESHOLD = 3;
 
 // Small pt+en stopword set — words too common to signal a topic. Not exhaustive by
-// design: over-filtering costs recall, and the cap+catalog absorb the noise.
+// design: over-filtering costs recall, and the on-demand catalog absorbs the noise.
 const STOPWORDS = new Set([
   // pt
   'para', 'pela', 'pelo', 'este', 'esta', 'esse', 'essa', 'isso', 'como', 'quando', 'sempre',
@@ -60,11 +62,13 @@ export function selectRelevantSkills(
     );
     let score = 0;
     for (const n of needles) if (haystackPrefixes.has(n.slice(0, STEM_PREFIX))) score++;
-    return { skill, score };
+    // Terse metadata lowers the bar to what the skill can actually score.
+    const bar = Math.max(1, Math.min(THRESHOLD, needles.size));
+    return { skill, score, bar };
   });
 
   const relevant = scored
-    .filter((s) => s.score >= THRESHOLD)
+    .filter((s) => s.score >= s.bar)
     .sort((a, b) => b.score - a.score);
   const matched = relevant.map((s) => s.skill);
   const matchedSet = new Set(matched);

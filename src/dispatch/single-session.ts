@@ -86,8 +86,6 @@ export function isTransientOrchestratorFailure(stdout: string, stderr = ''): boo
 // skills matched), so it gets a larger budget. Truncation always warns.
 export const PASS_BODY_CAP = 48_000;
 export const UNION_FILE_CAP = 96_000;
-// The project-rules file is injected into EVERY pass, so its budget multiplies
-// across the fan-out — same numbers the old per-reviewer injection used.
 /** Hard ceiling on dispatched passes (stack cap + every baseline fits below it). */
 export const MAX_TOTAL_PASSES = 16;
 // skills-index.md is its own on-demand file — never competes with pr-context.
@@ -329,7 +327,10 @@ function companionTaskPrompt(contextPath: string, skillsPath: string | undefined
 
 function renderPassFile(pass: ReviewPass): string {
   let body = pass.body.trim();
-  if (body.length > PASS_BODY_CAP) {
+  // Only third-party PACK bodies cap: a project skill running as a pass (the
+  // skill_packs: [] fallback) carries business rules and must land whole.
+  const isProjectSkill = pass.origin !== undefined && pass.origin !== 'pack';
+  if (!isProjectSkill && body.length > PASS_BODY_CAP) {
     body = body.slice(0, PASS_BODY_CAP) + `\n\n[truncated: skill body exceeded ${PASS_BODY_CAP} bytes]`;
     process.stderr.write(
       `[skills] warning: pass '${pass.name}' body exceeds ${PASS_BODY_CAP} bytes — truncated\n`,
@@ -454,8 +455,13 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
   }
   if (projectSkills.length > 0) {
     const projectPath = resolve(opts.outDir, 'skills-project.md');
-    writeFileSync(projectPath, renderProjectFile(projectSkills), 'utf8');
+    const projectBody = renderProjectFile(projectSkills);
+    writeFileSync(projectPath, projectBody, 'utf8');
     skillsFiles['project'] = projectPath;
+    // The file is deliberately uncapped — surface its size so the cost is visible.
+    process.stderr.write(
+      `[skills] skills-project.md: ${projectSkills.length} project rule(s), ${Math.round(projectBody.length / 1024)} KB — injected whole into every pass\n`,
+    );
   } else if (passes.length > 0) {
     // The union is the authoritative-context FALLBACK (codex/companions/verifier)
     // when no project skills matched — with project rules present, nothing reads

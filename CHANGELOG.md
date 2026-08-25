@@ -10,6 +10,11 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 - **Project rules are never lost to a budget anymore** (observed live on Preco-Pratico Backend#616 / Frontend#1067: a 47-skill repo saturated the injection cap at exactly 10 every run, and the 16KB/64KB delivery caps then cut that to 3–4 skills, two of them mid-body — the summary never said so): the relevance heuristic's `MAX_HEURISTIC_INJECT` cap is gone (EVERY relevant untargeted repo skill injects) and `skills-project.md` inlines every matched skill body WHOLE (`PROJECT_BODY_CAP`/`PROJECT_FILE_CAP` removed, no `[truncated:]`/`[omitted:]` markers possible). The review pays the token cost by design rather than silently dropping a business rule.
 - Relevance heuristic `THRESHOLD` raised 1 → 3 distinct stem hits: measured on real 55/66-file PRs, business skills score 4–115 while non-review content (tool-internal docs, loose readmes) scores 0–2 — threshold 1 marked 47/47 skills relevant on any large diff, making "relevant" meaningless. Small PRs still clear the bar via name+description stems (fixture-backed).
 
+### Fixed (self-review of this release with the tool itself — 45 findings triaged, 4 clusters real)
+- **The no-loss guarantee now holds in the `skill_packs: []` fallback too**: overflow beyond the 10-pass cap injects whole as CONTEXT (never demoted to the on-demand index), and a project skill running as its own pass is exempt from `PASS_BODY_CAP` — only third-party pack bodies still cap at 48KB.
+- **Terse skills are no longer structurally unmatchable**: the relevance bar adapts down to the skill's own needle count (a 2-token name+description that fully matches the diff injects; before, nothing under 3 needles could ever match).
+- The uncapped `skills-project.md` reports its size at write time (`N project rule(s), X KB`) so the deliberate cost stays visible; orphaned comments from the removed caps cleaned up.
+
 ## [0.7.0] — 2026-08-24
 
 ### Fixed (adversarial-review pass over this release, before it shipped)

@@ -382,6 +382,31 @@ test('project rules — skills-project.md injected into every pass line, compani
   }
 });
 
+test('project rules — large skill bodies land WHOLE: no byte cap, no truncation markers', () => {
+  // Regression: a 63KB skills-project.md used to deliver 3 of 10 selected skills,
+  // two of them cut at 16KB (live runs BE#616/FE#1067). Business rules never truncate.
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const big = (name: string) => ({
+      name,
+      description: 'big rule',
+      source: `/repo/.agents/skills/${name}/SKILL.md`,
+      body: `${name}-START ` + 'x'.repeat(30_000) + ` ${name}-END`,
+      appliesTo: [],
+    });
+    const projectSkills = [big('rule-a'), big('rule-b'), big('rule-c')]; // ~90KB total, each body > old 16KB cap
+    const ctx = prepareSessionContext({ ...baseOpts(outDir, ['src/app.ts'], [pass('p/one')]), projectSkills });
+    const body = readFileSync(ctx.skillsFiles['project']!, 'utf8');
+    for (const s of projectSkills) {
+      assert.ok(body.includes(`${s.name}-START`) && body.includes(`${s.name}-END`), `${s.name} body is complete`);
+    }
+    assert.ok(!body.includes('[truncated:'), 'no per-skill truncation');
+    assert.ok(!body.includes('[omitted:'), 'no whole-skill omission');
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
 test('passes.json — persisted at dispatch time, equal to ctx.routing (for --resume)', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {

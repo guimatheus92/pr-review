@@ -22,7 +22,7 @@ Each pass gets a `pass-<name>.md` file in the run dir (`~/.pr-review/runs/<id>/`
 
 ## How passes are selected
 
-Selection separates LENSES from CONTEXT. Your own skills (repo dirs, forced dirs) are CONTEXT: every matched one is injected into EVERY pass as authoritative project rules (`skills-project.md`) - they override generic judgement and never consume pass slots. The PASSES are pack skills: stack hits (glob/tag, capped at `MAX_STACK_PASSES = 6`) plus EVERY baseline pointer (the generic lenses always run on a code PR). With no pack passes at all (`skill_packs: []`), your skills become the passes themselves.
+Selection separates LENSES from CONTEXT. Your own skills (repo dirs, forced dirs) are CONTEXT: every matched one is injected into EVERY pass as authoritative project rules (`skills-project.md`) - they override generic judgement and never consume pass slots. There is no numeric cap on matched project skills and their bodies are inlined whole (no byte truncation) - the review pays the token cost by design rather than silently losing a business rule. The PASSES are pack skills: stack hits (glob/tag, capped at `MAX_STACK_PASSES = 6`) plus EVERY baseline pointer (the generic lenses always run on a code PR). With no pack passes at all (`skill_packs: []`), your skills become the passes themselves.
 
 Pass selection within the packs:
 

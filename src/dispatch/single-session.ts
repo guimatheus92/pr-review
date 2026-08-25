@@ -88,8 +88,6 @@ export const PASS_BODY_CAP = 48_000;
 export const UNION_FILE_CAP = 96_000;
 // The project-rules file is injected into EVERY pass, so its budget multiplies
 // across the fan-out — same numbers the old per-reviewer injection used.
-export const PROJECT_BODY_CAP = 16_000;
-export const PROJECT_FILE_CAP = 64_000;
 /** Hard ceiling on dispatched passes (stack cap + every baseline fits below it). */
 export const MAX_TOTAL_PASSES = 16;
 // skills-index.md is its own on-demand file — never competes with pr-context.
@@ -302,32 +300,20 @@ function passTaskPrompt(contextPath: string, passPath: string, projectPath: stri
   );
 }
 
-/** The user's own rules — same authoritative wording (and caps) the per-reviewer injection used. */
+/**
+ * The user's own rules, inlined WHOLE — no per-skill or per-file byte cap.
+ * Project skills are the business rules of the review; truncating them silently
+ * lost real rules in production (a 63KB file delivered 3 of 10 selected skills,
+ * two of those cut mid-body). Every pass pays the read cost by design.
+ */
 function renderProjectFile(skills: SkillDefinition[]): string {
   const lines: string[] = [
     `# Project-Specific Rules`,
     ``,
     `The following project conventions, business rules, and team standards apply to this review. They are authoritative and OVERRIDE generic judgement.`,
   ];
-  let total = lines.join('\n').length;
   for (const s of skills) {
-    let body = s.body.trim();
-    if (body.length > PROJECT_BODY_CAP) {
-      body = body.slice(0, PROJECT_BODY_CAP) + `\n\n[truncated: skill body exceeded ${PROJECT_BODY_CAP} bytes]`;
-      process.stderr.write(
-        `[skills] warning: project skill '${s.name}' body exceeds ${PROJECT_BODY_CAP} bytes — truncated in reviewer context\n`,
-      );
-    }
-    const section = ['', `## ${s.name}`, s.description ? `_${s.description}_` : '', '', body].join('\n');
-    if (total + section.length > PROJECT_FILE_CAP) {
-      process.stderr.write(
-        `[skills] warning: skills-project.md exceeds ${PROJECT_FILE_CAP} bytes — skill '${s.name}' and later skills omitted\n`,
-      );
-      lines.push('', `[omitted: remaining skills exceeded the ${PROJECT_FILE_CAP}-byte context budget]`);
-      break;
-    }
-    lines.push(section);
-    total += section.length;
+    lines.push('', `## ${s.name}`, s.description ? `_${s.description}_` : '', '', s.body.trim());
   }
   return lines.join('\n');
 }

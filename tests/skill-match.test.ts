@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { selectRelevantSkills, MAX_HEURISTIC_INJECT } from '../src/dispatch/skill-match.js';
+import { selectRelevantSkills } from '../src/dispatch/skill-match.js';
 import type { SkillDefinition } from '../src/types.js';
 
 function skill(name: string, description: string): SkillDefinition {
@@ -28,12 +28,12 @@ test('selectRelevantSkills — a skill with no topical overlap is not injected',
   assert.equal(rest.length, 1);
 });
 
-test('selectRelevantSkills — caps injected count; overflow falls back to catalog', () => {
-  // 15 skills that all match "plans"; only MAX get injected, the rest stay catalog.
+test('selectRelevantSkills — no numeric cap: every relevant skill is injected', () => {
+  // 15 skills that all match "plans"; ALL inject — project rules are never dropped for budget.
   const catalog = Array.from({ length: 15 }, (_, i) => skill(`plan-rule-${i}`, 'planos e créditos e billing e cadastro'));
   const { matched, rest } = selectRelevantSkills(catalog, PLANS_PR);
-  assert.equal(matched.length, MAX_HEURISTIC_INJECT, 'injected count is capped');
-  assert.equal(rest.length, 15 - MAX_HEURISTIC_INJECT, 'overflow stays available on-demand');
+  assert.equal(matched.length, 15, 'every relevant skill injected');
+  assert.equal(rest.length, 0, 'nothing relevant left behind in the catalog');
 });
 
 test('selectRelevantSkills — empty catalog and no files are safe', () => {

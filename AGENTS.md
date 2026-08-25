@@ -78,6 +78,7 @@ Tests use `node:test` + `node:assert`. Run with `npm run test`. Tests are in `te
 - **Run in the background / check a run:** `pr-review review <url> --detach` returns a run-id immediately; `pr-review status <run-id>` shows the live progress feed, or the summary once done. This is how the slash command avoids the host's ~10-min Bash timeout.
 - **Check the environment:** `pr-review doctor` — runtimes on PATH, resolved runtime/model, codex + companions, provider auth, skill packs (git on PATH, per-pack state/freshness, Linguist cache), config sources.
 - **Cut a release:** `node scripts/release.mjs <patch|minor|major|x.y.z>` — bumps every manifest, verifies no stale version string, rolls CHANGELOG, rebuilds, commits and tags (push left to you).
+- **Before opening a PR: review the diff, don't just validate it.** Build/tests/smokes prove the change works; only a review of the diff catches a doc that promises more than the code delivers, a constant deleted out from under its comment, or a behavior validated on one corpus and shipped product-wide. Dogfood it: push the branch, open the PR, run `pr-review review <pr-url> --dry-run` against it, and triage before asking for human review (PR #16 and #17 both shipped real defects that only this step caught). When any guarantee wording changes (docs/CHANGELOG), grep every mode the code path has — a guarantee is universal unless the doc scopes it.
 
 ## Maintaining review quality
 

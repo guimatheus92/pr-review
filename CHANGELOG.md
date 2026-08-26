@@ -19,7 +19,7 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 - Linguist aliases no longer become independent stack technologies. Exact filenames override ambiguous extensions, and manifest evidence resolves shared extensions (for example `.cs` to C# rather than Smalltalk when a C# project owns the change).
 
 ### Fixed
-- Legacy Azure DevOps remotes such as `https://microsoft.visualstudio.com/DefaultCollection/RDV/_git/rdinfra` now match canonical `dev.azure.com` PR identity, so local manifests and project rules are not discarded.
+- Legacy Azure DevOps remotes such as `https://contoso.visualstudio.com/DefaultCollection/Platform/_git/infra-core` now match canonical `dev.azure.com` PR identity, so local manifests and project rules are not discarded.
 - Checkout identity includes the ADO project and recognizes encoded HTTPS paths plus `ssh.dev.azure.com:v3/<org>/<project>/<repo>` remotes, preventing same-name repositories in another project from supplying manifests or rules.
 - Deep monorepo projects contribute their owning manifests without a full recursive scan: changed manifests and manifests beside/above changed files are read in addition to the shallow root scan. A deeply nested MSTest project now dispatches `csharp-mstest` instead of unrelated C# product guides.
 - Companion reporting now separates every installed plugin from recognized companion plugins, planned dispatches (six toolkit agents plus one `code-review` command), and completed output rows. Each run persists `companions.json`; missing companions are recorded as degraded coverage in the summary, while detection failures remain unknown rather than being mislabeled as not installed.

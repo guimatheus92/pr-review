@@ -20,7 +20,11 @@ To gate a pipeline on serious findings, add `--fail-on <severity>` (`critical`\|
 pr-review review "$PR_URL" --fail-on high
 ```
 
-The step fails (exit 1) when any CRITICAL or HIGH finding survives dedupe. Treat exit 2 as an infrastructure failure, not a review verdict — it also covers "nothing to review with" (no skills matched the PR and no baseline is configured; run `pr-review packs suggest` or check `skill_packs`).
+The step fails (exit 1) when any CRITICAL or HIGH finding survives dedupe.
+
+**Always configure `--fail-on` when the exit code gates a merge.** Without it, exit 0 means the pipeline completed — findings may still have been retained and posted, and the CLI says how many. Only `--fail-on` turns a finding into a non-zero status.
+
+Treat exit 2 as an infrastructure failure, not a review verdict. It covers a pipeline failure (no parseable findings; "nothing to review with" — no skills matched the PR and no baseline is configured, so run `pr-review packs suggest` or check `skill_packs`) **and** an operational failure of an otherwise parseable review: a failed review prerequisite, a planned pass or companion that delivered no output or two, or a post that failed or could not be verified. The summary's Degraded block names which one, and `error.txt` in the run dir carries the detail.
 
 ## GitHub Actions (official path)
 

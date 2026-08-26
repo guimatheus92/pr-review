@@ -125,7 +125,7 @@ test('selectPasses — dependency evidence promotes MSTest and rejects unrelated
     skills: [],
     catalog: [],
     packSkills,
-    inScopeFiles: [{ path: 'src/IntegrationTests/RegionalApiCatalogTests.cs' }, { path: 'src/IntegrationTests/Interop.csproj' }],
+    inScopeFiles: [{ path: 'src/IntegrationTests/CatalogApiTests.cs' }, { path: 'src/IntegrationTests/Contracts.csproj' }],
     stackTags: ['c#', 'csharp', 'dotnet', 'nuget', 'xml', 'mstest.testframework', 'mstest'],
     stackEvidence: {
       languages: ['c#', 'xml'],
@@ -531,9 +531,9 @@ test('selectPasses — generic and partial plugin topic overlap cannot activate 
 test('selectPasses — exact repository identity can activate a specialized installed review skill', () => {
   const specialized: SkillDefinition = {
     name: 'domain-tools/review-pr',
-    description: 'Review rdinfra changes with domain architecture and orchestration knowledge.',
+    description: 'Review infra-core changes with domain architecture and orchestration knowledge.',
     source: '/plugins/domain-tools/review-pr/SKILL.md',
-    body: 'Use the rdinfra knowledge graph to validate the PR blast radius.',
+    body: 'Use the infra-core knowledge graph to validate the PR blast radius.',
     appliesTo: [],
     origin: 'plugin',
     plugin: 'domain-tools',
@@ -542,16 +542,16 @@ test('selectPasses — exact repository identity can activate a specialized inst
   const operational: SkillDefinition = {
     ...specialized,
     name: 'domain-tools/build-artifacts',
-    description: 'Build and validate deployment artifacts for rdinfra.',
+    description: 'Build and validate deployment artifacts for infra-core.',
     source: '/plugins/domain-tools/build-artifacts/SKILL.md',
   };
   const selection = selectPasses({
     skills: [], catalog: [], packSkills: [], installedPluginSkills: [operational, specialized],
-    inScopeFiles: [{ path: 'src/RDBroker/Controllers/PartnerController.cs' }],
+    inScopeFiles: [{ path: 'src/Contoso.Api/Controllers/CatalogController.cs' }],
     stackTags: ['c#'],
     stackEvidence: { languages: ['c#'], ecosystems: ['dotnet'], dependencies: [], dependencyTokens: [] },
     baseline: [],
-    reviewContext: { repoName: 'rdinfra', title: 'Update regional partner API' },
+    reviewContext: { repoName: 'infra-core', title: 'Update the catalog API' },
   });
   assert.equal(selection.passes[0]?.name, 'domain-tools/review-pr');
   assert.equal(selection.passes[0]?.matchedBy, 'plugin');

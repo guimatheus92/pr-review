@@ -140,16 +140,16 @@ test('findManifests + readDependencyTags — walks 2 levels, skips node_modules 
 test('readDependencyTags — changed files contribute their deep owning manifest', () => {
   const cwd = mkdtempSync(join(tmpdir(), 'pr-review-man-'));
   try {
-    const projectDir = join(cwd, 'src', 'IntegrationTests', 'test', 'InteropTests');
+    const projectDir = join(cwd, 'src', 'IntegrationTests', 'test', 'ContractTests');
     mkdirSync(projectDir, { recursive: true });
-    const project = join(projectDir, 'InteropTests.csproj');
+    const project = join(projectDir, 'ContractTests.csproj');
     writeFileSync(
       project,
       '<Project><ItemGroup><PackageReference Include="MSTest.TestFramework" Version="3" /><PackageReference Include="MSTest.TestAdapter" Version="3" /></ItemGroup></Project>',
     );
     const changed = [
-      'src/IntegrationTests/test/InteropTests/RegionalApiCatalogTests.cs',
-      'src/IntegrationTests/test/InteropTests/InteropTests.csproj',
+      'src/IntegrationTests/test/ContractTests/CatalogApiTests.cs',
+      'src/IntegrationTests/test/ContractTests/ContractTests.csproj',
       '../outside/Unrelated.csproj',
     ];
 

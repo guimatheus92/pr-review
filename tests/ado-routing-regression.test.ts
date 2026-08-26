@@ -34,32 +34,32 @@ function packSkill(name: string, appliesTo: string[] = [], source = `/pack/${nam
   };
 }
 
-test('rdinfra regression — legacy visualstudio.com origin matches the canonical PR identity', () => {
+test('ado routing regression — legacy visualstudio.com origin matches the canonical PR identity', () => {
   assert.equal(
     cwdMatchesPr(
-      'https://microsoft.visualstudio.com/DefaultCollection/RDV/_git/rdinfra',
-      'microsoft',
-      'rdinfra',
-      'RDV',
+      'https://contoso.visualstudio.com/DefaultCollection/Platform/_git/infra-core',
+      'contoso',
+      'infra-core',
+      'Platform',
     ),
     true,
   );
 });
 
-test('rdinfra regression — a changed file contributes its deeply nested MSTest project', () => {
-  const cwd = mkdtempSync(join(tmpdir(), 'pr-review-rdinfra-regression-'));
+test('ado routing regression — a changed file contributes its deeply nested MSTest project', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'pr-review-ado-routing-regression-'));
   try {
-    const projectDir = join(cwd, 'src', 'IntegrationTests', 'test', 'InteropTests');
+    const projectDir = join(cwd, 'src', 'IntegrationTests', 'test', 'ContractTests');
     mkdirSync(projectDir, { recursive: true });
     writeFileSync(
-      join(projectDir, 'InteropTests.csproj'),
+      join(projectDir, 'ContractTests.csproj'),
       '<Project><ItemGroup><PackageReference Include="MSTest.TestFramework" Version="4" /><PackageReference Include="MSTest.TestAdapter" Version="4" /></ItemGroup></Project>',
     );
-    const stack = detectStack([{ path: 'src/IntegrationTests/test/InteropTests/ApiContractTests.cs' }], {
+    const stack = detectStack([{ path: 'src/IntegrationTests/test/ContractTests/ApiContractTests.cs' }], {
       linguist: LINGUIST,
       cwd,
-      pr: { owner: 'microsoft', repo: 'rdinfra', project: 'RDV' },
-      gitRemote: () => 'https://dev.azure.com/microsoft/RDV/_git/rdinfra',
+      pr: { owner: 'contoso', repo: 'infra-core', project: 'Platform' },
+      gitRemote: () => 'https://dev.azure.com/contoso/Platform/_git/infra-core',
       gitToplevel: () => cwd,
     });
     assert.deepEqual(stack.dependencies, ['mstest.testadapter', 'mstest.testframework']);
@@ -69,7 +69,7 @@ test('rdinfra regression — a changed file contributes its deeply nested MSTest
   }
 });
 
-test('rdinfra regression — MSTest outranks unrelated C# products', () => {
+test('ado routing regression — MSTest outranks unrelated C# products', () => {
   const packSkills = [
     packSkill('github-copilot-sdk-c#', ['**/*.cs', '**/*.csproj']),
     packSkill('azure-durable-functions-csharp', ['**/*.cs', '**/*.csproj']),
@@ -83,7 +83,7 @@ test('rdinfra regression — MSTest outranks unrelated C# products', () => {
     skills: [],
     catalog: [],
     packSkills,
-    inScopeFiles: [{ path: 'src/IntegrationTests/ApiContractTests.cs' }, { path: 'src/IntegrationTests/Interop.csproj' }],
+    inScopeFiles: [{ path: 'src/IntegrationTests/ApiContractTests.cs' }, { path: 'src/IntegrationTests/Contracts.csproj' }],
     stackTags: ['c#', 'csharp', 'dotnet', 'nuget', 'xml', 'mstest', 'mstest.testframework'],
     stackEvidence: {
       languages: ['c#', 'xml'],

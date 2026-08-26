@@ -258,7 +258,7 @@ test('finalizeReview — existing-comment refresh uses the hydrated gather PR pr
     const gather = gatherFixture();
     gather.pr = {
       provider: 'azuredevops', url: 'https://dev.azure.com/org/_git/r/pullrequest/1',
-      owner: 'org', organization: 'org', project: 'RDV', repo: 'r', number: 1,
+      owner: 'org', organization: 'org', project: 'Platform', repo: 'r', number: 1,
     };
     let refreshedProject: string | undefined;
     const provider: PrProvider = {
@@ -282,7 +282,7 @@ test('finalizeReview — existing-comment refresh uses the hydrated gather PR pr
       dedupeMode: 'strict', publish: false, dryRun: true, refreshExisting: true,
       findingsUnavailable: false, overallStart: Date.now(), provider,
     });
-    assert.equal(refreshedProject, 'RDV');
+    assert.equal(refreshedProject, 'Platform');
     assert.equal(result.exitCode, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });

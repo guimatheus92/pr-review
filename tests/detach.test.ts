@@ -79,7 +79,7 @@ test('detachReview — an unparsable PR URL throws in the foreground, before aut
   // fail the ADO parse — the detection-accepted-then-parse-rejected shape of
   // the field incident. Before the fail-fast reorder this minted an adhoc run
   // dir and died inside the detached child (status exit 22).
-  const url = 'https://microsoft.visualstudio.com/a/b/c/_git/r/pullrequest/1';
+  const url = 'https://contoso.visualstudio.com/a/b/c/_git/r/pullrequest/1';
   assert.throws(
     () =>
       detachReview(url, ['review', url, '--detach'], fakeSpawn, () => {

@@ -3,10 +3,10 @@ diff --git a/src/Api/WorkspaceController.cs b/src/Api/WorkspaceController.cs
 +++ b/src/Api/WorkspaceController.cs
 @@ -8,7 +8,7 @@ public sealed class WorkspaceController
  {
--    [PartnerApiAuthorization(Policy = "Partner.Read", AuthenticationSchemes = "Service,OnBehalfOf")]
+-    [ServiceApiAuthorization(Policy = "Catalog.Read", AuthenticationSchemes = "Service,OnBehalfOf")]
 -    [RouteFilter("workspaceResourceId")]
 -    public void Get(Guid workspaceResourceId)
-+    [PartnerApiAuthorization(Policy = "Partner.Write", AuthenticationSchemes = "Service")]
++    [ServiceApiAuthorization(Policy = "Catalog.Write", AuthenticationSchemes = "Service")]
 +    [RouteFilter("workspaceId")]
 +    public void Get(Guid workspaceId)
 	 {
@@ -51,7 +51,7 @@ new file mode 100644
 +        var action = typeof(WorkspaceController).GetMethod(nameof(WorkspaceController.Get));
 +        Assert.IsNotNull(action);
 +
-+        var authorization = action.GetCustomAttribute<PartnerApiAuthorizationAttribute>();
++        var authorization = action.GetCustomAttribute<ServiceApiAuthorizationAttribute>();
 +        Assert.IsNotNull(authorization);
 +
 +        var routeFilter = action.GetCustomAttribute<RouteFilterAttribute>();

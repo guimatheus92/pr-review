@@ -10,7 +10,7 @@ import { samePrIdentity } from '../src/commands/review.js';
 // The URL from the field report that motivated this file: detection accepted
 // it, parse rejected it, and the error only surfaced inside the detached child.
 const LEGACY_ADO_URL =
-  'https://microsoft.visualstudio.com/DefaultCollection/RDV/_git/rdinfra/pullrequest/16459916';
+  'https://contoso.visualstudio.com/DefaultCollection/Platform/_git/infra-core/pullrequest/1234567';
 
 // Always pass hosts explicitly so tests never read the user's real config.
 const NO_HOSTS = {};
@@ -98,8 +98,8 @@ test('AzureDevOpsProvider.parseUrl — every accepted shape', () => {
     {
       // The exact URL from the field report.
       url: LEGACY_ADO_URL,
-      organization: 'microsoft', project: 'RDV', repo: 'rdinfra', number: 16459916,
-      baseUrl: 'https://microsoft.visualstudio.com',
+      organization: 'contoso', project: 'Platform', repo: 'infra-core', number: 1234567,
+      baseUrl: 'https://contoso.visualstudio.com',
     },
     {
       url: 'https://org.visualstudio.com/Proj/_git/repo/pullrequest/3',
@@ -165,7 +165,7 @@ test('parseUrl — malformed percent-escapes never throw; the raw segment is kep
 test('orgUrlFor / apiBaseFor — refs without baseUrl re-derive from ref.url, cloud as last resort', () => {
   const legacy = new AzureDevOpsProvider().parseUrl(LEGACY_ADO_URL)!;
   delete legacy.baseUrl;
-  assert.equal(orgUrlFor(legacy), 'https://microsoft.visualstudio.com');
+  assert.equal(orgUrlFor(legacy), 'https://contoso.visualstudio.com');
   const onprem = new AzureDevOpsProvider().parseUrl('https://tfs.corp.com/tfs/DC/Proj/_git/repo/pullrequest/1')!;
   delete onprem.baseUrl;
   assert.equal(orgUrlFor(onprem), 'https://tfs.corp.com/tfs/DC');
@@ -184,22 +184,22 @@ test('orgUrlFor / apiBaseFor — refs without baseUrl re-derive from ref.url, cl
 });
 
 test('hydrateAdoProject — project-omitted refs retain the authoritative API project', () => {
-  const ref = new AzureDevOpsProvider().parseUrl('https://dev.azure.com/microsoft/_git/rdinfra/pullrequest/1')!;
+  const ref = new AzureDevOpsProvider().parseUrl('https://dev.azure.com/contoso/_git/infra-core/pullrequest/1')!;
   assert.equal(ref.project, undefined);
-  hydrateAdoProject(ref, { name: 'RDV', id: 'ignored-id' });
-  assert.equal(ref.project, 'RDV');
+  hydrateAdoProject(ref, { name: 'Platform', id: 'ignored-id' });
+  assert.equal(ref.project, 'Platform');
   hydrateAdoProject(ref, { name: 'Other' });
-  assert.equal(ref.project, 'RDV', 'an explicit/resolved project is never overwritten');
+  assert.equal(ref.project, 'Platform', 'an explicit/resolved project is never overwritten');
 });
 
 test('AzureDevOpsProvider — every public PR operation hydrates a project-omitted ref before project-scoped calls', async () => {
   const provider = new AzureDevOpsProvider();
-  const ref = provider.parseUrl('https://dev.azure.com/microsoft/_git/rdinfra/pullrequest/9')!;
+  const ref = provider.parseUrl('https://dev.azure.com/contoso/_git/infra-core/pullrequest/9')!;
   const projects: Array<string | undefined> = [];
   let prFetches = 0;
   const pr = {
     pullRequestId: 9,
-    repository: { id: 'repo-id', project: { name: 'RDV' } },
+    repository: { id: 'repo-id', project: { name: 'Platform' } },
     lastMergeSourceCommit: { commitId: 'head' },
     lastMergeTargetCommit: { commitId: 'base' },
   };
@@ -238,15 +238,15 @@ test('AzureDevOpsProvider — every public PR operation hydrates a project-omitt
     severity: 'LOW', title: 't', body: 'b', file: 'src/a.cs', line: 1,
   });
 
-  assert.equal(ref.project, 'RDV');
+  assert.equal(ref.project, 'Platform');
   assert.equal(prFetches, 1, 'the hydrated cache alias prevents a second PR fetch');
-  assert.deepEqual(projects, [undefined, 'RDV', 'RDV', 'RDV', 'RDV']);
+  assert.deepEqual(projects, [undefined, 'Platform', 'Platform', 'Platform', 'Platform']);
 });
 
 test('resolvePr — the field-report URL resolves end to end', () => {
   const { provider, ref } = resolvePr(LEGACY_ADO_URL, NO_HOSTS);
   assert.equal(provider.name, 'azuredevops');
-  assert.equal(ref.number, 16459916);
+  assert.equal(ref.number, 1234567);
 });
 
 test('resolvePr — a malformed visualstudio.com URL suggests the canonical dev.azure.com form', () => {

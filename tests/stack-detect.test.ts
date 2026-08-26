@@ -21,8 +21,8 @@ test('cwdMatchesPr — GitHub/GitLab/ADO origin shapes, case-insensitive, .git o
   assert.ok(cwdMatchesPr('ssh://git@ssh.dev.azure.com/v3/org/proj/repo', 'org', 'repo', 'proj'));
   assert.ok(cwdMatchesPr('https://dev.azure.com/org/My%20Project/_git/repo', 'org', 'repo', 'My Project'));
   assert.ok(!cwdMatchesPr('https://dev.azure.com/org/other/_git/repo', 'org', 'repo', 'proj'));
-  assert.ok(cwdMatchesPr('https://microsoft.visualstudio.com/DefaultCollection/RDV/_git/rdinfra', 'microsoft', 'rdinfra', 'RDV'));
-  assert.ok(!cwdMatchesPr('https://microsoft.visualstudio.com/DefaultCollection/OtherProject/_git/rdinfra', 'microsoft', 'rdinfra', 'RDV'));
+  assert.ok(cwdMatchesPr('https://contoso.visualstudio.com/DefaultCollection/Platform/_git/infra-core', 'contoso', 'infra-core', 'Platform'));
+  assert.ok(!cwdMatchesPr('https://contoso.visualstudio.com/DefaultCollection/OtherProject/_git/infra-core', 'contoso', 'infra-core', 'Platform'));
   assert.ok(cwdMatchesPr('https://gitlab.com/group/sub/repo.git', 'group/sub', 'repo'));
   assert.ok(!cwdMatchesPr('https://github.com/owner/other-repo.git', 'owner', 'repo'));
   assert.ok(!cwdMatchesPr('https://github.com/someone-else/repo.git', 'owner', 'repo'));

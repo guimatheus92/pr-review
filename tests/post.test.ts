@@ -154,7 +154,7 @@ test('runPost — posting and reconciliation use the hydrated gather PR project'
   const gather = gatherFixture();
   gather.pr = {
     provider: 'azuredevops', url: 'https://dev.azure.com/org/_git/r/pullrequest/1',
-    owner: 'org', organization: 'org', project: 'RDV', repo: 'r', number: 1,
+    owner: 'org', organization: 'org', project: 'Platform', repo: 'r', number: 1,
   };
   const seen: string[] = [];
   const provider: PrProvider = {
@@ -181,7 +181,7 @@ test('runPost — posting and reconciliation use the hydrated gather PR project'
   const result = await runPost({
     prUrl: gather.pr.url, outputs: wrap([finding('src/a.ts', 11)]), publish: true, gather, provider,
   });
-  assert.deepEqual(seen, ['post:RDV', 'read:RDV']);
+  assert.deepEqual(seen, ['post:Platform', 'read:Platform']);
   assert.equal(result.posted, 1);
   assert.equal(result.verified, true);
   assert.equal(result.errors.length, 0);

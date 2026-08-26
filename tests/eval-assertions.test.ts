@@ -97,7 +97,7 @@ test('csharp contract eval pair — defective oracle drifts with production whil
   assert.doesNotMatch(defectiveTest, /authorization\.Policy/);
   assert.doesNotMatch(defectiveTest, /authorization\.AuthenticationSchemes/);
   assert.doesNotMatch(defectiveTest, /Assert\.AreEqual\("workspaceResourceId", routeFilter\.ArgumentName\)/);
-  assert.match(safeTest, /Assert\.AreEqual\("Partner\.Read", authorization\.Policy\)/);
+  assert.match(safeTest, /Assert\.AreEqual\("Catalog\.Read", authorization\.Policy\)/);
   assert.match(safeTest, /Assert\.AreEqual\("Service,OnBehalfOf", authorization\.AuthenticationSchemes\)/);
   assert.match(safeTest, /Assert\.AreEqual\("workspaceResourceId", routeFilter\.ArgumentName\)/);
 

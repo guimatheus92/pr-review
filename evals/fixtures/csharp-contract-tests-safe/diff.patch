@@ -37,9 +37,9 @@ new file mode 100644
 +        var action = typeof(WorkspaceController).GetMethod(nameof(WorkspaceController.Get));
 +        Assert.IsNotNull(action);
 +
-+        var authorization = action.GetCustomAttribute<PartnerApiAuthorizationAttribute>();
++        var authorization = action.GetCustomAttribute<ServiceApiAuthorizationAttribute>();
 +        Assert.IsNotNull(authorization);
-+        Assert.AreEqual("Partner.Read", authorization.Policy);
++        Assert.AreEqual("Catalog.Read", authorization.Policy);
 +        Assert.AreEqual("Service,OnBehalfOf", authorization.AuthenticationSchemes);
 +
 +        var routeFilter = action.GetCustomAttribute<RouteFilterAttribute>();

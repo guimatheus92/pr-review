@@ -59,6 +59,39 @@ test('partitionTrustedProjectSkills — a repo rule resolving outside the checko
   }
 });
 
+test('partitionTrustedProjectSkills — a SKILL.md is untrusted when the PR changed a file beside it', () => {
+  // Live regression (Preco-Pratico/PrecoPratico-Docs#269): the PR changed
+  // `.claude/skills/backend-guide/create-database.md` and left SKILL.md alone.
+  // Only SKILL.md loads as a skill, but every pass is handed a `Source:` line
+  // saying relative references resolve from its directory — so the branch-authored
+  // sibling was reachable review input while the rule still injected as authoritative.
+  const cwd = mkdtempSync(join(tmpdir(), 'pr-review-trust-dir-'));
+  try {
+    const guide = join(cwd, '.claude', 'skills', 'backend-guide');
+    const untouched = join(cwd, '.claude', 'skills', 'frontend-guide');
+    mkdirSync(guide, { recursive: true });
+    mkdirSync(untouched, { recursive: true });
+    mkdirSync(join(cwd, '.claude', 'rules'), { recursive: true });
+    const owning = skill('backend-guide', join(guide, 'SKILL.md'));
+    const sibling = skill('frontend-guide', join(untouched, 'SKILL.md'));
+    // A flat rule shares its directory with unrelated rules — the file stays the unit.
+    const flatChanged = skill('flat-changed', join(cwd, '.claude', 'rules', 'flat-changed.md'));
+    const flatUntouched = skill('flat-untouched', join(cwd, '.claude', 'rules', 'flat-untouched.md'));
+    for (const entry of [owning, sibling, flatChanged, flatUntouched]) writeFileSync(entry.source, entry.body);
+    writeFileSync(join(guide, 'create-database.md'), 'branch-authored reference');
+
+    const result = partitionTrustedProjectSkills(
+      [owning, sibling, flatChanged, flatUntouched],
+      cwd,
+      ['.claude/skills/backend-guide/create-database.md', '.claude/rules/flat-changed.md'],
+    );
+    assert.deepEqual(result.skipped.map((entry) => entry.name), ['backend-guide', 'flat-changed']);
+    assert.deepEqual(result.trusted.map((entry) => entry.name), ['frontend-guide', 'flat-untouched']);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test('skillsAllowedForCheckout — unrelated checkouts admit only explicit force overrides', () => {
   const skills = [
     skill('repo', 'repo.md', 'repo'),

@@ -9,6 +9,20 @@ function normalizedRelative(root: string, path: string): string | null {
   return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 
+/**
+ * A `SKILL.md` owns its directory: every pass is handed a `Source:` line and told
+ * that relative `references/` links resolve from there, so the skill's sibling
+ * files are reachable review input even though only `SKILL.md` loads as a skill.
+ * Trusting the skill because `SKILL.md` itself is unchanged would let a PR ship
+ * branch-authored instructions beside it. Flat `<dir>/<name>.md` rules share a
+ * directory with unrelated rules, so for those the file stays the unit.
+ */
+function skillDirPrefix(normalized: string | null): string | null {
+  if (normalized === null || !/(^|\/)skill\.md$/.test(normalized)) return null;
+  const slash = normalized.lastIndexOf('/');
+  return slash < 0 ? null : normalized.slice(0, slash + 1);
+}
+
 /** Repo rules changed by the PR are untrusted input and cannot instruct that PR's review. */
 export function partitionTrustedProjectSkills(
   skills: SkillDefinition[],
@@ -44,8 +58,14 @@ export function partitionTrustedProjectSkills(
     const changedSource =
       (lexicalSource !== null && changed.has(lexicalSource)) ||
       (realSource !== null && changed.has(realSource));
+    const dirPrefixes = [skillDirPrefix(lexicalSource), skillDirPrefix(realSource)].filter(
+      (prefix): prefix is string => prefix !== null,
+    );
+    const changedBeside =
+      dirPrefixes.length > 0 &&
+      [...changed].some((path) => dirPrefixes.some((prefix) => path.startsWith(prefix)));
     const linkedOutsideRepo = lexicalSource !== null && realSource === null;
-    if (changedSource || linkedOutsideRepo) skipped.push(skill);
+    if (changedSource || changedBeside || linkedOutsideRepo) skipped.push(skill);
     else trusted.push(skill);
   }
   return { trusted, skipped };

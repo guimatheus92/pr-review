@@ -70,7 +70,7 @@ Builds a gather JSON from `evals/fixtures/<case>/diff.patch`, runs `dist/cli.cjs
 | `distinct_findings` | `must_find` regexes must be satisfied by *different* findings, so one generic finding cannot pass two expectations |
 | `must_dispatch` / `must_not_dispatch` | pass routing actually selected (or refused) these skills |
 | `stack.include` / `stack.exclude` | detected language/ecosystem tags |
-| `dependencies.include` | dependency names parsed from the fixture's manifests |
+| `dependencies.include` / `dependencies.exclude` | dependency names parsed from the fixture's manifests |
 
 Fixtures come in causal pairs: `<case>` is the defective diff and `<case>-safe` is the corrected control carrying the same regexes under `must_not_find`. A positive-only fixture would still pass if the diff were so broken that anything got flagged; the pair is what proves the finding tracks the defect. Synthetic fixtures also disable URL-based companions. Requires `npm run build` + `pr-review packs sync` first.
 

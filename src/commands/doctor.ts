@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { binaryOnPath, normalizeModel, resolveRuntime, type Runtime } from '../dispatch/runtime.js';
 import { detectCodex } from '../dispatch/codex.js';
-import { detectCompanions, KNOWN_COMPANIONS } from '../plugins/companions.js';
+import { companionDispatchCount, detectCompanions, KNOWN_COMPANIONS } from '../plugins/companions.js';
 import { loadConfig } from '../config.js';
 
 function ok(label: string, detail = ''): void {
@@ -47,9 +47,16 @@ export async function runDoctor(): Promise<number> {
   );
   if (runtime) {
     const companions = await detectCompanions('copilot', runtime);
-    for (const c of KNOWN_COMPANIONS) {
-      const installed = companions.installed.includes(c.id);
-      (installed ? ok : bad)(`companion ${c.id}`, installed ? '' : c.installSlash);
+    if (companions.detectionError) {
+      bad('companion detection', companions.detectionError);
+    } else {
+      for (const c of KNOWN_COMPANIONS) {
+        const installed = companions.installed.includes(c.id);
+        (installed ? ok : bad)(
+          `companion ${c.id}`,
+          installed ? `${companionDispatchCount([c.id])} dispatch(es)` : c.installSlash,
+        );
+      }
     }
   }
 

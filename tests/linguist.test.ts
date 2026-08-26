@@ -18,6 +18,10 @@ HCL:
   type: programming
   aliases: [csharp, cake]
   extensions: ['.cs', '.cs.pp', '.csx']
+Smalltalk:
+  type: programming
+  aliases: [squeak]
+  extensions: ['.cs']
 TypeScript:
   type: programming
   aliases: [ts]
@@ -31,20 +35,39 @@ Dockerfile:
   aliases: [Containerfile]
   extensions: ['.dockerfile']
   filenames: [Dockerfile, Containerfile]
+XML:
+  aliases: [rss, xsd, wsdl]
+  extensions: ['.csproj']
+JSON:
+  extensions: ['.json']
+  filenames: [package.json]
+OpenAPI Specification v3:
+  aliases: [oasv3-json]
+  extensions: ['.json']
+Markdown:
+  aliases: [md]
+  extensions: ['.md']
+GCC Machine Description:
+  extensions: ['.md']
 ${Array.from({ length: 120 }, (_, i) => `Synth${i}:\n  extensions: ['.synth${i}']`).join('\n')}
 `;
 
-test('parseLinguist + languageTags — extensions, filenames, aliases, dotted suffixes, unions', () => {
+test('parseLinguist + languageTags — canonical names, ambiguity resolution, dotted suffixes, unions', () => {
   const idx = parseLinguist(FIXTURE);
-  assert.deepEqual(languageTags(idx, 'infra/main.tf').sort(), ['hashicorp configuration language', 'hcl', 'opentofu', 'terraform']);
-  assert.deepEqual(languageTags(idx, 'src/Api/UserController.cs').sort(), ['c#', 'cake', 'csharp']);
+  assert.deepEqual(languageTags(idx, 'infra/main.tf'), ['hcl']);
+  assert.deepEqual(languageTags(idx, 'src/Api/UserController.cs').sort(), ['c#', 'smalltalk']);
+  assert.deepEqual(languageTags(idx, 'src/Api/UserController.cs', ['csharp']), ['c#']);
   // dotted suffix: a.cs.pp hits '.cs.pp' (and '.pp' would too if defined)
-  assert.ok(languageTags(idx, 'gen/a.cs.pp').includes('csharp'));
-  // .tsx is claimed by TypeScript AND TSX — union, no first-wins
+  assert.ok(languageTags(idx, 'gen/a.cs.pp').includes('c#'));
+  // The extension itself is canonical evidence when a claimant is named for it.
   const tsx = languageTags(idx, 'web/App.tsx');
-  assert.ok(tsx.includes('typescript') && tsx.includes('tsx'));
+  assert.deepEqual(tsx, ['tsx']);
   // extension-less well-known filename
-  assert.deepEqual(languageTags(idx, 'deploy/Dockerfile').sort(), ['containerfile', 'dockerfile']);
+  assert.deepEqual(languageTags(idx, 'deploy/Dockerfile'), ['dockerfile']);
+  assert.deepEqual(languageTags(idx, 'src/App.csproj'), ['xml'], 'aliases are lookup metadata, not stack identities');
+  assert.deepEqual(languageTags(idx, 'package.json'), ['json'], 'exact filenames override ambiguous extensions');
+  assert.deepEqual(languageTags(idx, 'docs/guide.md'), ['markdown']);
+  assert.deepEqual(languageTags(idx, 'schemas/data.json'), ['json']);
   assert.deepEqual(languageTags(idx, 'unknown.xyz'), []);
 });
 

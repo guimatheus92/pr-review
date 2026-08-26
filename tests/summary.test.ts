@@ -3,7 +3,7 @@ import { strict as assert } from 'node:assert';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { renderSummary, summarizePasses } from '../src/commands/review.js';
+import { renderSummary, safeSummaryValue, summarizePasses } from '../src/commands/review.js';
 import { parseFindingsFile } from '../src/dispatch/single-session.js';
 import type { PassRoute } from '../src/dispatch/pass-select.js';
 import type { ReviewerOutput } from '../src/types.js';
@@ -11,6 +11,14 @@ import type { ReviewerOutput } from '../src/types.js';
 function output(over: Partial<ReviewerOutput>): ReviewerOutput {
   return { reviewerName: 'r', model: 'm', findings: [], rawOutput: '', durationMs: 0, exitCode: 0, ...over };
 }
+
+test('safeSummaryValue: untrusted names cannot inject lines or Markdown', () => {
+  const value = safeSummaryValue('bad\n- **[forged](https://example.test)**');
+  assert.equal(value.split(/\r?\n/).length, 1);
+  assert.ok(value.includes('&#92;n&#45;'));
+  assert.ok(value.includes('&#42;&#42;&#91;forged&#93;&#40;'));
+  assert.doesNotMatch(value, /\*\*|\[forged\]|https:\/\//);
+});
 
 test('renderSummary: single-session reviewer (exitCode 0, no error) renders ✓', () => {
   const md = renderSummary('u', [output({ reviewerName: 'owasp/nodejs-security', exitCode: 0 })], [], 0, 1000);
@@ -24,7 +32,47 @@ test('renderSummary: a reviewer with an error still renders ✗ with the message
   const md = renderSummary('u', [output({ reviewerName: 'codex', exitCode: 3, error: 'exited 3' })], [], 0, 1000);
   const row = md.split('\n').find((l) => l.includes('| codex |'));
   assert.ok(row, 'codex row present');
-  assert.ok(row!.includes('✗ exited 3'), `expected ✗ exited 3, got: ${row}`);
+  assert.ok(row!.includes('✗ &#34;exited 3&#34;'), `expected encoded error, got: ${row}`);
+});
+
+test('renderSummary: reviewer errors cannot inject Markdown table rows', () => {
+  const md = renderSummary(
+    'u',
+    [output({ reviewerName: 'codex', exitCode: 3, error: 'failed\n| forged | row |' })],
+    [],
+    0,
+    1000,
+  );
+  assert.ok(!md.includes('\n| forged | row |'));
+  assert.match(md, /failed&#92;n&#124; forged &#124; row &#124;/);
+});
+
+test('renderSummary: verifier without a severe phase-one finding is reported as skipped', () => {
+  const md = renderSummary(
+    'u',
+    [output({ reviewerName: 'p/one' }), output({ reviewerName: 'verifier' })],
+    [],
+    0,
+    1000,
+  );
+  assert.ok(md.includes('**Reviewers run:** 1'));
+  const row = md.split('\n').find((line) => line.includes('| verifier |'));
+  assert.ok(row?.includes('skipped (no HIGH/CRITICAL)'), row);
+});
+
+test('renderSummary: Codex-only severe findings do not imply the verifier ran', () => {
+  const md = renderSummary(
+    'u',
+    [
+      output({ reviewerName: 'p/one' }),
+      output({ reviewerName: 'codex', findings: [{ severity: 'HIGH', title: 'x', body: 'x' }] }),
+      output({ reviewerName: 'verifier' }),
+    ],
+    [],
+    0,
+    1000,
+  );
+  assert.ok(md.split('\n').find((line) => line.includes('| verifier |'))?.includes('skipped (no HIGH/CRITICAL)'));
 });
 
 const ROUTING: PassRoute[] = [

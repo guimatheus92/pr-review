@@ -40,11 +40,12 @@ export function runtimeBinary(runtime: Runtime, binaryOverride?: string): string
 }
 
 /** Non-interactive spawn argv for the orchestrator session (prompt goes on stdin). */
-export function runtimeSpawnArgs(runtime: Runtime, model: string, addDir: string): string[] {
+export function runtimeSpawnArgs(runtime: Runtime, model: string, addDir: string, repoRoot?: string): string[] {
+  const repoArg = repoRoot && repoRoot !== addDir ? ['--add-dir', repoRoot] : [];
   if (runtime === 'claude') {
-    return ['-p', '--model', model, '--dangerously-skip-permissions', '--add-dir', addDir];
+    return ['-p', '--model', model, '--dangerously-skip-permissions', '--add-dir', addDir, ...repoArg];
   }
-  return ['--model', model, '--allow-all-tools', '--no-ask-user', '--add-dir', addDir, '-s'];
+  return ['--model', model, '--allow-all-tools', '--no-ask-user', '--add-dir', addDir, ...repoArg, '-s'];
 }
 
 /**

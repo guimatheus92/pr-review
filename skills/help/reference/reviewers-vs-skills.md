@@ -11,8 +11,8 @@ There are no built-in reviewers any more. The `pr-review` tool works with two co
 Any `.md` file of review knowledge — a cheat sheet, a style guide, a team convention, an instructions file. Skills come from:
 
 - **Skill packs** — git repos cloned to `~/.pr-review/packs/<name>/` (defaults: `awesome-copilot`, `owasp`, plus the index-only `anthropic-cybersecurity`). Pack skill names are `<pack>/<skill>`, e.g. `awesome-copilot/go`, `owasp/nodejs-security`.
-- **Repo/personal skill dirs** — `.claude/skills/`, `.copilot/skills/`, `.github/skills/`, `.agents/skills/` (per-repo), or the same under `~/` (personal). These keep their plain name.
-- **Forced sources** — `extra_skills_dirs`, `--skills-dir`, `--skill`, `PR_REVIEW_SKILLS_DIR`.
+- **Repo/personal skill dirs** — `.claude/skills/`, `.claude/rules/`, `.copilot/skills/`, `.github/skills/`, `.github/instructions/`, `.agents/skills/` (per-repo), or conventional skill dirs under `~/`. These keep their plain name.
+- **Explicit sources** — `--skill` preserves `applies_to`/`applyTo`/`paths`; `--force-skill`, `extra_skills_dirs`, `--skills-dir`, and `PR_REVIEW_SKILLS_DIR` bypass scope.
 
 ## Pass
 
@@ -26,9 +26,12 @@ Selection separates LENSES from CONTEXT. Your own skills (repo dirs, forced dirs
 
 Pass selection within the packs:
 
-1. **glob** - `applies_to`/`applyTo` matches a changed file. A bare `**` never counts, and a bare extension wildcard (`**/*.ts`, `**/*.{ts,js}`) only counts when the skill's name/tags also overlap the stack.
-2. **tag** - EXACT token match between the skill's name/filename/frontmatter `tags` and the PR's stack tags (Linguist languages, dependency names, ecosystem tags like `nodejs`/`dotnet`).
-3. **baseline** - each pack's baseline pointer list (e.g. `awesome-copilot/security-and-owasp`, `owasp/error-handling`); ALWAYS dispatched on a code PR, on top of the stack cap.
+1. **glob** - a specific filename/directory glob matches a changed file.
+2. **dependency** - every product-specific identity token is backed by a manifest dependency; this outranks language-only routing.
+3. **language/tag** - type-only and generic-manifest globs count only for language-generic skills; exact identity tags are the final stack tier.
+4. **baseline** - each pack's baseline pointer list; ALWAYS dispatched on a code PR, on top of the stack cap.
+
+Linguist contributes canonical language names, not aliases as independent technologies. Generic files such as `package.json` or `*.csproj` prove an ecosystem, not Azure Functions, MCP, Copilot SDK, or another product by themselves.
 
 **Cap:** at most `MAX_STACK_PASSES = 6` stack passes dispatch; baselines ride on top (typically 7, so <=13 passes). Overflow, unmatched skills, and index-mode packs land in `skills-index.md` — an on-demand list every pass can read from when an entry is relevant. Indexed skills are surfaced, not ignored.
 
@@ -54,7 +57,7 @@ Valid `--skip` / `skip_reviewers` names are **pass names** — the full `<pack>/
 ```yaml
 ---
 description: short description
-applies_to: ["**/*Controller.cs"]   # globs vs changed files; aliases: applyTo (CSV string OK)
+applies_to: ["**/*Controller.cs"]   # aliases: applyTo and Claude rules' paths
 name: our-auth-conventions          # optional — wins over the filename
 tags: [csharp, dotnet]              # optional — exact-matched against stack tags
 ---

@@ -90,6 +90,12 @@ export function runStatus(runId: string, now = Date.now()): StatusResult {
   }
 
   const summaryPath = join(outDir, 'pr-review-summary.md');
+  const errPath = join(outDir, ERROR_FILE);
+  if (existsSync(errPath)) {
+    const errTxt = readFileSync(errPath, 'utf8').trim();
+    const summary = existsSync(summaryPath) ? `\n\n${readFileSync(summaryPath, 'utf8')}` : '';
+    return { state: 'failed', text: `${errTxt}\n\nSee ${join(outDir, 'detached.log')}${summary}` };
+  }
   if (existsSync(summaryPath)) {
     return { state: 'done', text: readFileSync(summaryPath, 'utf8') };
   }
@@ -110,12 +116,8 @@ export function runStatus(runId: string, now = Date.now()): StatusResult {
         `  Finish it (fast — no re-review): pr-review review <pr-url> --resume ${runId}`,
     };
   }
-  const errPath = join(outDir, ERROR_FILE);
-  const errTxt = existsSync(errPath) ? readFileSync(errPath, 'utf8').trim() : '';
   return {
     state: 'failed',
-    text:
-      `${snapshot}\n\n✗ the run stopped before producing findings — see ${join(outDir, 'detached.log')}` +
-      (errTxt ? `\n\n${errTxt}` : ''),
+    text: `${snapshot}\n\n✗ the run stopped before producing findings — see ${join(outDir, 'detached.log')}`,
   };
 }

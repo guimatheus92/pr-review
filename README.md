@@ -77,6 +77,8 @@ npm install && npm run build
 /plugin install pr-review@pr-review
 ```
 
+`npm run dogfood -- --base origin/main --include-untracked` refuses secret-bearing tracked and opted-in untracked content before writing run artifacts. For renames it validates both the old and new path; the generated `dist/cli.cjs` content is excluded only after both names pass that check.
+
 ## Authentication
 
 | Provider | Env var | Fallback |
@@ -123,9 +125,11 @@ your-repo/
         └── team-style-guide.md
 ```
 
-Every matched repo skill is injected into **every review pass** as an authoritative project rule (`skills-project.md` — it overrides generic judgement), keeping its plain name (`our-auth-conventions`). A skill with `applies_to` globs matches exactly when an in-scope changed file matches; a skill without targeting goes through the `name` + `description` relevance heuristic against the changed file paths and the diff (accent-insensitive, stem/prefix matching, so Portuguese "planos/créditos" matches English `plans`/`Credits`). **Every** match injects — there is no numeric cap — and skill bodies are inlined whole, never truncated: project rules are business knowledge the review must not lose. Skills that don't match land in `skills-index.md`, an on-demand **index** (name + description + path) every pass can read when relevant, so an unmatched skill is never simply ignored. (With `skill_packs: []`, your skills run as the passes themselves — up to 10 as passes with bodies never truncated, and any overflow still injects whole as context, never the index.)
+Every matched repo skill is injected into **every review pass** as an authoritative project rule (`skills-project.md` — it overrides generic judgement), keeping its plain name (`our-auth-conventions`). Rules are discovered from `.claude/skills`, `.claude/rules`, `.copilot/skills`, `.github/skills`, `.github/instructions`, and `.agents/skills`; `applies_to`/`applyTo` and Claude's `paths` are equivalent scopes. A targeted skill matches exactly when an in-scope changed file matches; a skill without targeting goes through the `name` + `description` relevance heuristic against the changed file paths and the diff. **Every** match injects — there is no numeric cap — and skill bodies are inlined whole, never truncated. Skills that don't match land in `skills-index.md`, an on-demand **index** every pass can read when relevant. (With `skill_packs: []`, your skills run as the passes themselves — up to 10 as passes, with overflow still injected whole as context.)
 
-`inject_into` is **deprecated**: it's parsed only to print a warning, then ignored — a matched skill is now a whole pass, so there are no reviewers to scope it to. `applies_to` still routes. Untargeted **home** skills (`~/.claude/skills/` etc.) stay skipped — those are personal general-purpose helpers, not review content. To force a whole directory in as passes regardless of relevance, point `extra_skills_dirs` (in `.pr-review.yaml`), `--skills-dir`, or `PR_REVIEW_SKILLS_DIR` at it.
+Rule files added or modified by the PR under review are untrusted input: they are excluded before same-name dedupe from authoritative context and the on-demand index, and the summary names the skipped coverage. This includes in-repo files supplied through `--skill`; `--force-skill` is the explicit trust override. Linked rule sources that resolve outside the checkout fail closed. Unchanged rules from the checkout remain authoritative.
+
+`inject_into` is **deprecated**: it is parsed only to print a warning, then ignored. Untargeted **home** skills stay skipped. `--skill <file>` includes one file while preserving its scope; use `--force-skill <file>` only when bypassing that scope is intentional. Whole directories configured through `extra_skills_dirs`, `--skills-dir`, or `PR_REVIEW_SKILLS_DIR` remain forced.
 
 Preview the selection with `--context-only`, which prints a `## Stack` block (languages, dependencies) and a `## Passes` table (`| Pass | Matched by | Matched on | Source |`, plus the index count) and exits without dispatching. A live run reports the same in the final summary's `## Skills` section (`**Passes:** N · **Project rules (in every pass):** M · **On-demand (index):** K` + a pass table and the project rules by name). See [review passes vs skills](skills/help/reference/reviewers-vs-skills.md) for the full authoring guide.
 
@@ -141,7 +145,11 @@ Three packs are pre-configured:
 | `owasp` | `OWASP/CheatSheetSeries` | `cheatsheets/*.md` | `error-handling`, `logging` |
 | `anthropic-cybersecurity` | `mukul975/Anthropic-Cybersecurity-Skills` | defensive-review skills (operational/offensive ones excluded) | none — `mode: index`, on-demand only, never a pass |
 
-Your own skills are CONTEXT, not lenses: every matched repo/forced skill is injected into EVERY pass as authoritative project rules (they override generic judgement and never consume pass slots). The passes come from the packs: stack hits - `applies_to`/`applyTo` globs matching changed files (a bare extension wildcard like `**/*.ts` only counts when the skill's name/tags also overlap the stack) and exact stack-tag matches - capped at 6, plus EVERY baseline pointer (the generic security/quality/performance/testing lenses always run). With `skill_packs: []`, your skills become the passes themselves. Overflow, unmatched skills, and index-mode packs go to `skills-index.md`, which every pass can read on demand. Stack detection is deterministic, with no hand-written language table: GitHub Linguist's `languages.yml` (auto-downloaded to `~/.pr-review/cache/linguist-languages.yml`, refreshed on `packs sync`) maps changed files to language tags; dependency names are parsed from manifests in your checkout (`package.json`, `go.mod`, `pyproject.toml`, `*.csproj`, `Cargo.toml`, …) when its git origin is the PR's repo; and each manifest kind adds ecosystem tags (`package.json` → `node`, `npm`; `*.csproj` → `dotnet`, `nuget`; …). Docs-only PRs run only glob/forced passes; a code PR that matches zero passes exits with an error pointing at `packs suggest`.
+Your own skills are CONTEXT, not lenses: every matched repo/explicit/forced skill is injected into EVERY pass as authoritative project rules. Pack passes are selected from evidence tiers: specific path glob, dependency/framework token, language-consistent type/manifest glob, then generic tag; at most six stack passes run, plus EVERY baseline pointer. A product guide cannot qualify merely because the PR touches its language or a generic manifest. Stack detection emits canonical Linguist names (aliases are lookup metadata), reads shallow root manifests plus manifests owning changed files, and separates language, ecosystem, dependency name, and dependency-token evidence. Legacy and canonical Azure DevOps remotes normalize to the same checkout identity. Docs-only PRs run only glob/forced passes; a code PR that matches zero passes exits with a `packs suggest` hint.
+
+Installed Copilot plugins provide an additional generic capability source. The CLI reads their manifests, namespaces their skills as `<plugin>/<skill>`, and can select up to two review-oriented plugin passes from exact repository identity, plugin/path identity, or direct `appliesTo` evidence. It also inventories MCP server names from trusted repository config, user config, and plugin manifests in `capabilities.json`. Installed-plugin passes record which servers were available, attempted, and successfully used; repository MCP config is ignored when it changed in the PR or when the checkout is not the PR repository. Declared skill paths and symlinks cannot escape an installed plugin's root.
+
+Each dispatched pass and companion writes an independent `raw-<reviewer>.json` result. The orchestrator still produces the normal consolidated file, but if its turn ends after all tasks return, the CLI can recover from the complete set of sidecars. Missing or invalid sidecars remain an operational failure rather than being interpreted as a clean review.
 
 Manage packs from the CLI:
 
@@ -175,6 +183,8 @@ pr-review review <pr-url> [flags]            # full pipeline
 #   --runtime <name>        copilot|claude|auto — which agent CLI hosts the session
 #                           (yaml: runtime, env: PR_REVIEW_RUNTIME; default auto)
 #   --no-codex              skip the Codex second-opinion reviewer
+#   --skill <file...>       include files while respecting applyTo/paths
+#   --force-skill <file...> include files regardless of applyTo/paths
 #   --copilot <path>        path to the copilot binary (implies --runtime copilot unless --runtime given)
 #   --from-gather <path>    (eval harness) read the gather JSON from a file
 #                           instead of the provider APIs; requires --dry-run
@@ -189,6 +199,19 @@ pr-review plugins doctor                     # check companion plugin status
 pr-review config show                        # print merged config + sources
 pr-review cache info | clear                 # manage local cache
 ```
+
+Without `--fail-on`, retained findings do not change the process status: exit 0 means the pipeline completed, not that the finding count is zero. Configure `--fail-on` when the exit code must gate CI.
+
+### Dogfood a local branch
+
+Maintainers can review the current branch without opening a remote PR:
+
+```bash
+npm run build
+npm run dogfood -- --base origin/main --include-untracked  # include new, non-ignored files
+```
+
+The command supports `github.com` origins, derives the current fork identity from `origin`, and gathers committed, staged, and unstaged changes. Untracked files require `--include-untracked`; even with opt-in, secret-bearing names and high-confidence credential content are refused before any gather or prompt artifact is written. Tracked diff hunks, including persisted context lines, are checked for high-confidence credentials too. Artifacts live only under `~/.pr-review/runs/`, and the CLI always receives `--dry-run`. It refuses a missing/stale bundle, so run `npm run build` first. Add `--context-only` while tuning routing. Companion plugins are disabled because URL-based companion commands cannot consume a synthetic local PR safely; exercise them against a real PR dry-run. Generated and binary artifacts remain recorded but are excluded from LLM context with an explicit reason.
 
 ## Further reading
 

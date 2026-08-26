@@ -21,8 +21,10 @@ Skills are standard `SKILL.md` reference docs, so they load from every conventio
 | Path | Scope |
 |---|---|
 | `<repo>/.claude/skills/*.md` | Per-repo (Claude Code convention) |
+| `<repo>/.claude/rules/*.md` | Per-repo Claude rules (`paths` frontmatter) |
 | `<repo>/.copilot/skills/*.md` | Per-repo (Copilot CLI convention) |
 | `<repo>/.github/skills/*.md` | Per-repo (GitHub convention) |
+| `<repo>/.github/instructions/*.md` | Per-repo GitHub instructions (`applyTo` frontmatter) |
 | `<repo>/.agents/skills/*.md` | Per-repo (AGENTS.md universal convention) |
 | `~/.claude/skills/*.md`, `~/.copilot/skills/*.md`, `~/.agents/skills/*.md` | Personal, cross-repo |
 | `~/.pr-review/packs/<name>/` | Skill packs — git repos configured via `skill_packs` / `pr-review packs add` |
@@ -75,6 +77,7 @@ Or edit `skill_packs:` in `.pr-review.yaml` / `~/.pr-review/config.yaml`. Note `
 
 ```bash
 pr-review review <pr-url> --skill ./extra-context.md
+pr-review review <pr-url> --force-skill ./extra-context.md  # bypass its declared scope
 pr-review review <pr-url> --skills-dir ./other/path
 ```
 
@@ -162,6 +165,6 @@ tags: [csharp, dotnet]
 ...
 ```
 
-Recognized keys: `description`, `applies_to` (globs matched against in-scope changed files; alias `applyTo`, which may be a comma-separated string), `name` (wins over the filename), `tags` (exact-matched against the PR's stack tags). `inject_into` is deprecated — parsed only to print a stderr warning, then ignored.
+Recognized keys: `description`, `applies_to` (aliases `applyTo` and `paths`; globs matched against in-scope changed files), `name` (wins over the filename), and `tags`. `inject_into` is deprecated — parsed only to print a stderr warning, then ignored.
 
 Files with no frontmatter at all still work: the description falls back to the first `#` heading, and filename suffixes are folded (`go.instructions.md` → `go`, `Input_Validation_Cheat_Sheet.md` → `input-validation`). Anything else in frontmatter (the standard `SKILL.md` spec's `allowed-tools`, etc.) is preserved but ignored, so a SKILL.md you already wrote for Copilot CLI or Claude Code works as a pr-review skill without edits. If the frontmatter YAML is malformed, a stderr warning names the file.

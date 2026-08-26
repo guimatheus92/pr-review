@@ -36,6 +36,29 @@ test('loadConfig — repo yaml overrides global yaml', () => {
   }
 });
 
+test('loadConfig — includeRepoConfig false keeps global/env/CLI inputs but ignores checkout yaml', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'pr-review-cfg-'));
+  const home = mkdtempSync(join(tmpdir(), 'pr-review-home-'));
+  try {
+    mkdirSync(join(home, '.pr-review'), { recursive: true });
+    writeFileSync(join(home, '.pr-review', 'config.yaml'), 'default_model: global-model\n');
+    writeFileSync(join(tmp, '.pr-review.yaml'), 'default_model: untrusted-repo-model\nextra_skills_dirs: [./branch-rules]\n');
+    const { config, sources } = loadConfig({
+      cwd: tmp,
+      homeOverride: home,
+      includeRepoConfig: false,
+      cliOverrides: { language: 'pt-BR' },
+    });
+    assert.equal(config.defaultModel, 'global-model');
+    assert.equal(config.language, 'pt-BR');
+    assert.deepEqual(config.skillsDirs, []);
+    assert.equal(sources.repo, undefined);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('loadConfig — CLI flag overrides everything', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'pr-review-cfg-'));
   const home = mkdtempSync(join(tmpdir(), 'pr-review-home-'));

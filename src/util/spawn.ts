@@ -18,15 +18,15 @@ export function assertSafeArg(name: string, value: string): void {
  * double-quoted parts (the regex forbids `"` and every cmd metacharacter, so
  * quoting is sound). Other platforms spawn the binary directly — no shell.
  */
-export function spawnCli(binary: string, argv: string[], opts: { stdio: ['pipe', 'pipe', 'pipe'] }): ChildProcessByStdio<Writable, Readable, Readable>;
-export function spawnCli(binary: string, argv: string[], opts: { stdio: ['pipe', 'ignore', 'pipe'] }): ChildProcessByStdio<Writable, null, Readable>;
-export function spawnCli(binary: string, argv: string[], opts: { stdio: StdioOptions }): ChildProcess {
+export function spawnCli(binary: string, argv: string[], opts: { stdio: ['pipe', 'pipe', 'pipe']; cwd?: string }): ChildProcessByStdio<Writable, Readable, Readable>;
+export function spawnCli(binary: string, argv: string[], opts: { stdio: ['pipe', 'ignore', 'pipe']; cwd?: string }): ChildProcessByStdio<Writable, null, Readable>;
+export function spawnCli(binary: string, argv: string[], opts: { stdio: StdioOptions; cwd?: string }): ChildProcess {
   if (process.platform === 'win32') {
     for (const part of [binary, ...argv]) assertSafeArg('argument', part);
     return spawn(
       [binary, ...argv].map((part) => `"${part}"`).join(' '),
-      { stdio: opts.stdio, windowsHide: true, shell: true },
+      { stdio: opts.stdio, cwd: opts.cwd, windowsHide: true, shell: true },
     );
   }
-  return spawn(binary, argv, { stdio: opts.stdio, windowsHide: true });
+  return spawn(binary, argv, { stdio: opts.stdio, cwd: opts.cwd, windowsHide: true });
 }

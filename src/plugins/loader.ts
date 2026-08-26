@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, realpathSync, statSync, readdirSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, lstatSync, readFileSync, realpathSync, readdirSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import type { ReviewerDefinition, SkillDefinition } from '../types.js';
 import type { Config } from '../config.js';
@@ -7,6 +7,9 @@ import { autodiscoveryPaths } from '../config.js';
 import { loadReviewerFile, loadSkillFile, loadBuiltInReviewers } from './builtin.js';
 import { loadPackSkills } from '../packs/load.js';
 import type { PluginManifest, PluginReviewerEntry, PluginSkillEntry } from './types.js';
+import { partitionTrustedProjectSkills } from './trust.js';
+import { gitTopLevel } from '../util/git.js';
+import { discoverInstalledPlugins, type InstalledPlugin } from './installed.js';
 
 function withOrigin(skills: SkillDefinition[], origin: NonNullable<SkillDefinition['origin']>): SkillDefinition[] {
   return skills.map((s) => ({ ...s, origin }));
@@ -22,10 +25,11 @@ function walkMdFiles(root: string): string[] {
   if (!existsSync(root)) return out;
   let stats;
   try {
-    stats = statSync(root);
+    stats = lstatSync(root);
   } catch {
     return out;
   }
+  if (stats.isSymbolicLink()) return out;
   if (stats.isFile() && root.toLowerCase().endsWith('.md')) {
     return [root];
   }
@@ -34,10 +38,11 @@ function walkMdFiles(root: string): string[] {
     const full = join(root, entry);
     let s;
     try {
-      s = statSync(full);
+      s = lstatSync(full);
     } catch {
       continue;
     }
+    if (s.isSymbolicLink()) continue;
     if (s.isDirectory()) {
       const skillFile = join(full, 'SKILL.md');
       if (existsSync(skillFile)) {
@@ -60,6 +65,19 @@ function realpathSafe(f: string): string {
   } catch {
     return resolve(f);
   }
+}
+
+function pathsInsideRoot(paths: string[], root: string): string[] {
+  const resolvedRoot = realpathSafe(root);
+  return paths.filter((path) => {
+    const resolvedPath = realpathSafe(path);
+    const rel = relative(resolvedRoot, resolvedPath);
+    const inside = rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+    if (!inside) {
+      process.stderr.write(`[skills] warning: refusing non-forced skill path outside checkout: ${JSON.stringify(path)}\n`);
+    }
+    return inside;
+  });
 }
 
 function loadFromPaths(paths: string[], kind: 'reviewer' | 'skill'): (ReviewerDefinition | SkillDefinition)[] {
@@ -165,6 +183,8 @@ export interface LoadAllOptions {
   skillsOnly?: boolean;
   /** Override the home directory used for autodiscovery (tests). */
   home?: string;
+  /** Changed PR paths; branch-authored in-repo rules are removed before name dedupe. */
+  changedPaths?: string[];
 }
 
 /** A skill opts into explicit (authoritative) routing via applies_to globs. */
@@ -174,11 +194,25 @@ function hasReviewTargeting(s: SkillDefinition): boolean {
 
 export function loadAll(
   opts: LoadAllOptions,
-): LoadedSet & { catalog: SkillDefinition[]; packSkills: SkillDefinition[] } {
-  const { cwd, config, includeBuiltIn = true, skillsOnly = false } = opts;
+): LoadedSet & {
+  catalog: SkillDefinition[];
+  packSkills: SkillDefinition[];
+  installedPluginSkills: SkillDefinition[];
+  installedPlugins: InstalledPlugin[];
+  skippedProjectSkills: SkillDefinition[];
+} {
+  const { config, includeBuiltIn = true, skillsOnly = false } = opts;
+  const cwd = gitTopLevel(opts.cwd) ?? opts.cwd;
   const reviewers: ReviewerDefinition[] = [];
   const skills: SkillDefinition[] = [];
   const catalog: SkillDefinition[] = [];
+  const skippedProjectSkills: SkillDefinition[] = [];
+  const trust = (loaded: SkillDefinition[]): SkillDefinition[] => {
+    if (!opts.changedPaths) return loaded;
+    const partition = partitionTrustedProjectSkills(loaded, cwd, opts.changedPaths);
+    skippedProjectSkills.push(...partition.skipped);
+    return partition.trusted;
+  };
 
   if (includeBuiltIn && !skillsOnly) {
     reviewers.push(...loadBuiltInReviewers());
@@ -197,7 +231,7 @@ export function loadAll(
     // against the changed files and injects the relevant ones (see skill-match),
     // leaving the tail available on-demand. Untargeted HOME skills are personal
     // general-purpose helpers (video/design) — not review content — so skipped.
-    const repoGeneric = withOrigin(loadFromPaths(paths.repoSkills, 'skill') as SkillDefinition[], 'repo');
+    const repoGeneric = trust(withOrigin(loadFromPaths(paths.repoSkills, 'skill') as SkillDefinition[], 'repo'));
     skills.push(...repoGeneric.filter(hasReviewTargeting));
     const repoUntargeted = repoGeneric.filter((s) => !hasReviewTargeting(s));
     catalog.push(...repoUntargeted);
@@ -207,7 +241,7 @@ export function loadAll(
       );
     }
 
-    const personalGeneric = withOrigin(loadFromPaths(paths.personalSkills, 'skill') as SkillDefinition[], 'home');
+    const personalGeneric = trust(withOrigin(loadFromPaths(paths.personalSkills, 'skill') as SkillDefinition[], 'home'));
     skills.push(...personalGeneric.filter(hasReviewTargeting));
     const personalSkipped = personalGeneric.filter((s) => !hasReviewTargeting(s)).length;
     if (personalSkipped > 0) {
@@ -224,15 +258,19 @@ export function loadAll(
     reviewers.push(...explicitReviewersDirs);
   }
 
-  const explicitSkills = withOrigin(loadFromPaths(config.skills, 'skill') as SkillDefinition[], 'forced');
+  const explicitSkills = trust(
+    withOrigin(loadFromPaths(pathsInsideRoot(config.skills, cwd), 'skill') as SkillDefinition[], 'explicit'),
+  );
   skills.push(...explicitSkills);
+  const forceSkills = withOrigin(loadFromPaths(config.forceSkills, 'skill') as SkillDefinition[], 'forced');
+  skills.push(...forceSkills);
   const explicitSkillsDirs = withOrigin(loadFromPaths(config.skillsDirs, 'skill') as SkillDefinition[], 'forced');
   skills.push(...explicitSkillsDirs);
 
   for (const dir of config.pluginDirs) {
     const set = loadPlugin(dir);
     if (!skillsOnly) reviewers.push(...set.reviewers);
-    skills.push(...withOrigin(set.skills, 'plugin'));
+    skills.push(...trust(withOrigin(set.skills, 'plugin')));
   }
   for (const name of config.plugins) {
     const resolved = resolveNamedPlugin(name, cwd);
@@ -242,7 +280,7 @@ export function loadAll(
     }
     const set = loadPlugin(resolved);
     if (!skillsOnly) reviewers.push(...set.reviewers);
-    skills.push(...withOrigin(set.skills, 'plugin'));
+    skills.push(...trust(withOrigin(set.skills, 'plugin')));
   }
 
   const deduped = dedupeByName({ reviewers, skills });
@@ -257,7 +295,16 @@ export function loadAll(
   // Pack skills are namespaced `<pack>/<skill>`, so they can never collide with
   // repo skills or each other — loaded last, never deduped against the rest.
   const packSkills = loadPackSkills(config.skillPacks, opts.home);
-  return { ...deduped, catalog: Array.from(catalogMap.values()), packSkills };
+  const installedPlugins = discoverInstalledPlugins(opts.home);
+  const installedPluginSkills = installedPlugins.flatMap((plugin) => plugin.skills);
+  return {
+    ...deduped,
+    catalog: Array.from(catalogMap.values()),
+    packSkills,
+    installedPluginSkills,
+    installedPlugins,
+    skippedProjectSkills,
+  };
 }
 
 function dedupeByName(set: LoadedSet): LoadedSet {
@@ -279,7 +326,14 @@ function dedupeByName(set: LoadedSet): LoadedSet {
   }
   const skillMap = new Map<string, SkillDefinition>();
   for (const s of set.skills) {
-    if (skillMap.has(s.name)) {
+    const existing = skillMap.get(s.name);
+    const isEquivalentMirror =
+      existing !== undefined &&
+      existing.body === s.body &&
+      existing.description === s.description &&
+      JSON.stringify(existing.appliesTo) === JSON.stringify(s.appliesTo) &&
+      JSON.stringify(existing.tags ?? []) === JSON.stringify(s.tags ?? []);
+    if (existing && !isEquivalentMirror) {
       process.stderr.write(
         `[plugins] warning: skill name '${s.name}' collides; using ${s.source}\n`,
       );

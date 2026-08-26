@@ -3,8 +3,9 @@ import { strict as assert } from 'node:assert';
 import { join } from 'node:path';
 import { detectProvider, resolvePr } from '../src/providers/index.js';
 import { GitHubProvider, apiBaseFor } from '../src/providers/github.js';
-import { AzureDevOpsProvider, orgUrlFor } from '../src/providers/azuredevops.js';
+import { AzureDevOpsProvider, hydrateAdoProject, orgUrlFor } from '../src/providers/azuredevops.js';
 import { gatherCachePath, CACHE_ROOT } from '../src/cache/keys.js';
+import { samePrIdentity } from '../src/commands/review.js';
 
 // The URL from the field report that motivated this file: detection accepted
 // it, parse rejected it, and the error only surfaced inside the detached child.
@@ -182,6 +183,66 @@ test('orgUrlFor / apiBaseFor — refs without baseUrl re-derive from ref.url, cl
   );
 });
 
+test('hydrateAdoProject — project-omitted refs retain the authoritative API project', () => {
+  const ref = new AzureDevOpsProvider().parseUrl('https://dev.azure.com/microsoft/_git/rdinfra/pullrequest/1')!;
+  assert.equal(ref.project, undefined);
+  hydrateAdoProject(ref, { name: 'RDV', id: 'ignored-id' });
+  assert.equal(ref.project, 'RDV');
+  hydrateAdoProject(ref, { name: 'Other' });
+  assert.equal(ref.project, 'RDV', 'an explicit/resolved project is never overwritten');
+});
+
+test('AzureDevOpsProvider — every public PR operation hydrates a project-omitted ref before project-scoped calls', async () => {
+  const provider = new AzureDevOpsProvider();
+  const ref = provider.parseUrl('https://dev.azure.com/microsoft/_git/rdinfra/pullrequest/9')!;
+  const projects: Array<string | undefined> = [];
+  let prFetches = 0;
+  const pr = {
+    pullRequestId: 9,
+    repository: { id: 'repo-id', project: { name: 'RDV' } },
+    lastMergeSourceCommit: { commitId: 'head' },
+    lastMergeTargetCommit: { commitId: 'base' },
+  };
+  const git = {
+    getPullRequestById: async (_id: number, project: string | undefined) => {
+      prFetches++;
+      projects.push(project);
+      return pr;
+    },
+    getThreads: async (_repo: string, _id: number, project: string | undefined) => {
+      projects.push(project);
+      return [];
+    },
+    getCommitDiffs: async (_repo: string, project: string | undefined) => {
+      projects.push(project);
+      return { changes: [] };
+    },
+    getPullRequestIterations: async (_repo: string, _id: number, project: string | undefined) => {
+      projects.push(project);
+      return [];
+    },
+    createThread: async (_thread: unknown, _repo: string, _id: number, project: string | undefined) => {
+      projects.push(project);
+      return { id: 1 };
+    },
+  };
+  (provider as unknown as { gitApis: Map<string, Promise<unknown>> }).gitApis.set(
+    orgUrlFor(ref),
+    Promise.resolve(git),
+  );
+
+  await provider.fetchExistingComments(ref);
+  await provider.fetchFullDiff(ref);
+  await provider.fetchChangedFiles(ref);
+  await provider.postLineComment(ref, {
+    severity: 'LOW', title: 't', body: 'b', file: 'src/a.cs', line: 1,
+  });
+
+  assert.equal(ref.project, 'RDV');
+  assert.equal(prFetches, 1, 'the hydrated cache alias prevents a second PR fetch');
+  assert.deepEqual(projects, [undefined, 'RDV', 'RDV', 'RDV', 'RDV']);
+});
+
 test('resolvePr — the field-report URL resolves end to end', () => {
   const { provider, ref } = resolvePr(LEGACY_ADO_URL, NO_HOSTS);
   assert.equal(provider.name, 'azuredevops');
@@ -195,9 +256,7 @@ test('resolvePr — a malformed visualstudio.com URL suggests the canonical dev.
   );
 });
 
-// Tripwire: cache paths for the canonical cloud URLs must never change, or
-// every user's existing gather cache is silently orphaned.
-test('cache-path stability — canonical cloud URLs produce the same paths as before this refactor', () => {
+test('cache paths — GitHub stays stable while ADO is isolated by project', () => {
   const gh = new GitHubProvider().parseUrl('https://github.com/octo/repo/pull/42')!;
   assert.equal(
     gatherCachePath(gh, 'abcdef123456deadbeef', '77'),
@@ -206,6 +265,28 @@ test('cache-path stability — canonical cloud URLs produce the same paths as be
   const ado = new AzureDevOpsProvider().parseUrl('https://dev.azure.com/org/proj/_git/repo/pullrequest/9')!;
   assert.equal(
     gatherCachePath(ado, 'abcdef123456deadbeef', 'none'),
-    join(CACHE_ROOT, 'azuredevops', 'org__repo', '9', 'abcdef123456-none.json'),
+    join(CACHE_ROOT, 'azuredevops', 'org__proj__repo', '9', 'abcdef123456-none.json'),
+  );
+  const otherProject = new AzureDevOpsProvider().parseUrl('https://dev.azure.com/org/other/_git/repo/pullrequest/9')!;
+  assert.notEqual(
+    gatherCachePath(ado, 'abcdef123456deadbeef', 'none'),
+    gatherCachePath(otherProject, 'abcdef123456deadbeef', 'none'),
+    'same-name repositories and PR numbers in different ADO projects have distinct cache namespaces',
+  );
+  const ghesA = new GitHubProvider().parseUrl('https://github-a.example/o/r/pull/9')!;
+  const ghesB = new GitHubProvider().parseUrl('https://github-b.example/o/r/pull/9')!;
+  assert.notEqual(
+    gatherCachePath(ghesA, 'abcdef123456deadbeef', 'none'),
+    gatherCachePath(ghesB, 'abcdef123456deadbeef', 'none'),
+    'same owner/repo/PR on different GHES authorities have distinct cache namespaces',
+  );
+  assert.equal(samePrIdentity(ghesA, ghesB), false);
+  assert.equal(
+    samePrIdentity(
+      new AzureDevOpsProvider().parseUrl('https://dev.azure.com/org/proj/_git/repo/pullrequest/9')!,
+      new AzureDevOpsProvider().parseUrl('https://org.visualstudio.com/proj/_git/repo/pullrequest/9')!,
+    ),
+    true,
+    'canonical and legacy ADO cloud forms share one authority',
   );
 });

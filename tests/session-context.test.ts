@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MAX_TOTAL_PASSES, prepareSessionContext } from '../src/dispatch/single-session.js';
-import type { IndexEntry, ReviewPass } from '../src/dispatch/pass-select.js';
-import type { GatherOutput } from '../src/types.js';
+import { selectPasses, type IndexEntry, type ReviewPass } from '../src/dispatch/pass-select.js';
+import type { GatherOutput, SkillDefinition } from '../src/types.js';
 
 function fixtureGather(paths: string[]): GatherOutput {
   return {
@@ -248,9 +248,10 @@ test('codex + companions — both read the union file skills-all.md', () => {
     assert.ok(union.includes('BODY_OF_p_one') && union.includes('BODY_OF_p_two'));
     const companionLine = ctx.orchestratorPrompt
       .split('\n')
-      .find((l) => l.includes('pr-review-toolkit:code-reviewer'));
+      .find((l) => l.includes('agent_type="code-reviewer"'));
     assert.ok(companionLine, 'companion agents dispatched');
     assert.ok(companionLine.includes('skills-all.md'), 'companions read the union');
+    assert.ok(companionLine.includes('raw-companion_pr-review-toolkit_code-reviewer.json'));
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
@@ -298,7 +299,9 @@ test('--skip — full pack/skill name and bare suffix both remove the pass; rout
 test('cap — more passes than MAX_TOTAL_PASSES: overflow goes to the index file and routes as index', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
-    const passes = Array.from({ length: MAX_TOTAL_PASSES + 2 }, (_, i) => pass(`p/pass-${String(i).padStart(2, '0')}`));
+    const passes = Array.from({ length: MAX_TOTAL_PASSES + 2 }, (_, i) =>
+      pass(`p/pass-${String(i).padStart(2, '0')}`, { matchedBy: 'glob' }),
+    );
     const ctx = prepareSessionContext(baseOpts(outDir, ['src/app.ts'], passes));
     assert.equal(ctx.passes.length, MAX_TOTAL_PASSES);
     const overflowNames = [`p/pass-${MAX_TOTAL_PASSES}`, `p/pass-${MAX_TOTAL_PASSES + 1}`];
@@ -308,6 +311,49 @@ test('cap — more passes than MAX_TOTAL_PASSES: overflow goes to the index file
       assert.equal(ctx.routing.find((r) => r.name === n)?.matchedBy, 'index');
       assert.ok(!existsSync(join(outDir, `pass-${n.replace('/', '_')}.md`)), `${n} has no pass file`);
     }
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('cap — every configured baseline dispatches even above MAX_TOTAL_PASSES', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const passes = Array.from({ length: MAX_TOTAL_PASSES + 3 }, (_, index) => pass(`baseline/${index}`));
+    const ctx = prepareSessionContext(baseOpts(outDir, ['src/app.ts'], passes));
+    assert.deepEqual(ctx.passes.map((entry) => entry.name), passes.map((entry) => entry.name));
+    assert.ok(ctx.passes.length > MAX_TOTAL_PASSES);
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('cap — stack-matched configured baselines retain baseline membership end to end', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const packSkills: SkillDefinition[] = Array.from({ length: MAX_TOTAL_PASSES + 3 }, (_, index) => ({
+      name: `pack/baseline-${index}`,
+      source: `/pack/${index}.md`,
+      body: `body-${index}`,
+      description: `baseline ${index}`,
+      appliesTo: ['src/**'],
+      tags: ['typescript'],
+      origin: 'pack',
+      pack: 'pack',
+      mode: 'auto',
+    }));
+    const selection = selectPasses({
+      skills: [],
+      catalog: [],
+      packSkills,
+      inScopeFiles: [{ path: 'src/app.ts' }],
+      stackTags: ['typescript'],
+      stackEvidence: { languages: ['typescript'], ecosystems: [], dependencies: [], dependencyTokens: [] },
+      baseline: packSkills.map((skill) => skill.name),
+    });
+    assert.ok(selection.passes.some((entry) => entry.matchedBy === 'glob' && entry.baseline));
+    const ctx = prepareSessionContext(baseOpts(outDir, ['src/app.ts'], selection.passes));
+    assert.deepEqual(ctx.passes.map((entry) => entry.name).sort(), packSkills.map((entry) => entry.name).sort());
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
@@ -350,6 +396,34 @@ test('stack + index — pr-context carries ## Stack and points at skills-index.m
   }
 });
 
+test('MCP capabilities — context lists names/provenance and copies only the trusted repo config', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const trustedMcpConfig = { mcpServers: { modelInspector: { command: 'tool' } } };
+    const ctx = prepareSessionContext({
+      ...baseOpts(outDir, ['models/table.tmdl'], [pass('plugin/model-review', { origin: 'plugin', plugin: 'model-tools', mcpServers: ['modelInspector'] })]),
+      repoRoot: 'C:/repo',
+      mcpServers: [
+        { name: 'modelInspector', source: 'plugin:model-tools' },
+        { name: 'bicep', source: 'repo' },
+      ],
+      trustedMcpConfig,
+    });
+    const context = readFileSync(ctx.contextPath, 'utf8');
+    assert.match(context, /Checkout root:\*\* C:\/repo/);
+    assert.match(context, /modelInspector \(plugin:model-tools\)/);
+    assert.match(context, /bicep \(repo\)/);
+    assert.ok(existsSync(join(outDir, '.mcp.json')));
+    assert.ok(ctx.capabilityFiles['plugin/model-review']?.endsWith('capability-plugin_model-review.json'));
+    assert.match(ctx.orchestratorPrompt, /"available":\["server-name"\],"attempted":\["server-name"\],"used":\["server-name"\]/);
+    assert.match(ctx.orchestratorPrompt, /MUST be arrays of server-name strings, never booleans/);
+    assert.match(ctx.orchestratorPrompt, /modelInspector/);
+    assert.deepEqual(JSON.parse(readFileSync(join(outDir, '.mcp.json'), 'utf8')), trustedMcpConfig);
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
 test('project rules — skills-project.md injected into every pass line, companions, verifier, and routing', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
@@ -372,7 +446,7 @@ test('project rules — skills-project.md injected into every pass line, compani
     const passLines = prompt.split('\n').filter((l) => l.includes('record as reviewer name `p/'));
     assert.equal(passLines.length, 2);
     for (const l of passLines) assert.ok(l.includes('skills-project.md'), 'every pass reads the project rules');
-    const companionLine = prompt.split('\n').find((l) => l.includes('pr-review-toolkit:code-reviewer'))!;
+    const companionLine = prompt.split('\n').find((l) => l.includes('agent_type="code-reviewer"'))!;
     assert.ok(companionLine.includes('skills-project.md'), 'companions get the authoritative rules');
     const verifierLine = prompt.split('\n').find((l) => l.includes('record as reviewer name `verifier`'))!;
     assert.ok(verifierLine.includes('skills-project.md'), 'verifier gets the authoritative rules');

@@ -17,8 +17,10 @@ function normalizedRelative(root: string, path: string): string | null {
  * branch-authored instructions beside it. Flat `<dir>/<name>.md` rules share a
  * directory with unrelated rules, so for those the file stays the unit.
  */
-function skillDirPrefix(normalized: string | null): string | null {
-  if (normalized === null || !/(^|\/)skill\.md$/.test(normalized)) return null;
+export function skillDirPrefix(normalized: string | null): string | null {
+  // Case-insensitive on purpose: normalizedRelative() only lowercases on win32, so a
+  // case-sensitive test matches nothing on Linux/macOS and silently disables this gate.
+  if (normalized === null || !/(^|\/)skill\.md$/i.test(normalized)) return null;
   const slash = normalized.lastIndexOf('/');
   return slash < 0 ? null : normalized.slice(0, slash + 1);
 }

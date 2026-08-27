@@ -3,7 +3,7 @@ import { strict as assert } from 'node:assert';
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { partitionTrustedProjectSkills, skillsAllowedForCheckout } from '../src/plugins/trust.js';
+import { partitionTrustedProjectSkills, skillDirPrefix, skillsAllowedForCheckout } from '../src/plugins/trust.js';
 import type { SkillDefinition } from '../src/types.js';
 
 function skill(name: string, source: string, origin: SkillDefinition['origin'] = 'repo'): SkillDefinition {
@@ -90,6 +90,17 @@ test('partitionTrustedProjectSkills — a SKILL.md is untrusted when the PR chan
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+test('skillDirPrefix — recognizes SKILL.md in the casing every non-Windows host preserves', () => {
+  // normalizedRelative() lowercases only on win32, so a case-SENSITIVE test here matched
+  // nothing on Linux/macOS and silently turned the directory trust gate into dead code.
+  // Asserting both casings directly keeps that regression detectable on any platform.
+  assert.equal(skillDirPrefix('.claude/skills/backend-guide/SKILL.md'), '.claude/skills/backend-guide/');
+  assert.equal(skillDirPrefix('.claude/skills/backend-guide/skill.md'), '.claude/skills/backend-guide/');
+  assert.equal(skillDirPrefix('.claude/rules/flat.md'), null, 'a flat rule does not own its directory');
+  assert.equal(skillDirPrefix('SKILL.md'), null, 'a repo-root SKILL.md would own the whole checkout');
+  assert.equal(skillDirPrefix(null), null);
 });
 
 test('skillsAllowedForCheckout — unrelated checkouts admit only explicit force overrides', () => {

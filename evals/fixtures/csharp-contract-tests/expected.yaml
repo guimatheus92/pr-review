@@ -3,7 +3,10 @@ must_find:
   - "(?=.*(?:route.?filter|filter))(?=.*(?:argument|parameter))(?=.*(?:deriv|comput|circular))(?=.*(?:expected|oracle|implementation|current))"
 distinct_findings: true
 must_not_find:
-  - "test naming convention|MethodName_Condition_Expected"
+  # Pure naming nitpick only. A finding that cites the convention while making the
+  # circular-assertion point is substantive, not noise, so it must pass through —
+  # the -safe control proves the pipeline discriminates defect from clean code.
+  - "(?=.*(?:test naming convention|MethodName_Condition_Expected))(?!.*(?:itself|circular|tautolog|never fail|no matter how|agrees with))"
 must_dispatch:
   - csharp-mstest
   - dotnet-best-practices

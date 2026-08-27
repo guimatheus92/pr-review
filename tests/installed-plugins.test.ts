@@ -3,7 +3,7 @@ import { strict as assert } from 'node:assert';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { discoverInstalledPlugins, discoverMcpCapabilities } from '../src/plugins/installed.js';
+import { discoverInstalledPlugins, discoverMcpCapabilities, launchesRepoCode } from '../src/plugins/installed.js';
 import { readCapabilityUsage } from '../src/commands/review.js';
 
 function seedPlugin(home: string, marketplace: string, id: string, over: Record<string, unknown> = {}): string {
@@ -20,6 +20,122 @@ function seedPlugin(home: string, marketplace: string, id: string, over: Record<
   );
   return root;
 }
+
+/** Claude Code nests an extra <version> level and records installPath in its manifest. */
+function seedClaudePlugin(home: string, marketplace: string, id: string, version: string): string {
+  const root = join(home, '.claude', 'plugins', 'cache', marketplace, id, version);
+  mkdirSync(join(root, '.claude-plugin'), { recursive: true });
+  mkdirSync(join(root, 'skills', 'review-stack'), { recursive: true });
+  writeFileSync(
+    join(root, '.claude-plugin', 'plugin.json'),
+    JSON.stringify({ name: id, version, skills: ['./skills/review-stack'], mcpServers: { [`${id}-mcp`]: {} } }),
+  );
+  writeFileSync(
+    join(root, 'skills', 'review-stack', 'SKILL.md'),
+    `---\nname: review-stack\ndescription: Review ${id} changes and validate contracts.\n---\n# ${id} review\n`,
+  );
+  return root;
+}
+
+test('discoverInstalledPlugins — Claude Code installs are discovered, not just Copilot ones', () => {
+  // pr-review runs under Copilot CLI AND Claude Code; a plugin installed in either
+  // host must be found. Claude keeps several versions side by side, so the version
+  // is read from installed_plugins.json rather than guessed by walking the cache.
+  const home = mkdtempSync(join(tmpdir(), 'pr-review-claude-home-'));
+  try {
+    seedPlugin(home, 'market-a', 'copilot-tools');
+    const live = seedClaudePlugin(home, 'market-c', 'claude-tools', '2.0.0');
+    seedClaudePlugin(home, 'market-c', 'claude-tools', '1.0.0-stale');
+    mkdirSync(join(home, '.claude', 'plugins'), { recursive: true });
+    writeFileSync(
+      join(home, '.claude', 'plugins', 'installed_plugins.json'),
+      JSON.stringify({
+        version: 2,
+        plugins: { 'claude-tools@market-c': [{ scope: 'user', installPath: live, version: '2.0.0' }] },
+      }),
+    );
+    const plugins = discoverInstalledPlugins(home);
+    assert.deepEqual(plugins.map((plugin) => plugin.id), ['claude-tools', 'copilot-tools']);
+    const claudeTools = plugins.find((plugin) => plugin.id === 'claude-tools');
+    assert.equal(claudeTools?.version, '2.0.0', 'the installed version wins over the stale sibling');
+    assert.deepEqual(claudeTools?.skills.map((skill) => skill.name), ['claude-tools/review-stack']);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('discoverInstalledPlugins — a Copilot-only host is normal, not an error', () => {
+  const home = mkdtempSync(join(tmpdir(), 'pr-review-copilot-only-'));
+  try {
+    seedPlugin(home, 'market-a', 'copilot-tools');
+    assert.deepEqual(discoverInstalledPlugins(home).map((plugin) => plugin.id), ['copilot-tools']);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('discoverMcpCapabilities — a repo MCP server that launches checkout code is refused', () => {
+  // Refusing only a CHANGED .mcp.json is not enough: the config can be untouched while
+  // the PR rewrites the script it points at, and the checkout is already at that head.
+  const repoRoot = mkdtempSync(join(tmpdir(), 'pr-review-mcp-repo-'));
+  const home = mkdtempSync(join(tmpdir(), 'pr-review-mcp-home-'));
+  try {
+    writeFileSync(
+      join(repoRoot, '.mcp.json'),
+      JSON.stringify({
+        mcpServers: {
+          'in-repo': { command: 'node', args: ['./scripts/mcp-server.js'] },
+          external: { command: 'npx', args: ['-y', '@scope/mcp'] },
+        },
+      }),
+    );
+    mkdirSync(join(repoRoot, 'scripts'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts', 'mcp-server.js'), 'module.exports = {};');
+    // The PR does not touch .mcp.json at all — only the script it launches.
+    const result = discoverMcpCapabilities({
+      repoRoot,
+      home,
+      plugins: [],
+      changedPaths: ['scripts/mcp-server.js'],
+    });
+    assert.deepEqual(Object.keys(result.trustedRepoConfig?.mcpServers ?? {}), ['external']);
+    assert.deepEqual(result.servers.filter((s) => s.source === 'repo').map((s) => s.name), ['external']);
+    assert.ok(result.warnings.some((w) => w.includes('launches code from the reviewed checkout')));
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('launchesRepoCode — in-repo launch paths are caught, external tooling is not', () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), 'pr-review-launch-'));
+  try {
+    mkdirSync(join(repoRoot, 'scripts'), { recursive: true });
+    writeFileSync(join(repoRoot, 'scripts', 'mcp-server.js'), 'module.exports = {};');
+    const inRepo = [
+      { command: 'node', args: ['./scripts/mcp-server.js'] },
+      { command: 'node', args: ['scripts/mcp-server.js'] },
+      { command: join(repoRoot, 'bin', 'server') },
+      { command: 'node', args: ['--x'], env: { PLUGIN: './plugins/evil.js' } },
+      { command: 'node', cwd: repoRoot },
+    ];
+    for (const definition of inRepo) {
+      assert.equal(launchesRepoCode(definition, repoRoot), true, JSON.stringify(definition));
+    }
+    const external = [
+      { command: 'npx', args: ['-y', '@scope/mcp'] },
+      { command: 'docker', args: ['run', 'ghcr.io/acme/mcp:1'] },
+      { command: 'uvx', args: ['mcp-server-git'] },
+      { command: 'root-bicep' },
+      { command: 'node', args: ['--experimental-x'] },
+    ];
+    for (const definition of external) {
+      assert.equal(launchesRepoCode(definition, repoRoot), false, JSON.stringify(definition));
+    }
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
 
 test('discoverInstalledPlugins — loads namespaced skills and MCPs from generic plugin manifests', () => {
   const home = mkdtempSync(join(tmpdir(), 'pr-review-installed-home-'));

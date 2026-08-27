@@ -91,7 +91,7 @@ src/
 │   ├── loader.ts            # resolve skills from all sources (loadAll has a skillsOnly option, used by review)
 │   ├── builtin.ts           # parse skill .md files: frontmatter + body, name normalization
 │   ├── trust.ts             # rule files the PR changed are untrusted; only --force-skill overrides
-│   ├── installed.ts         # generic discovery of installed Copilot plugins + the MCP capability inventory
+│   ├── installed.ts         # host-agnostic plugin discovery (Copilot CLI + Claude Code) + the MCP capability inventory
 │   ├── companions.ts        # detect pr-review-toolkit / code-review installs (copilot plugin list | installed_plugins.json); companionReviewerNames = the planned dispatch list
 │   └── types.ts             # PluginManifest, PluginReviewerEntry, PluginSkillEntry
 ├── cache/

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { loadSkillFile, printable } from './builtin.js';
 import type { SkillDefinition } from '../types.js';
 
@@ -24,6 +24,11 @@ export interface InstalledPlugin {
 export interface McpCapability {
   name: string;
   source: 'repo' | 'user' | `plugin:${string}`;
+}
+
+function readJsonQuiet(path: string): Record<string, unknown> | null {
+  if (!existsSync(path)) return null;
+  return readJson(path);
 }
 
 function readJson(path: string): Record<string, unknown> | null {
@@ -108,9 +113,37 @@ function pluginRoots(base: string): string[] {
   return roots.sort();
 }
 
+/**
+ * Claude Code installs to `<cache>/<marketplace>/<plugin>/<version>/`, keeps more than
+ * one version side by side, and records the authoritative `installPath` for each entry
+ * in `installed_plugins.json`. Walking the cache would pick a version arbitrarily, so
+ * read the manifest instead — this host is a first-class runtime, not a fallback.
+ */
+export function claudePluginRoots(home: string): string[] {
+  const manifest = readJsonQuiet(join(home, '.claude', 'plugins', 'installed_plugins.json'));
+  const entries = manifest?.plugins;
+  if (!entries || typeof entries !== 'object' || Array.isArray(entries)) return [];
+  const roots = new Set<string>();
+  for (const installs of Object.values(entries as Record<string, unknown>)) {
+    if (!Array.isArray(installs)) continue;
+    for (const install of installs) {
+      const path = (install as { installPath?: unknown } | null)?.installPath;
+      if (typeof path !== 'string' || !path.trim()) continue;
+      const root = resolve(path);
+      if (existsSync(join(root, '.claude-plugin', 'plugin.json'))) roots.add(root);
+    }
+  }
+  return [...roots].sort();
+}
+
+/** Every host pr-review can run under; a plugin installed in either is discoverable. */
+export function installedPluginRoots(home: string): string[] {
+  return [...pluginRoots(join(home, '.copilot', 'installed-plugins')), ...claudePluginRoots(home)];
+}
+
 export function discoverInstalledPlugins(home = homedir()): InstalledPlugin[] {
   const plugins = new Map<string, InstalledPlugin>();
-  for (const root of pluginRoots(join(home, '.copilot', 'installed-plugins'))) {
+  for (const root of installedPluginRoots(home)) {
     const manifestPath = join(root, '.claude-plugin', 'plugin.json');
     const raw = readJson(manifestPath) as InstalledPluginManifest | null;
     if (!raw || typeof raw.name !== 'string' || !raw.name.trim()) continue;
@@ -171,6 +204,56 @@ function readMcpServers(path: string): Record<string, unknown> {
   return { ...legacy, ...canonical };
 }
 
+/**
+ * A repository MCP server that launches code from the checkout runs whatever the
+ * branch under review contains. Refusing only a changed `.mcp.json` is not enough:
+ * the config can be untouched while the PR rewrites the script it points at
+ * (`node ./scripts/mcp-server.js`), and reviewing a PR means the checkout is already
+ * at that branch's head. So an in-repo command is untrusted on every PR, changed or
+ * not. Servers that launch external tooling (`npx -y @scope/pkg`, an absolute path
+ * outside the repo) are unaffected.
+ */
+export function launchesRepoCode(definition: unknown, repoRoot: string): boolean {
+  const root = resolve(repoRoot);
+  let realRoot = root;
+  try {
+    realRoot = realpathSync(root);
+  } catch {
+    // An unreadable root cannot clear a candidate, so comparisons below fail closed.
+  }
+  const contains = (boundary: string, resolved: string): boolean => {
+    const rel = relative(boundary, resolved);
+    return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !rel.startsWith('../') && !isAbsolute(rel));
+  };
+  const insideRepo = (candidate: string): boolean => {
+    const trimmed = candidate.trim();
+    if (!trimmed) return false;
+    // An explicitly repo-relative token is in-repo by construction, even if the file
+    // does not exist yet — the PR may be adding it.
+    if (/^\.{1,2}[\\/]/.test(trimmed)) return true;
+    const hasSeparator = /[\\/]/.test(trimmed);
+    // A bare token is a PATH lookup (`npx`, `docker`, `node`), never a repo path.
+    if (!isAbsolute(trimmed) && !hasSeparator) return false;
+    let resolved: string;
+    try {
+      resolved = isAbsolute(trimmed) ? resolve(trimmed) : resolve(root, trimmed);
+    } catch {
+      return false;
+    }
+    if (![root, realRoot].some((boundary) => contains(boundary, resolved))) return false;
+    // A separator alone does not make it a path: `npx -y @scope/mcp` resolves inside
+    // the repo but names a registry package. Require it to actually be there.
+    return isAbsolute(trimmed) || existsSync(resolved);
+  };
+  const scan = (value: unknown): boolean => {
+    if (typeof value === 'string') return insideRepo(value);
+    if (Array.isArray(value)) return value.some(scan);
+    if (value && typeof value === 'object') return Object.values(value as Record<string, unknown>).some(scan);
+    return false;
+  };
+  return scan(definition);
+}
+
 export function discoverMcpCapabilities(opts: {
   repoRoot?: string;
   home?: string;
@@ -191,8 +274,16 @@ export function discoverMcpCapabilities(opts: {
     const rootServers = readMcpServers(repoConfig);
     const vscodeServers = readMcpServers(vscodeConfig);
     const mergedServers = { ...vscodeServers, ...rootServers };
-    servers.push(...Object.keys(mergedServers).map((name) => ({ name, source: 'repo' as const })));
-    if (Object.keys(mergedServers).length > 0) trustedRepoConfig = { mcpServers: mergedServers };
+    const admitted: Record<string, unknown> = {};
+    for (const [name, definition] of Object.entries(mergedServers)) {
+      if (launchesRepoCode(definition, opts.repoRoot)) {
+        warnings.push(`repository MCP server ${printable(name)} launches code from the reviewed checkout — refused`);
+        continue;
+      }
+      admitted[name] = definition;
+    }
+    servers.push(...Object.keys(admitted).map((name) => ({ name, source: 'repo' as const })));
+    if (Object.keys(admitted).length > 0) trustedRepoConfig = { mcpServers: admitted };
   }
   servers.push(...readMcpFile(join(home, '.copilot', 'mcp-config.json'), 'user'));
   for (const plugin of opts.plugins) {

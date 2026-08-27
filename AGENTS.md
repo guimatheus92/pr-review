@@ -6,7 +6,7 @@ Generic, plugin-based PR review tool for GitHub, Azure DevOps, and GitLab, packa
 
 ```bash
 npm run build          # tsc + esbuild → dist/cli.cjs
-npm run test           # node scripts/test.mjs → node --test over tests/**/*.test.ts (461 tests, ~10s)
+npm run test           # node scripts/test.mjs → node --test over tests/**/*.test.ts (465 tests, ~10s)
 npm run build:watch    # tsc watch (re-run `npm run bundle` for esbuild)
 ```
 
@@ -35,7 +35,7 @@ The bundle at `dist/cli.cjs` is the single-file distribution artifact. The slash
 - `src/commands/packs.ts` — `packs list` / `packs sync` / `packs add` / `packs suggest` subcommands
 - `src/plugins/loader.ts` — discovers skills from standard paths (`.claude/skills`, `.claude/rules`, `.copilot/skills`, `.github/skills`, `.github/instructions`, `.agents/skills`, plus the `~/` mirrors); applies rule trust before same-name dedupe, and folds semantically identical mirrors silently while still warning on divergent same-name rules
 - `src/plugins/trust.ts` — a rule file added or modified by the PR under review is UNTRUSTED input: it is dropped from both authoritative context and the on-demand index, and named as degraded coverage. Checks lexical AND real paths, so a changed later mirror cannot evict its unchanged counterpart; in-repo `--skill` files stay scoped, `--force-skill` is the explicit override, and rules resolving outside the checkout fail closed
-- `src/plugins/installed.ts` — generic discovery of installed **Copilot** plugins (`~/.copilot/installed-plugins/`) from their manifests: skills namespaced `<plugin>/<skill>`, declared paths and symlinks constrained to the plugin root, plus the MCP capability inventory (`capabilities.json`) from trusted repo config, user config, and plugin manifests. Claude Code's plugin layout is not read here — companions cover that runtime
+- `src/plugins/installed.ts` — **host-agnostic** discovery of installed plugins from their manifests, in BOTH runtimes: Copilot CLI (`~/.copilot/installed-plugins/<marketplace>/<plugin>/`) and Claude Code (`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`, whose authoritative `installPath` is read from `installed_plugins.json` because several versions can sit side by side). Skills are namespaced `<plugin>/<skill>`; declared paths and symlinks are constrained to the plugin root. Also builds the MCP capability inventory (`capabilities.json`) from trusted repo config, user config, and plugin manifests
 - `src/providers/identity.ts` — canonical checkout/PR identity: `canonicalPrAuthority` normalizes legacy `<org>.visualstudio.com`, encoded HTTPS paths, and `ssh.dev.azure.com:v3/<org>/<project>/<repo>` onto one authority, including the ADO project so a same-name repo in another project can't supply manifests or rules
 - `src/util/git.ts` — `gitTopLevel()`; the pipeline resolves the checkout root once so a run from a subdirectory still finds repo config and rules
 - `src/plugins/companions.ts` — detects installed companion plugins (pr-review-toolkit, code-review); copilot via `copilot plugin list`, claude via `~/.claude/plugins/installed_plugins.json`. Detection failure is `unknown`, never "not installed"; `companionReviewerNames()` is the single source of the 7 planned dispatch names (6 toolkit agents + 1 `code-review` slash command), reconciled against delivered outputs in `companions.json`

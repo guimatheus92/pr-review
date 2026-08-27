@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -138,7 +138,10 @@ test('findManifests + readDependencyTags — walks 2 levels, skips node_modules 
 });
 
 test('readDependencyTags — changed files contribute their deep owning manifest', () => {
-  const cwd = mkdtempSync(join(tmpdir(), 'pr-review-man-'));
+  // Canonical form on purpose: discovery returns canonicalized paths, and on a host
+  // whose temp dir carries a Windows 8.3 component (CI: C:\\Users\\RUNNER~1) the raw
+  // mkdtemp path is the short form, so a naive expectation compares short vs long.
+  const cwd = realpathSync.native(mkdtempSync(join(tmpdir(), 'pr-review-man-')));
   try {
     const projectDir = join(cwd, 'src', 'IntegrationTests', 'test', 'ContractTests');
     mkdirSync(projectDir, { recursive: true });

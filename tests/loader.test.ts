@@ -15,6 +15,12 @@ import {
 } from '../src/plugins/companions.js';
 import { loadConfig } from '../src/config.js';
 
+// Guarded by CI, not by a local 8.3 fixture: on windows-latest the runner home is
+// `runneradmin`, which mangles to `RUNNER~1`, so `git rev-parse` (long form) and
+// os.tmpdir() (short form) disagree and containment refuses a legitimate --skill.
+// A developer whose username is <= 8 characters cannot reproduce it, and a local test
+// that fabricates a short path passes with or without the fix — vacuous. See
+// src/util/realpath.ts; this test is what actually fails on a mangled runner.
 test('loadAll — launching below the Git root keeps root config and scoped skills inside the checkout', () => {
   const root = mkdtempSync(join(tmpdir(), 'pr-review-subdir-root-'));
   const home = mkdtempSync(join(tmpdir(), 'pr-review-subdir-home-'));

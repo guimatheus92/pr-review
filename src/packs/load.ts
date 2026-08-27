@@ -1,17 +1,18 @@
-import { existsSync, readdirSync, realpathSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { SkillPack } from '../config.js';
 import type { SkillDefinition } from '../types.js';
 import { loadSkillFile, normalizeSkillName, printable } from '../plugins/builtin.js';
 import { matchesAny } from '../util/globs.js';
 import { packDir } from './sync.js';
+import { realpathCanonical } from '../util/realpath.js';
 
 /** True when the file really lives under the pack dir — a symlink placed in a
  *  malicious pack must not read arbitrary local files into agent context. */
 function containedIn(root: string, file: string): boolean {
   try {
-    const real = realpathSync(file).toLowerCase();
-    const base = realpathSync(root).toLowerCase();
+    const real = realpathCanonical(file).toLowerCase();
+    const base = realpathCanonical(root).toLowerCase();
     return real === base || real.startsWith(base + '\\') || real.startsWith(base + '/');
   } catch {
     return false;

@@ -1,5 +1,6 @@
-import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { realpathCanonical } from '../util/realpath.js';
 
 /** Dependency-manifest filenames we can read. Formats are stable; the knowledge inside them is the repo's. */
 const NAME_RE = /^(package\.json|requirements[\w.-]*\.txt|pyproject\.toml|go\.mod|gemfile|pom\.xml|composer\.json|cargo\.toml)$/i;
@@ -207,7 +208,7 @@ function errorCode(error: unknown): string | undefined {
 export function findManifests(cwd: string, maxDepth = 2, warnings: string[] = []): string[] {
   let root: string;
   try {
-    root = realpathSync(resolve(cwd));
+    root = realpathCanonical(resolve(cwd));
   } catch (error) {
     if (errorCode(error) !== 'ENOENT') warnings.push(`could not resolve manifest root: ${safeManifestDiagnostic((error as Error).message)}`);
     return [];
@@ -216,7 +217,7 @@ export function findManifests(cwd: string, maxDepth = 2, warnings: string[] = []
   const walk = (dir: string, depth: number) => {
     let realDir: string;
     try {
-      realDir = realpathSync(dir);
+      realDir = realpathCanonical(dir);
     } catch (error) {
       if (errorCode(error) !== 'ENOENT') {
         warnings.push(`could not resolve manifest directory ${safeManifestDiagnostic(dir)}: ${safeManifestDiagnostic((error as Error).message)}`);
@@ -259,7 +260,7 @@ function safeManifestPath(root: string, candidate: string): string | null {
     if (!isWithin(root, lexical)) return null;
     const stats = lstatSync(lexical);
     if (!stats.isFile() || stats.isSymbolicLink()) return null;
-    const real = realpathSync(lexical);
+    const real = realpathCanonical(lexical);
     return isWithin(root, real) ? real : null;
   } catch {
     return null;
@@ -270,7 +271,7 @@ function safeManifestPath(root: string, candidate: string): string | null {
 export function findChangedFileManifests(cwd: string, changedPaths: string[], warnings: string[] = []): string[] {
   let root: string;
   try {
-    root = realpathSync(resolve(cwd));
+    root = realpathCanonical(resolve(cwd));
   } catch (error) {
     if (errorCode(error) !== 'ENOENT') warnings.push(`could not resolve manifest root: ${safeManifestDiagnostic((error as Error).message)}`);
     return [];
@@ -290,7 +291,7 @@ export function findChangedFileManifests(cwd: string, changedPaths: string[], wa
     while (isWithin(root, dir)) {
       let realDir: string;
       try {
-        realDir = realpathSync(dir);
+        realDir = realpathCanonical(dir);
       } catch (error) {
         if (errorCode(error) !== 'ENOENT') {
           warnings.push(
@@ -347,7 +348,7 @@ export function readDependencyTags(cwd: string, changedPaths: string[] = []): De
   const groups = new Map<string, Set<string>>();
   let root: string;
   try {
-    root = realpathSync(resolve(cwd));
+    root = realpathCanonical(resolve(cwd));
   } catch {
     return { dependencies: [], tokens: [], ecosystems: [], manifests: [], warnings: ['could not resolve manifest root'], groups: [] };
   }

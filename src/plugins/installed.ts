@@ -1,8 +1,9 @@
-import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { loadSkillFile, printable } from './builtin.js';
 import type { SkillDefinition } from '../types.js';
+import { realpathCanonical } from '../util/realpath.js';
 
 interface InstalledPluginManifest {
   name?: unknown;
@@ -50,7 +51,7 @@ function serverNames(value: unknown): string[] {
 
 function skillFiles(root: string, manifest: InstalledPluginManifest): string[] {
   const resolvedRoot = resolve(root);
-  const realRoot = realpathSync(resolvedRoot);
+  const realRoot = realpathCanonical(resolvedRoot);
   const insideRoot = (path: string, boundary: string): boolean => {
     const rel = relative(boundary, path);
     return rel === '' || (rel !== '..' && !rel.startsWith('../') && !rel.startsWith('..\\') && !isAbsolute(rel));
@@ -83,7 +84,7 @@ function skillFiles(root: string, manifest: InstalledPluginManifest): string[] {
     if (!insideRoot(candidate, resolvedRoot) || !existsSync(candidate)) continue;
     let realCandidate: string;
     try {
-      realCandidate = realpathSync(candidate);
+      realCandidate = realpathCanonical(candidate);
     } catch {
       continue;
     }
@@ -91,7 +92,7 @@ function skillFiles(root: string, manifest: InstalledPluginManifest): string[] {
   }
   return [...new Set(files.map((file) => {
     try {
-      return realpathSync(file);
+      return realpathCanonical(file);
     } catch {
       return resolve(file);
     }
@@ -217,7 +218,7 @@ export function launchesRepoCode(definition: unknown, repoRoot: string): boolean
   const root = resolve(repoRoot);
   let realRoot = root;
   try {
-    realRoot = realpathSync(root);
+    realRoot = realpathCanonical(root);
   } catch {
     // An unreadable root cannot clear a candidate, so comparisons below fail closed.
   }

@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readFileSync, realpathSync, readdirSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import type { ReviewerDefinition, SkillDefinition } from '../types.js';
@@ -10,6 +10,7 @@ import type { PluginManifest, PluginReviewerEntry, PluginSkillEntry } from './ty
 import { partitionTrustedProjectSkills } from './trust.js';
 import { gitTopLevel } from '../util/git.js';
 import { discoverInstalledPlugins, type InstalledPlugin } from './installed.js';
+import { realpathCanonical } from '../util/realpath.js';
 
 function withOrigin(skills: SkillDefinition[], origin: NonNullable<SkillDefinition['origin']>): SkillDefinition[] {
   return skills.map((s) => ({ ...s, origin }));
@@ -61,7 +62,7 @@ function walkMdFiles(root: string): string[] {
  *  symlinked dir dedupes to one entry. Falls back to lexical resolve on error. */
 function realpathSafe(f: string): string {
   try {
-    return realpathSync(f);
+    return realpathCanonical(f);
   } catch {
     return resolve(f);
   }

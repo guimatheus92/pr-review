@@ -1,6 +1,7 @@
-import { realpathSync } from 'node:fs';
+
 import { isAbsolute, relative, resolve } from 'node:path';
 import type { SkillDefinition } from '../types.js';
+import { realpathCanonical } from '../util/realpath.js';
 
 function normalizedRelative(root: string, path: string): string | null {
   const rel = relative(root, resolve(path));
@@ -34,7 +35,7 @@ export function partitionTrustedProjectSkills(
   const root = resolve(cwd);
   let realRoot = root;
   try {
-    realRoot = realpathSync(root);
+    realRoot = realpathCanonical(root);
   } catch {
     // A missing cwd makes every lexical in-repo comparison fail closed below.
   }
@@ -53,7 +54,7 @@ export function partitionTrustedProjectSkills(
     const lexicalSource = normalizedRelative(root, skill.source);
     let realSource: string | null = null;
     try {
-      realSource = normalizedRelative(realRoot, realpathSync(skill.source));
+      realSource = normalizedRelative(realRoot, realpathCanonical(skill.source));
     } catch {
       // The loader already read the file; failure here is a trust failure, not absence.
     }

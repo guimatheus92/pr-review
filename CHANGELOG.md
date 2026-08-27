@@ -4,6 +4,8 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-08-27
+
 ### Added
 - **Local branch dogfood without opening a PR:** `npm run dogfood -- --base origin/main --include-untracked` converts the complete branch/working-tree diff (including opted-in untracked text files) into a temporary `GatherOutput` under `~/.pr-review/runs/` and drives the real bundled CLI with `--from-gather --dry-run`. URL-based companions are disabled for this synthetic PR; exercise them on a real-PR dry-run. The generated `dist/cli.cjs` remains recorded but is excluded from LLM context; `npm run build` is its validation surface.
 - Synthetic eval fixtures also disable URL-based companions; their pass/stack/finding assertions exercise the bundled pipeline, while companion dispatch is validated on real-PR dry-runs.

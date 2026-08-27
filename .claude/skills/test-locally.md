@@ -12,6 +12,34 @@ npm run test
 
 `scripts/test.mjs` enumerates `tests/**/*.test.ts` recursively (node 20-safe), including `tests/providers/` — see AGENTS.md for the current count. Coverage: glob matching, output parsers (JSON, bracketed-markdown, section-header), dedupe (Jaccard similarity, strict/loose/off), diff filtering, frontmatter parsing, config merge, line snapping (`tests/line-snap.test.ts`), pass selection (`tests/pass-select.test.ts`), session context (`tests/session-context.test.ts`), stack detection, skill packs (`tests/packs-*.test.ts`), and the loader (`tests/loader.test.ts`).
 
+## Reproducing a Windows-only CI failure (8.3 short paths)
+
+`build-test (windows-latest)` can fail on path containment while your Windows box passes.
+The runner home is `runneradmin`, which the filesystem mangles to the 8.3 short name
+`RUNNER~1`. `git rev-parse` reports the long form, `os.tmpdir()` reports the short one,
+and `realpathSync` folds symlinks but **not** 8.3 — so the two describe the same directory
+and compare as different. A username of 8 characters or fewer never mangles, so the bug is
+invisible locally. `src/util/realpath.ts` (`realpathCanonical`) is the fix; this is how to
+reproduce the condition before pushing:
+
+```powershell
+# 1. make a directory whose name is long enough to mangle, and get its 8.3 form
+$long  = "$env:TEMP\pr-review-ciSimulationLongName"
+New-Item -ItemType Directory -Force -Path $long | Out-Null
+$short = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($long).ShortPath
+$short   # e.g. C:\Users\you\AppData\Local\Temp\PR5F42~1
+
+# 2. point the temp dir at the short form and run the suite
+$env:TEMP = $short; $env:TMP = $short
+npm run test
+```
+
+**Validate the simulation before trusting it.** Revert the fix (`git stash` your work,
+`git checkout <pre-fix-sha> -- src/`) and re-run: it must FAIL. A simulation that passes
+either way proves nothing — the same trap as a regression test that passes without its fix.
+If `ShortPath` returns the long path unchanged, 8.3 generation is disabled on that volume
+(`fsutil 8dot3name query`) and this cannot be reproduced there.
+
 ## Pass routing (fast, no runtime spawn)
 
 ```bash

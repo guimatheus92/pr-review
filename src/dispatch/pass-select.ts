@@ -1,6 +1,6 @@
 import type { SkillDefinition } from '../types.js';
 import { matchesAny } from '../util/globs.js';
-import { selectRelevantSkills } from './skill-match.js';
+import { selectRelevantPluginSkills, selectRelevantSkills } from './skill-match.js';
 
 /**
  * Deterministic selection of the review passes for one PR. There are no
@@ -12,10 +12,11 @@ import { selectRelevantSkills } from './skill-match.js';
  *  the generic lenses that must run on every code PR (observed live: a repo with
  *  47 project skills otherwise starved security/baseline coverage entirely). */
 export const MAX_STACK_PASSES = 6;
+export const MAX_PLUGIN_PASSES = 2;
 /** Fallback cap when project skills ARE the passes (no packs configured). */
 export const MAX_PASSES = 10;
 
-export type MatchedBy = 'glob' | 'tag' | 'repo' | 'forced' | 'baseline';
+export type MatchedBy = 'glob' | 'dependency' | 'tag' | 'plugin' | 'repo' | 'forced' | 'baseline';
 
 export interface ReviewPass {
   /** `<pack>/<skill>` for pack skills; the plain skill name otherwise. Unique. */
@@ -28,6 +29,10 @@ export interface ReviewPass {
   matchedOn: string[];
   /** Where the skill came from — project-origin pass bodies are never truncated; 'pack' bodies cap. */
   origin?: SkillDefinition['origin'];
+  /** Configured baseline membership, independent of the strongest match reason displayed in routing. */
+  baseline?: boolean;
+  plugin?: string;
+  mcpServers?: string[];
 }
 
 export interface IndexEntry {
@@ -82,6 +87,25 @@ function isLanguageGlob(g: string): boolean {
   return /^(\*\*\/)?\*{1,2}\.(\{[\w ,.-]+\}|[a-z0-9_-]+)$/i.test(g);
 }
 
+/** Generic dependency manifests identify an ecosystem, not a specific product or framework. */
+function isManifestGlob(g: string): boolean {
+  return /(^|\/)(package\.json|manifest\.json|pyproject\.toml|requirements[^/]*\.txt|go\.mod|cargo\.toml|gemfile|pom\.xml|composer\.json)$/i.test(g);
+}
+
+/** `*agent*` / `*plugin*` path fragments are keyword search, not proof of a product. */
+function isKeywordGlob(g: string): boolean {
+  return /\*[a-z0-9_-]+\*/i.test(g);
+}
+
+/** Expand simple brace alternatives for evidence classification; matching still uses the normal glob engine. */
+function expandBraceAlternatives(glob: string): string[] {
+  const match = glob.match(/\{([^{}]+)\}/);
+  if (!match) return [glob];
+  return match[1]!.split(',').flatMap((part) =>
+    expandBraceAlternatives(glob.slice(0, match.index) + part.trim() + glob.slice((match.index ?? 0) + match[0].length)),
+  );
+}
+
 const DESC_CAP = 200;
 
 /**
@@ -97,7 +121,8 @@ function tokensOf(s: SkillDefinition): Set<string> {
   // The file's own .md extension (and the pack-format .instructions suffix) is
   // container format, not identity — without stripping it, every pack file
   // "matches" any PR that touches markdown (stack tag `md`).
-  const base = (s.source.replace(/\\/g, '/').split('/').pop() ?? '').replace(/(\.instructions)?\.md$/i, '');
+  const filename = s.source.replace(/\\/g, '/').split('/').pop() ?? '';
+  const base = /^SKILL\.md$/i.test(filename) ? '' : filename.replace(/(\.instructions)?\.md$/i, '');
   const raw = `${nameNoPack} ${base} ${(s.tags ?? []).join(' ')}`.toLowerCase();
   return new Set(raw.split(/[^a-z0-9#+]+/).filter((t) => t.length >= 2));
 }
@@ -115,14 +140,45 @@ function toIndexEntry(s: SkillDefinition): IndexEntry {
 interface Candidate {
   pass: ReviewPass;
   skill: SkillDefinition;
+  priority: number;
 }
 
-function candidate(s: SkillDefinition, matchedBy: MatchedBy, matchedOn: string[]): Candidate {
+const MATCH_PRIORITY = {
+  specificGlob: 0,
+  dependency: 1,
+  languageGlob: 2,
+  tag: 3,
+  other: 4,
+} as const;
+
+function candidate(
+  s: SkillDefinition,
+  matchedBy: MatchedBy,
+  matchedOn: string[],
+  priority: number = MATCH_PRIORITY.other,
+): Candidate {
   return {
     skill: s,
-    pass: { name: s.name, source: s.source, body: s.body, description: s.description, matchedBy, matchedOn, origin: s.origin },
+    priority,
+    pass: {
+      name: s.name,
+      source: s.source,
+      body: s.body,
+      description: s.description,
+      matchedBy,
+      matchedOn,
+      origin: s.origin,
+      plugin: s.plugin,
+      mcpServers: s.mcpServers,
+    },
   };
 }
+
+const GENERIC_IDENTITY_TOKENS = new Set([
+  'application', 'applications', 'architecture', 'best', 'code', 'design', 'development',
+  'framework', 'good', 'guide', 'guidelines', 'instruction', 'instructions', 'pattern',
+  'js', 'patterns', 'practice', 'practices', 'review', 'reviews', 'sdk', 'security', 'server',
+]);
 
 export function selectPasses(input: {
   /** Loader `skills`: targeted repo/home/plugin skills + forced dirs. */
@@ -131,12 +187,34 @@ export function selectPasses(input: {
   catalog: SkillDefinition[];
   /** Loader `packSkills`. */
   packSkills: SkillDefinition[];
+  /** Skills supplied by installed Copilot/Claude plugins. */
+  installedPluginSkills?: SkillDefinition[];
   inScopeFiles: { path: string; patch?: string }[];
   stackTags: string[];
+  /** Categorized evidence from stack detection. Omitted by legacy/test callers. */
+  stackEvidence?: {
+    languages: string[];
+    ecosystems: string[];
+    dependencies: string[];
+    dependencyTokens: string[];
+    dependencyGroups?: { dependency: string; tokens: string[] }[];
+  };
   /** Fully-qualified `<pack>/<skill>` names that run on every PR. */
   baseline: string[];
+  reviewContext?: { repoName: string; title?: string };
 }): PassSelection {
   const stackSet = new Set(input.stackTags.map((t) => t.toLowerCase()));
+  const languageSet = new Set(
+    (input.stackEvidence ? [...input.stackEvidence.languages, ...input.stackEvidence.ecosystems] : input.stackTags)
+      .map((tag) => tag.toLowerCase()),
+  );
+  const dependencySet = new Set(
+    [...(input.stackEvidence?.dependencies ?? []), ...(input.stackEvidence?.dependencyTokens ?? [])]
+      .map((tag) => tag.toLowerCase()),
+  );
+  const dependencyGroups = input.stackEvidence?.dependencyGroups?.map(
+    (group) => new Set([group.dependency, ...group.tokens].map((token) => token.toLowerCase())),
+  );
   const inScopePaths = input.inScopeFiles.map((f) => f.path);
   const baselineSet = new Set(input.baseline);
   const candidates: Candidate[] = [];
@@ -148,21 +226,42 @@ export function selectPasses(input: {
       continue;
     }
     const globs = s.appliesTo.filter((g) => !isMatchAll(g));
-    const globHits = globs.filter((g) => inScopePaths.some((p) => matchesAny(p, [g])));
-    const tagHits = [...tokensOf(s)].filter((t) => stackSet.has(t)).sort();
-    const specificHits = globHits.filter((g) => !isLanguageGlob(g));
+    const globHits = [
+      ...new Set(
+        globs.flatMap((glob) =>
+          expandBraceAlternatives(glob).filter((pattern) => inScopePaths.some((path) => matchesAny(path, [pattern]))),
+        ),
+      ),
+    ];
+    const identityTokens = [...tokensOf(s)];
+    const tagHits = identityTokens.filter((t) => stackSet.has(t)).sort();
+    const languageHits = identityTokens.filter((t) => languageSet.has(t)).sort();
+    const specificIdentityTokens = identityTokens.filter(
+      (token) => !languageSet.has(token) && !GENERIC_IDENTITY_TOKENS.has(token),
+    );
+    const dependencyBacked = specificIdentityTokens.length > 0 && (
+      dependencyGroups
+        ? dependencyGroups.some((group) => specificIdentityTokens.every((token) => group.has(token)))
+        : specificIdentityTokens.every((token) => dependencySet.has(token))
+    );
+    const specificHits = globHits.filter((g) => !isLanguageGlob(g) && !isManifestGlob(g) && !isKeywordGlob(g));
     if (specificHits.length > 0) {
       // A filename / directory / compound glob is real targeting on its own.
-      candidates.push(candidate(s, 'glob', specificHits));
+      candidates.push(candidate(s, 'glob', specificHits, MATCH_PRIORITY.specificGlob));
       continue;
     }
-    if (globHits.length > 0 && tagHits.length > 0) {
-      // Extension-only globs count only for a stack-consistent skill.
-      candidates.push(candidate(s, 'glob', [...tagHits, ...globHits]));
+    if (dependencyBacked) {
+      candidates.push(candidate(s, 'dependency', [...specificIdentityTokens.sort(), ...globHits], MATCH_PRIORITY.dependency));
       continue;
     }
-    if (tagHits.length > 0) {
-      candidates.push(candidate(s, 'tag', tagHits));
+    const identityIsLanguageGeneric = !input.stackEvidence || specificIdentityTokens.length === 0;
+    if (globHits.length > 0 && languageHits.length > 0 && identityIsLanguageGeneric) {
+      // Type-only and generic-manifest globs count only for a language-generic skill or one backed by a dependency above.
+      candidates.push(candidate(s, 'glob', [...languageHits, ...globHits], MATCH_PRIORITY.languageGlob));
+      continue;
+    }
+    if (tagHits.length > 0 && identityIsLanguageGeneric) {
+      candidates.push(candidate(s, 'tag', tagHits, MATCH_PRIORITY.tag));
       continue;
     }
     if (baselineSet.has(s.name)) {
@@ -199,15 +298,31 @@ export function selectPasses(input: {
 
   // Stack passes: pack glob/tag hits, most specific first, capped.
   const stackCandidates = candidates
-    .filter((c) => c.pass.matchedBy === 'glob' || c.pass.matchedBy === 'tag')
+    .filter((c) => c.pass.matchedBy === 'glob' || c.pass.matchedBy === 'dependency' || c.pass.matchedBy === 'tag')
     .sort(
       (a, b) =>
-        (a.pass.matchedBy === 'glob' ? 0 : 1) - (b.pass.matchedBy === 'glob' ? 0 : 1) ||
+        a.priority - b.priority ||
         b.pass.matchedOn.length - a.pass.matchedOn.length ||
         a.pass.name.localeCompare(b.pass.name),
     );
   const stackKept = stackCandidates.slice(0, MAX_STACK_PASSES);
   const stackOverflow = stackCandidates.slice(MAX_STACK_PASSES);
+
+  const pluginSelection = selectRelevantPluginSkills(
+    input.installedPluginSkills ?? [],
+    input.inScopeFiles,
+    {
+      repoName: input.reviewContext?.repoName ?? '',
+      title: input.reviewContext?.title,
+      stackTags: input.stackEvidence
+        ? [...input.stackEvidence.languages, ...input.stackEvidence.ecosystems]
+        : [...stackSet],
+    },
+  );
+  const pluginKept = pluginSelection.matched.slice(0, MAX_PLUGIN_PASSES).map((match) =>
+    candidate(match.skill, 'plugin', match.matchedOn, MATCH_PRIORITY.tag),
+  );
+  const pluginOverflow = pluginSelection.matched.slice(MAX_PLUGIN_PASSES).map((match) => match.skill);
 
   // Baselines ALWAYS dispatch — they are the generic lenses of every code
   // review. Two sources: pointers that matched nothing else, and pointers that
@@ -222,7 +337,7 @@ export function selectPasses(input: {
     ...evictedBaselines,
   ];
 
-  let kept = [...stackKept, ...baselines];
+  let kept = [...stackKept, ...pluginKept, ...baselines];
   let projectSkills = project.map((c) => c.skill);
   let projectRoutes: PassRoute[] = project.map((c) => ({
     name: c.pass.name,
@@ -248,10 +363,12 @@ export function selectPasses(input: {
   const indexEntries = [
     // Overflowed baselines still dispatch as baseline passes — don't double-list them.
     ...stackOverflow.filter((c) => !baselineSet.has(c.pass.name)).map((c) => toIndexEntry(c.skill)),
+    ...pluginOverflow.map(toIndexEntry),
+    ...pluginSelection.rest.map(toIndexEntry),
     ...scored.map(({ s }) => toIndexEntry(s)),
   ];
 
-  const passes = kept.map((c) => c.pass);
+  const passes = kept.map((c) => ({ ...c.pass, baseline: baselineSet.has(c.pass.name) }));
   const routes: PassRoute[] = [
     ...passes.map((p) => ({ name: p.name, source: p.source, matchedBy: p.matchedBy as PassRoute['matchedBy'] })),
     ...projectRoutes,

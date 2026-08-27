@@ -98,9 +98,13 @@ export interface SkillDefinition {
   /** Pack name when loaded from a skill pack (name is then `<pack>/<skill>`). */
   pack?: string;
   /** Where the skill was discovered; undefined ⇒ 'repo' (back-compat). */
-  origin?: 'repo' | 'home' | 'plugin' | 'forced' | 'pack';
+  origin?: 'repo' | 'home' | 'plugin' | 'explicit' | 'forced' | 'pack';
   /** Pack mode: 'index' skills are never dispatched as passes, only listed on-demand. */
   mode?: 'auto' | 'index';
+  /** Installed plugin that supplied this skill, when applicable. */
+  plugin?: string;
+  /** MCP server names declared by that installed plugin. */
+  mcpServers?: string[];
 }
 
 export type Severity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'NIT';

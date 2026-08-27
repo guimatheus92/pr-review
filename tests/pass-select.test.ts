@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import type { SkillDefinition } from '../src/types.js';
 import { MAX_STACK_PASSES, selectPasses } from '../src/dispatch/pass-select.js';
+import { dependencyNameTokens } from '../src/stack/manifests.js';
 
 function packSkill(name: string, over: Partial<SkillDefinition> = {}): SkillDefinition {
   return {
@@ -109,6 +110,210 @@ test('selectPasses — exact tag match, never prefixes: java ≠ javascript, ter
   assert.ok(sel.indexEntries.some((e) => e.name === 'pk/java'));
 });
 
+test('selectPasses — dependency evidence promotes MSTest and rejects unrelated C# products', () => {
+  const packSkills = [
+    packSkill('github-copilot-sdk-c#', { appliesTo: ['**/*.cs', '**/*.csproj'] }),
+    packSkill('azure-durable-functions-csharp', { appliesTo: ['**/*.cs', '**/*.csproj'] }),
+    packSkill('azure-functions-csharp', { appliesTo: ['**/*.cs', '**/*.csproj'] }),
+    packSkill('csharp-mcp-server', { appliesTo: ['**/*.cs', '**/*.csproj'] }),
+    packSkill('dotnet-architecture-good-practices', { appliesTo: ['**/*.cs', '**/*.csproj'] }),
+    packSkill('dotnet-framework', { appliesTo: ['**/*.cs', '**/*.csproj'] }),
+    packSkill('csharp-mstest', { source: '/packs/pk/skills/csharp-mstest/SKILL.md' }),
+    packSkill('dotnet-best-practices'),
+  ];
+  const sel = selectPasses({
+    skills: [],
+    catalog: [],
+    packSkills,
+    inScopeFiles: [{ path: 'src/IntegrationTests/CatalogApiTests.cs' }, { path: 'src/IntegrationTests/Contracts.csproj' }],
+    stackTags: ['c#', 'csharp', 'dotnet', 'nuget', 'xml', 'mstest.testframework', 'mstest'],
+    stackEvidence: {
+      languages: ['c#', 'xml'],
+      ecosystems: ['csharp', 'dotnet', 'nuget'],
+      dependencies: ['mstest.testframework'],
+      dependencyTokens: ['mstest', 'testframework'],
+      dependencyGroups: [{ dependency: 'mstest.testframework', tokens: ['mstest', 'testframework'] }],
+    },
+    baseline: [],
+  });
+
+  assert.equal(sel.passes.find((pass) => pass.name === 'pk/csharp-mstest')?.matchedBy, 'dependency');
+  assert.ok(sel.passes.some((pass) => pass.name === 'pk/dotnet-best-practices'));
+  assert.ok(sel.passes.some((pass) => pass.name === 'pk/dotnet-architecture-good-practices'));
+  for (const unrelated of [
+    'pk/github-copilot-sdk-c#',
+    'pk/azure-durable-functions-csharp',
+    'pk/azure-functions-csharp',
+    'pk/csharp-mcp-server',
+  ]) {
+    assert.ok(!sel.passes.some((pass) => pass.name === unrelated), `${unrelated} requires product evidence`);
+    assert.ok(sel.indexEntries.some((entry) => entry.name === unrelated));
+  }
+});
+
+test('selectPasses — product skills return when their package tokens are present', () => {
+  const products = [
+    packSkill('github-copilot-sdk-c#', { appliesTo: ['**/*.cs'] }),
+    packSkill('azure-durable-functions-csharp', { appliesTo: ['**/*.cs'] }),
+    packSkill('azure-functions-csharp', { appliesTo: ['**/*.cs'] }),
+    packSkill('csharp-mcp-server', { appliesTo: ['**/*.cs'] }),
+  ];
+  const dependencies = [
+    'github.copilot.sdk',
+    'microsoft.azure.functions.worker.extensions.durabletask',
+    'modelcontextprotocol',
+  ];
+  const dependencyGroups = dependencies.map((dependency) => ({
+    dependency,
+    tokens: dependency === 'microsoft.azure.functions.worker.extensions.durabletask'
+      ? dependencyNameTokens('Microsoft.Azure.Functions.Worker.Extensions.DurableTask')
+      : dependencyNameTokens(dependency),
+  }));
+  const dependencyTokens = [...new Set(dependencyGroups.flatMap((group) => group.tokens))];
+  const sel = selectPasses({
+    skills: [],
+    catalog: [],
+    packSkills: products,
+    inScopeFiles: [{ path: 'src/App.cs' }],
+    stackTags: ['c#', 'csharp', 'dotnet', ...dependencyTokens],
+    stackEvidence: {
+      languages: ['c#'],
+      ecosystems: ['csharp', 'dotnet'],
+      dependencies,
+      dependencyTokens,
+      dependencyGroups,
+    },
+    baseline: [],
+  });
+  assert.deepEqual(sel.passes.map((pass) => pass.name).sort(), products.map((skill) => skill.name).sort());
+  assert.ok(sel.passes.every((pass) => pass.matchedBy === 'dependency'));
+});
+
+test('selectPasses — package.json alone does not prove a Node product is present', () => {
+  const productSkills = [
+    packSkill('github-copilot-sdk-node.js', { appliesTo: ['package.json', '**/*.ts'] }),
+    packSkill('power-apps-code-apps', { appliesTo: ['**/package.json'] }),
+    packSkill('typescript-mcp-server', { appliesTo: ['**/package.json', '**/*.ts'] }),
+  ];
+  const sel = selectPasses({
+    skills: [],
+    catalog: [],
+    packSkills: productSkills,
+    inScopeFiles: [{ path: 'package.json' }, { path: 'src/app.ts' }],
+    stackTags: ['javascript', 'typescript', 'node', 'nodejs', 'npm'],
+    stackEvidence: {
+      languages: ['javascript', 'typescript'],
+      ecosystems: ['node', 'nodejs', 'npm'],
+      dependencies: ['commander'],
+      dependencyTokens: ['commander'],
+      dependencyGroups: [{ dependency: 'commander', tokens: ['commander'] }],
+    },
+    baseline: [],
+  });
+  assert.deepEqual(sel.passes, []);
+  assert.deepEqual(sel.indexEntries.map((entry) => entry.name).sort(), productSkills.map((skill) => skill.name).sort());
+});
+
+test('selectPasses — broad keyword alternatives are weak but literal product filenames stay specific', () => {
+  const m365 = packSkill('mcp-m365-copilot', {
+    appliesTo: ['**/{*mcp*,*agent*,*plugin*,declarativeAgent.json,ai-plugin.json,mcp.json,manifest.json}'],
+  });
+  const weak = selectPasses({
+    skills: [],
+    catalog: [],
+    packSkills: [m365],
+    inScopeFiles: [{ path: 'src/plugins/companions.ts' }],
+    stackTags: ['typescript', 'node', 'npm'],
+    stackEvidence: {
+      languages: ['typescript'],
+      ecosystems: ['node', 'npm'],
+      dependencies: ['commander'],
+      dependencyTokens: ['commander'],
+    },
+    baseline: [],
+  });
+  assert.deepEqual(weak.passes, []);
+
+  const literal = selectPasses({
+    skills: [],
+    catalog: [],
+    packSkills: [m365],
+    inScopeFiles: [{ path: 'config/mcp.json' }],
+    stackTags: ['json'],
+    stackEvidence: { languages: ['json'], ecosystems: [], dependencies: [], dependencyTokens: [] },
+    baseline: [],
+  });
+  assert.equal(literal.passes[0]?.matchedBy, 'glob');
+  assert.deepEqual(literal.passes[0]?.matchedOn, ['**/mcp.json']);
+
+  const genericManifest = selectPasses({
+    skills: [],
+    catalog: [],
+    packSkills: [m365],
+    inScopeFiles: [{ path: 'extension/manifest.json' }],
+    stackTags: ['json'],
+    stackEvidence: { languages: ['json'], ecosystems: [], dependencies: [], dependencyTokens: [] },
+    baseline: [],
+  });
+  assert.deepEqual(genericManifest.passes, []);
+});
+
+test('selectPasses — real npm package tokens activate MCP and Node.js Copilot skills', () => {
+  const mcp = packSkill('typescript-mcp-server', { appliesTo: ['**/*.ts', '**/package.json'] });
+  const copilot = packSkill('github-copilot-sdk-node.js', { appliesTo: ['**/*.ts', 'package.json'] });
+  const dependencyTokens = [
+    ...new Set([
+      ...dependencyNameTokens('@modelcontextprotocol/sdk'),
+      ...dependencyNameTokens('@github/copilot-sdk'),
+    ]),
+  ];
+  const selection = selectPasses({
+    skills: [],
+    catalog: [],
+    packSkills: [mcp, copilot],
+    inScopeFiles: [{ path: 'src/server.ts' }, { path: 'package.json' }],
+    stackTags: ['typescript', 'node', 'nodejs', 'npm', ...dependencyTokens],
+    stackEvidence: {
+      languages: ['typescript'],
+      ecosystems: ['node', 'nodejs', 'npm'],
+      dependencies: ['@modelcontextprotocol/sdk', '@github/copilot-sdk'],
+      dependencyTokens,
+      dependencyGroups: [
+        { dependency: '@modelcontextprotocol/sdk', tokens: dependencyNameTokens('@modelcontextprotocol/sdk') },
+        { dependency: '@github/copilot-sdk', tokens: dependencyNameTokens('@github/copilot-sdk') },
+      ],
+    },
+    baseline: [],
+  });
+  assert.deepEqual(
+    selection.passes.map((pass) => `${pass.name}:${pass.matchedBy}`).sort(),
+    ['pk/github-copilot-sdk-node.js:dependency', 'pk/typescript-mcp-server:dependency'],
+  );
+});
+
+test('selectPasses — unrelated dependencies cannot compose a product identity', () => {
+  const azureFunctions = packSkill('azure-functions-csharp', { appliesTo: ['**/*.cs'] });
+  const selection = selectPasses({
+    skills: [],
+    catalog: [],
+    packSkills: [azureFunctions],
+    inScopeFiles: [{ path: 'src/App.cs' }],
+    stackTags: ['c#', 'csharp', 'dotnet', 'azure', 'functions'],
+    stackEvidence: {
+      languages: ['c#'],
+      ecosystems: ['csharp', 'dotnet'],
+      dependencies: ['azure.identity', 'functions.core'],
+      dependencyTokens: ['azure', 'identity', 'functions', 'core'],
+      dependencyGroups: [
+        { dependency: 'azure.identity', tokens: ['azure', 'identity'] },
+        { dependency: 'functions.core', tokens: ['functions', 'core'] },
+      ],
+    },
+    baseline: [],
+  });
+  assert.deepEqual(selection.passes, []);
+});
+
 test('selectPasses — stack passes capped at MAX_STACK_PASSES, baselines ALWAYS ride, project skills become context', () => {
   const packSkills: SkillDefinition[] = [];
   for (let i = 0; i < 8; i++) packSkills.push(packSkill(`glob-${i}`, { appliesTo: ['**/main.go'] }));
@@ -208,6 +413,15 @@ test('selectPasses — fallback with no pack passes: project skills become the p
   assert.equal(sel.passes.find((p) => p.name === 'infra-conventions')?.matchedBy, 'repo');
 });
 
+test('selectPasses — explicit skills honor scope while forced skills bypass it', () => {
+  const explicit = repoSkill('explicit-rule', { origin: 'explicit', appliesTo: ['**/*.css'] });
+  const forced = repoSkill('forced-rule', { origin: 'forced', appliesTo: ['**/*.css'] });
+  const sel = base({ skills: [explicit, forced], packSkills: [] });
+  assert.ok(!sel.passes.some((pass) => pass.name === 'explicit-rule'));
+  assert.ok(sel.indexEntries.some((entry) => entry.name === 'explicit-rule'));
+  assert.equal(sel.passes.find((pass) => pass.name === 'forced-rule')?.matchedBy, 'forced');
+});
+
 test('selectPasses — fallback overflow beyond MAX_PASSES stays CONTEXT, never the index (no rule lost)', () => {
   const many = Array.from({ length: 12 }, (_, i) => repoSkill(`rule-${String(i).padStart(2, '0')}`, { appliesTo: ['**/*.go'] }));
   const sel = base({ skills: many, catalog: [], packSkills: [] });
@@ -252,4 +466,94 @@ test('selectPasses — routes mirror passes + index', () => {
     sel.routes.map((r) => `${r.name}:${r.matchedBy}`).sort(),
     ['pk/go:glob', 'pk/idle:index'],
   );
+});
+
+test('selectPasses — installed plugin skills are selected from path/topic evidence without a technology map', () => {
+  const pluginSkill = (name: string, description: string): SkillDefinition => ({
+    name: `fabric-tools/${name}`,
+    description,
+    source: `/plugins/fabric-tools/${name}/SKILL.md`,
+    body: `Review ${description}. Validate the changed artifacts using read-only tools.`,
+    appliesTo: [],
+    origin: 'plugin',
+    plugin: 'fabric-tools',
+    mcpServers: ['model-inspector'],
+  });
+  const selection = selectPasses({
+    skills: [],
+    catalog: [],
+    packSkills: [],
+    installedPluginSkills: [
+      pluginSkill('report-authoring', 'PowerBI PBIR report pages visuals and filters'),
+      pluginSkill('semantic-model', 'PowerBI semantic model TMDL tables measures and relationships'),
+      pluginSkill('workspace-management', 'Publish and manage Fabric workspaces'),
+    ],
+    inScopeFiles: [
+      { path: 'fabric/powerBI/orb/Matrix.Report/definition/pages/home/visuals/kpi/visual.json' },
+      { path: 'fabric/powerBI/orb/Model.SemanticModel/definition/tables/Dim Region.tmdl' },
+    ],
+    stackTags: ['json', 'tmdl'],
+    stackEvidence: { languages: ['json', 'tmdl'], ecosystems: [], dependencies: [], dependencyTokens: [] },
+    baseline: [],
+    reviewContext: { repoName: 'data-node', title: 'Update report and semantic model' },
+  });
+  assert.deepEqual(selection.passes.map((pass) => pass.name).sort(), [
+    'fabric-tools/report-authoring',
+    'fabric-tools/semantic-model',
+  ].sort());
+  assert.ok(selection.passes.every((pass) => pass.matchedBy === 'plugin'));
+  assert.ok(selection.indexEntries.some((entry) => entry.name === 'fabric-tools/workspace-management'));
+});
+
+test('selectPasses — generic and partial plugin topic overlap cannot activate an unrelated installed plugin', () => {
+  const unrelated: SkillDefinition = {
+    name: 'domain-docs/build-rollout',
+    description: 'Build JSON service docs, templates, and rollout artifacts.',
+    source: '/plugins/domain-docs/build-rollout/SKILL.md',
+    body: 'Build deployment artifacts for another product.',
+    appliesTo: [],
+    origin: 'plugin',
+    plugin: 'domain-docs',
+    mcpServers: ['release-builds'],
+  };
+  const selection = selectPasses({
+    skills: [], catalog: [], packSkills: [], installedPluginSkills: [unrelated],
+    inScopeFiles: [{ path: 'docs/service/templates/rolloutSpec.json' }],
+    stackTags: ['json'],
+    stackEvidence: { languages: ['json'], ecosystems: [], dependencies: [], dependencyTokens: [] },
+    baseline: [],
+    reviewContext: { repoName: 'data-node', title: 'Update service rollout templates' },
+  });
+  assert.equal(selection.passes.length, 0);
+  assert.ok(selection.indexEntries.some((entry) => entry.name === unrelated.name));
+});
+
+test('selectPasses — exact repository identity can activate a specialized installed review skill', () => {
+  const specialized: SkillDefinition = {
+    name: 'domain-tools/review-pr',
+    description: 'Review infra-core changes with domain architecture and orchestration knowledge.',
+    source: '/plugins/domain-tools/review-pr/SKILL.md',
+    body: 'Use the infra-core knowledge graph to validate the PR blast radius.',
+    appliesTo: [],
+    origin: 'plugin',
+    plugin: 'domain-tools',
+    mcpServers: ['domain-knowledge'],
+  };
+  const operational: SkillDefinition = {
+    ...specialized,
+    name: 'domain-tools/build-artifacts',
+    description: 'Build and validate deployment artifacts for infra-core.',
+    source: '/plugins/domain-tools/build-artifacts/SKILL.md',
+  };
+  const selection = selectPasses({
+    skills: [], catalog: [], packSkills: [], installedPluginSkills: [operational, specialized],
+    inScopeFiles: [{ path: 'src/Contoso.Api/Controllers/CatalogController.cs' }],
+    stackTags: ['c#'],
+    stackEvidence: { languages: ['c#'], ecosystems: ['dotnet'], dependencies: [], dependencyTokens: [] },
+    baseline: [],
+    reviewContext: { repoName: 'infra-core', title: 'Update the catalog API' },
+  });
+  assert.equal(selection.passes[0]?.name, 'domain-tools/review-pr');
+  assert.equal(selection.passes[0]?.matchedBy, 'plugin');
+  assert.ok(selection.indexEntries.some((entry) => entry.name === operational.name));
 });

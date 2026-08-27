@@ -12,6 +12,7 @@ export interface Config {
   reviewers: string[];
   reviewersDirs: string[];
   skills: string[];
+  forceSkills: string[];
   skillsDirs: string[];
   plugins: string[];
   pluginDirs: string[];
@@ -103,6 +104,7 @@ const DEFAULTS: Config = {
   reviewers: [],
   reviewersDirs: [],
   skills: [],
+  forceSkills: [],
   skillsDirs: [],
   plugins: [],
   pluginDirs: [],
@@ -261,6 +263,7 @@ export interface ConfigOverrides {
   reviewers?: string[];
   reviewersDirs?: string[];
   skills?: string[];
+  forceSkills?: string[];
   skillsDirs?: string[];
   plugins?: string[];
   pluginDirs?: string[];
@@ -276,12 +279,17 @@ export interface ConfigOverrides {
 
 export interface LoadConfigOpts {
   cwd?: string;
+  /** Git checkout root for repository config; CLI-relative paths still resolve from cwd. */
+  repoRoot?: string;
   homeOverride?: string;
   cliOverrides?: ConfigOverrides;
+  /** Ignore checkout-local configuration until the gather proves it is unchanged by the PR. */
+  includeRepoConfig?: boolean;
 }
 
 export function loadConfig(opts: LoadConfigOpts = {}): { config: Config; sources: Record<string, string> } {
   const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = opts.repoRoot ?? cwd;
   const home = opts.homeOverride ?? homedir();
   const config: Config = JSON.parse(JSON.stringify(DEFAULTS));
   const sources: Record<string, string> = { defaults: 'built-in' };
@@ -292,9 +300,9 @@ export function loadConfig(opts: LoadConfigOpts = {}): { config: Config; sources
     sources.global = globalPath;
   }
 
-  const repoPath = join(cwd, '.pr-review.yaml');
-  if (existsSync(repoPath)) {
-    applyRaw(config, readYamlFile(repoPath), cwd);
+  const repoPath = join(repoRoot, '.pr-review.yaml');
+  if (opts.includeRepoConfig !== false && existsSync(repoPath)) {
+    applyRaw(config, readYamlFile(repoPath), repoRoot);
     sources.repo = repoPath;
   }
 
@@ -307,6 +315,7 @@ export function loadConfig(opts: LoadConfigOpts = {}): { config: Config; sources
   if (o.reviewersDirs)
     config.reviewersDirs.push(...o.reviewersDirs.map((p) => resolve(cwd, expandHome(p))));
   if (o.skills) config.skills.push(...o.skills.map((p) => resolve(cwd, expandHome(p))));
+  if (o.forceSkills) config.forceSkills.push(...o.forceSkills.map((p) => resolve(cwd, expandHome(p))));
   if (o.skillsDirs) config.skillsDirs.push(...o.skillsDirs.map((p) => resolve(cwd, expandHome(p))));
   if (o.plugins) config.plugins.push(...o.plugins);
   if (o.pluginDirs) config.pluginDirs.push(...o.pluginDirs.map((p) => resolve(cwd, expandHome(p))));
@@ -331,8 +340,10 @@ export function autodiscoveryPaths(cwd: string = process.cwd(), home: string = h
     repoReviewers: [] as string[],
     repoSkills: [
       join(cwd, '.claude', 'skills'),
+      join(cwd, '.claude', 'rules'),
       join(cwd, '.copilot', 'skills'),
       join(cwd, '.github', 'skills'),
+      join(cwd, '.github', 'instructions'),
       join(cwd, '.agents', 'skills'),
     ],
     personalReviewers: [] as string[],

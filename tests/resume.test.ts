@@ -74,6 +74,21 @@ test('resume — reuses on-disk reviewer outputs, posts them, and writes posted.
   }
 });
 
+test('resume — rejects a URL for a different saved PR before any read or write', async () => {
+  const dir = seedRun(ONE);
+  try {
+    const { provider, calls } = fakeProvider();
+    provider.parseUrl = (url: string): PrRef => ({ provider: 'github', url, owner: 'o', repo: 'other', number: 2 });
+    await assert.rejects(
+      runReview({ homeOverride: TEST_HOME, prUrl: 'other', resumeRunId: 'x', runDir: dir, publish: true, provider }),
+      /does not match the PR identity saved/,
+    );
+    assert.equal(calls.batches.length + calls.singles.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('resume — re-reads the PR, so findings the interrupted run already posted are not posted again', async () => {
   // The killer detail from the field incident: gather.existingComments is a
   // snapshot taken BEFORE the first post attempt, so the comments that run
@@ -96,6 +111,44 @@ test('resume — re-reads the PR, so findings the interrupted run already posted
     await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider });
     assert.equal(calls.batches.length, 0, 'nothing to post — the PR already has it');
     assert.equal(calls.singles.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resume — dedupe off still reconciles an exact comment from the interrupted run', async () => {
+  const reviewers = [{
+    name: 'security',
+    findings: [{
+      severity: 'HIGH' as const, title: 'x', body: 'a real finding body', file: 'src/a.ts', line: 3787,
+    }],
+  }];
+  const dir = seedRun(reviewers);
+  try {
+    const { provider, calls } = fakeProvider();
+    provider.fetchExistingComments = async () => [{ ...PUBLISHED, line: 13 }];
+    await runReview({
+      homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir,
+      publish: true, dedupeMode: 'off', provider,
+    });
+    assert.equal(calls.batches.length, 0, 'the exact post-snap comment is never duplicated');
+    assert.equal(calls.singles.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resume — dedupe off does not adopt the same body at a different location', async () => {
+  const dir = seedRun(ONE);
+  try {
+    const { provider, calls } = fakeProvider();
+    provider.fetchExistingComments = async () => [{ ...PUBLISHED, line: 13 }];
+    await runReview({
+      homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir,
+      publish: true, dedupeMode: 'off', provider,
+    });
+    assert.equal(calls.batches.length, 1, 'same text at another line is a distinct finding');
+    assert.equal(calls.batches[0]!.length, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

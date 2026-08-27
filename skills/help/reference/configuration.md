@@ -102,11 +102,19 @@ Repo skills are auto-discovered from standard locations — no config needed —
 | Path | Scope |
 |---|---|
 | `<repo>/.claude/skills/*.md` | Claude Code convention |
+| `<repo>/.claude/rules/*.md` | Claude Code rules (`paths` frontmatter) |
 | `<repo>/.copilot/skills/*.md` | Copilot CLI convention |
 | `<repo>/.github/skills/*.md` | GitHub convention |
+| `<repo>/.github/instructions/*.md` | GitHub instructions (`applyTo` frontmatter) |
 | `<repo>/.agents/skills/*.md` | AGENTS.md convention |
 | `~/.claude/skills/`, `~/.copilot/skills/`, `~/.agents/skills/` | Personal |
 | `~/.pr-review/packs/<name>/` | Skill pack clones (managed by `pr-review packs sync`) |
 | `~/.pr-review/cache/linguist-languages.yml` | GitHub Linguist cache for stack detection (auto-downloaded; refreshed on `packs sync`) |
 
-Existing skills from Claude Code or Copilot CLI work as-is — no copying needed. Per PR, skills matching the changed files become review passes and the rest land in the on-demand `skills-index.md`. To force every skill in a directory into its own pass, point `extra_skills_dirs` (or `--skills-dir` / `PR_REVIEW_SKILLS_DIR`) at it — e.g. `extra_skills_dirs: [.claude/skills]`. Untargeted skills in a home dir are skipped unless pulled in this way.
+Existing skills from Claude Code or Copilot CLI work as-is — no copying needed. `applies_to`, `applyTo`, and `paths` are equivalent scopes; semantically identical mirrors of the same rule dedupe silently, while divergent same-name rules still warn. Per PR, skills matching the changed files become review passes and the rest land in the on-demand `skills-index.md`. To force every skill in a directory into its own pass, point `extra_skills_dirs` (or `--skills-dir` / `PR_REVIEW_SKILLS_DIR`) at it — e.g. `extra_skills_dirs: [~/my-team-rules]`. Untargeted skills in a home dir are skipped unless pulled in this way.
+
+> **Do not point a forced directory at rules the PR under review can edit.** A forced directory bypasses the rule-trust check below, so `extra_skills_dirs: [.claude/skills]` would re-admit in-repo rules that the branch itself authored — the exact input the check exists to reject. Forced directories are for rules that live outside the reviewed repository.
+
+**Scope vs. force.** `--skill <file>` / `extra_skills:` include one file but KEEP its declared `applies_to` / `applyTo` / `paths` scope, so it only applies where it says it does. `--force-skill <file>` is the explicit bypass. Directory-level sources (`extra_skills_dirs`, `--skills-dir`, `PR_REVIEW_SKILLS_DIR`) are forced by definition.
+
+**Rules the PR itself changed are ignored.** A rule file added or modified by the PR under review is untrusted input: it is dropped from both the authoritative context and the on-demand index, and the summary names the lost coverage. That includes in-repo files passed via `--skill`, and a rule whose real path resolves outside the checkout. `--force-skill` is the explicit per-file override, and directory-level forced sources bypass the check by definition — use either knowing what it means.

@@ -50,7 +50,8 @@ program
   .option('--skip <names>', 'Comma-separated pass names to skip (full pack/skill or bare skill name; also: verifier, codex)')
   .option('--reviewer <path...>', 'Include a specific .md file as a reviewer (repeatable)')
   .option('--reviewers-dir <path...>', 'Include a directory of reviewer .md files (repeatable)')
-  .option('--skill <path...>', 'Include a specific .md file as a skill (repeatable)')
+  .option('--skill <path...>', 'Include a specific .md skill; its applyTo/paths scope still applies (repeatable)')
+  .option('--force-skill <path...>', 'Include a specific .md skill regardless of its applyTo/paths scope (repeatable)')
   .option('--skills-dir <path...>', 'Include a directory of skill .md files (repeatable)')
   .option('--plugin <name...>', 'Named plugin to include (resolves from node_modules)')
   .option('--plugin-dir <path...>', 'Packaged plugin directory (has plugin.yaml)')
@@ -84,6 +85,7 @@ program
         reviewer?: string[];
         reviewersDir?: string[];
         skill?: string[];
+        forceSkill?: string[];
         skillsDir?: string[];
         plugin?: string[];
         pluginDir?: string[];
@@ -141,6 +143,7 @@ program
           reviewers: opts.reviewer,
           reviewersDirs: opts.reviewersDir,
           skills: opts.skill,
+          forceSkills: opts.forceSkill,
           skillsDirs: opts.skillsDir,
           plugins: opts.plugin,
           pluginDirs: opts.pluginDir,

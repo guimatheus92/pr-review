@@ -1,12 +1,29 @@
 import { execFileSync } from 'node:child_process';
 import { languageTags, type LinguistIndex } from './linguist.js';
-import { ecosystemTags, isManifest, parseManifest, readDependencyTags } from './manifests.js';
+import {
+  dependencyNameTokens,
+  ecosystemTags,
+  isManifest,
+  parseManifest,
+  parseManifestDependencyGroups,
+  parseManifestTokens,
+  parseJsonDependencyPatch,
+  readDependencyTags,
+} from './manifests.js';
+import { canonicalPrAuthority, canonicalRemoteAuthority } from '../providers/identity.js';
+import type { PrRef } from '../types.js';
 
 export interface StackInfo {
-  /** Language tags from Linguist over the changed paths (names + aliases, lowercase). */
+  /** Canonical language names from Linguist over the changed paths. */
   languages: string[];
   /** Dependency names read from the checkout's manifests + the PR's own manifest diffs (lowercase). */
   dependencies: string[];
+  /** Tokens derived from dependency names, kept separate so selection can distinguish package evidence. */
+  dependencyTokens: string[];
+  /** Per-package token groups used to prevent unrelated dependencies composing a product identity. */
+  dependencyGroups: { dependency: string; tokens: string[] }[];
+  /** Manifest-kind ecosystem tags such as dotnet, nuget, node, and npm. */
+  ecosystems: string[];
   /** languages ∪ dependencies ∪ manifest-ecosystem tags — what skills match against. */
   tags: string[];
   /** Human-readable reasons for anything skipped. */
@@ -20,18 +37,80 @@ export function maskUrl(u: string | null): string | null {
   return u === null ? null : u.replace(/\/\/[^@/]+@/, '//***@');
 }
 
+interface RemoteIdentity {
+  owner: string;
+  project?: string;
+  repo: string;
+}
+
+function identityFromSegments(host: string, segments: string[]): RemoteIdentity | null {
+  const decoded = segments.map((segment) => {
+    try {
+      return decodeURIComponent(segment);
+    } catch {
+      return segment;
+    }
+  });
+  if (host === 'ssh.dev.azure.com' && decoded[0]?.toLowerCase() === 'v3' && decoded.length >= 4) {
+    return { owner: decoded[1]!, project: decoded[2], repo: decoded[3]! };
+  }
+  const gitIndex = decoded.findIndex((segment) => segment.toLowerCase() === '_git');
+  if (gitIndex >= 0) {
+    const repo = decoded[gitIndex + 1];
+    if (!repo) return null;
+    if (host === 'dev.azure.com') {
+      return { owner: decoded[0] ?? '', project: gitIndex >= 2 ? decoded[gitIndex - 1] : undefined, repo };
+    }
+    if (host.endsWith('.visualstudio.com')) {
+      const beforeGit = decoded.slice(0, gitIndex).filter((segment) => segment.toLowerCase() !== 'defaultcollection');
+      return {
+        owner: host.slice(0, -'.visualstudio.com'.length),
+        project: beforeGit.at(-1),
+        repo,
+      };
+    }
+    return { owner: decoded[gitIndex - 2] ?? '', project: decoded[gitIndex - 1], repo };
+  }
+  if (decoded.length < 2) return null;
+  return { owner: decoded.slice(0, -1).join('/'), repo: decoded.at(-1)! };
+}
+
+function remoteIdentity(originUrl: string): RemoteIdentity | null {
+  const cleaned = originUrl.trim().replace(/\.git$/i, '').replace(/\/+$/, '');
+  try {
+    const parsed = new URL(cleaned);
+    return identityFromSegments(parsed.hostname.toLowerCase(), parsed.pathname.split('/').filter(Boolean));
+  } catch {
+    const scp = cleaned.match(/^[^@]+@([^:]+):(.+)$/);
+    if (!scp) return null;
+    return identityFromSegments(scp[1]!.toLowerCase(), scp[2]!.split('/').filter(Boolean));
+  }
+}
+
 /**
  * Only read the checkout's manifests when the checkout IS the PR's repo:
  * origin must end in the repo name and contain every owner segment (GitLab
  * nested namespaces put '/' in owner; ADO origins carry org/project/_git).
  */
-export function cwdMatchesPr(originUrl: string | null, owner: string, repo: string): boolean {
+export function cwdMatchesPr(
+  originUrl: string | null,
+  owner: string,
+  repo: string,
+  project?: string,
+  pr?: Pick<PrRef, 'provider' | 'url' | 'baseUrl' | 'owner' | 'organization' | 'project'>,
+): boolean {
   if (!originUrl) return false;
-  const url = originUrl.trim().toLowerCase().replace(/\.git$/, '').replace(/\/+$/, '');
-  const segs = url.split(/[/:]/).filter(Boolean);
-  if (segs.length === 0) return false;
-  const ownerSegs = owner.toLowerCase().split('/').filter(Boolean);
-  return segs[segs.length - 1] === repo.toLowerCase() && ownerSegs.every((s) => segs.includes(s));
+  const identity = remoteIdentity(originUrl);
+  if (!identity) return false;
+  const sameOwner = identity.owner.toLowerCase() === owner.toLowerCase();
+  const sameRepo = identity.repo.toLowerCase() === repo.toLowerCase();
+  const sameProject = project !== undefined
+    ? identity.project !== undefined && identity.project.toLowerCase() === project.toLowerCase()
+    : identity.project === undefined;
+  const sameAuthority = pr
+    ? canonicalRemoteAuthority(originUrl, pr.provider) === canonicalPrAuthority(pr)
+    : true;
+  return sameOwner && sameRepo && sameProject && sameAuthority;
 }
 
 function defaultGitRemote(cwd: string): string | null {
@@ -64,22 +143,15 @@ export function detectStack(
   opts: {
     linguist: LinguistIndex | null;
     cwd?: string;
-    pr?: { owner: string; repo: string };
+    pr?: Pick<PrRef, 'owner' | 'repo'> & Partial<Pick<PrRef, 'provider' | 'url' | 'baseUrl' | 'organization' | 'project'>>;
     gitRemote?: (cwd: string) => string | null;
     gitToplevel?: (cwd: string) => string | null;
   },
 ): StackInfo {
   const notes: string[] = [];
-  const languages = new Set<string>();
-  if (opts.linguist) {
-    for (const f of changedFiles) {
-      for (const t of languageTags(opts.linguist, f.path)) languages.add(t);
-    }
-  } else {
-    notes.push('Linguist data unavailable — language tags skipped');
-  }
-
   const dependencies = new Set<string>();
+  const dependencyTokens = new Set<string>();
+  const dependencyGroupMap = new Map<string, Set<string>>();
   const ecosystems = new Set<string>();
 
   // The PR's OWN manifest diffs: a PR that adds a framework should get that
@@ -94,28 +166,46 @@ export function detectStack(
       .map((l) => l.slice(1))
       .join('\n');
     if (/\.json$/i.test(base)) {
-      // Added JSON lines are a fragment JSON.parse cannot read — extract
-      // `"name": "version"` pairs (section keys have object values, so they
-      // don't match).
-      for (const m of added.matchAll(/"(@?[a-z0-9][\w./-]*)"\s*:\s*"/gi)) {
-        const dep = m[1]!.toLowerCase();
+      for (const dep of parseJsonDependencyPatch(f.patch)) {
         dependencies.add(dep);
+        const group = dependencyGroupMap.get(dep) ?? new Set<string>();
+        for (const token of dependencyNameTokens(dep)) {
+          dependencyTokens.add(token);
+          group.add(token);
+        }
+        dependencyGroupMap.set(dep, group);
         if (dep.includes('/')) dependencies.add(dep.replace(/^@/, '').split('/')[0]!);
       }
     } else {
       for (const dep of parseManifest(base, added)) dependencies.add(dep);
+      for (const token of parseManifestTokens(base, added)) dependencyTokens.add(token);
+      for (const group of parseManifestDependencyGroups(base, added)) {
+        const existing = dependencyGroupMap.get(group.dependency) ?? new Set<string>();
+        for (const token of group.tokens) existing.add(token);
+        dependencyGroupMap.set(group.dependency, existing);
+      }
     }
   }
 
   let cwdIsPrRepo = false;
   if (opts.cwd && opts.pr) {
     const origin = (opts.gitRemote ?? defaultGitRemote)(opts.cwd);
-    if (cwdMatchesPr(origin, opts.pr.owner, opts.pr.repo)) {
+    const authorityRef = opts.pr.provider && opts.pr.url
+      ? opts.pr as Pick<PrRef, 'provider' | 'url' | 'baseUrl' | 'owner' | 'organization' | 'project'>
+      : undefined;
+    if (cwdMatchesPr(origin, opts.pr.owner, opts.pr.repo, opts.pr.project, authorityRef)) {
       cwdIsPrRepo = true;
       const root = (opts.gitToplevel ?? defaultGitToplevel)(opts.cwd) ?? opts.cwd;
-      const dep = readDependencyTags(root);
+      const dep = readDependencyTags(root, changedFiles.map((file) => file.path));
       for (const d of dep.dependencies) dependencies.add(d);
+      for (const token of dep.tokens) dependencyTokens.add(token);
       for (const e of dep.ecosystems) ecosystems.add(e);
+      for (const group of dep.groups) {
+        const existing = dependencyGroupMap.get(group.dependency) ?? new Set<string>();
+        for (const token of group.tokens) existing.add(token);
+        dependencyGroupMap.set(group.dependency, existing);
+      }
+      notes.push(...dep.warnings.map((warning) => `manifest discovery degraded — ${warning}`));
     } else {
       notes.push(
         `cwd is not a checkout of ${opts.pr.owner}/${opts.pr.repo} (origin: ${maskUrl(origin) ?? 'none'}) — its manifests and skills are not used`,
@@ -123,7 +213,32 @@ export function detectStack(
     }
   }
 
+  const languages = new Set<string>();
+  if (opts.linguist) {
+    const preferredLanguages = new Set([...ecosystems, ...dependencies, ...dependencyTokens]);
+    for (const f of changedFiles) {
+      for (const language of languageTags(opts.linguist, f.path, preferredLanguages)) languages.add(language);
+    }
+  } else {
+    notes.unshift('Linguist data unavailable — language tags skipped');
+  }
+
   const deps = [...dependencies].sort();
-  const tags = [...new Set([...languages, ...deps, ...ecosystems])].sort();
-  return { languages: [...languages].sort(), dependencies: deps, tags, notes, cwdIsPrRepo };
+  const depTokens = [...dependencyTokens].sort();
+  const dependencyGroups = deps.map((dependency) => ({
+    dependency,
+    tokens: [...(dependencyGroupMap.get(dependency) ?? new Set(dependencyNameTokens(dependency)))].sort(),
+  }));
+  const ecosystemList = [...ecosystems].sort();
+  const tags = [...new Set([...languages, ...deps, ...depTokens, ...ecosystemList])].sort();
+  return {
+    languages: [...languages].sort(),
+    dependencies: deps,
+    dependencyTokens: depTokens,
+    dependencyGroups,
+    ecosystems: ecosystemList,
+    tags,
+    notes,
+    cwdIsPrRepo,
+  };
 }

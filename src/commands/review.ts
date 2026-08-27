@@ -1,10 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { runGather } from './gather.js';
-import { runPost } from './post.js';
+import { commentKey, runPost, snapFindingsToDiff } from './post.js';
 import { loadAll } from '../plugins/loader.js';
 import { loadConfig, type ConfigOverrides } from '../config.js';
 import { parseFindingsFile, prepareSessionContext, REVIEWER_OUTPUT_FILES, runSingleSession } from '../dispatch/single-session.js';
+import { applyDiffExclusions } from '../dispatch/diff-filter.js';
 import { selectPasses, type PassRoute } from '../dispatch/pass-select.js';
 import { ensurePacks } from '../packs/sync.js';
 import { loadLinguist } from '../stack/linguist.js';
@@ -17,9 +18,19 @@ import { readPostedMarker, writePostedMarker } from '../util/posted-marker.js';
 import { withRetry } from '../util/retry.js';
 import { resolvePr } from '../providers/index.js';
 import { dedupeAgainstExisting, dedupeWithinBatch } from '../dedupe.js';
-import { detectCompanions, formatWarning } from '../plugins/companions.js';
+import {
+  companionDispatchCount,
+  companionReviewerNames,
+  detectCompanions,
+  formatWarning,
+  type CompanionState,
+} from '../plugins/companions.js';
 import type { PrProvider } from '../providers/types.js';
-import type { Finding, GatherOutput, ReviewerOutput, Severity } from '../types.js';
+import type { Finding, GatherOutput, PrRef, ReviewerOutput, Severity } from '../types.js';
+import { skillsAllowedForCheckout } from '../plugins/trust.js';
+import { canonicalPrAuthority } from '../providers/identity.js';
+import { gitTopLevel } from '../util/git.js';
+import { discoverMcpCapabilities } from '../plugins/installed.js';
 
 interface ReviewCmdOptions {
   prUrl: string;
@@ -27,6 +38,7 @@ interface ReviewCmdOptions {
   reviewers?: string[];
   reviewersDirs?: string[];
   skills?: string[];
+  forceSkills?: string[];
   skillsDirs?: string[];
   plugins?: string[];
   pluginDirs?: string[];
@@ -57,6 +69,9 @@ interface ReviewCmdOptions {
   fromGather?: string;
   /** Test seam — replaces the pass-selection step. */
   selectPassesFn?: typeof selectPasses;
+  /** Test seams — replace external companion discovery/session execution. */
+  detectCompanionsFn?: typeof detectCompanions;
+  runSingleSessionFn?: typeof runSingleSession;
   /** Test seam — isolates config/packs/Linguist from the developer's real home dir. */
   homeOverride?: string;
 }
@@ -94,6 +109,66 @@ export function decideExitCode(
   if (!failOn) return 0;
   const threshold = SEVERITY_RANK[failOn] ?? 0;
   return finalFindings.some((f) => (SEVERITY_RANK[f.severity] ?? 99) <= threshold) ? 1 : 0;
+}
+
+export function safeSummaryValue(value: unknown): string {
+  return [...JSON.stringify(String(value ?? ''))]
+    .map((character) => (/^[A-Za-z0-9 ]$/.test(character) ? character : `&#${character.codePointAt(0)};`))
+    .join('');
+}
+
+export function gatherChangesRepoConfig(gather: GatherOutput): boolean {
+  const isRepoConfig = (path: string | undefined) =>
+    path?.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase() === '.pr-review.yaml';
+  return gather.changedFiles.some((file) => isRepoConfig(file.path) || isRepoConfig(file.previousPath));
+}
+
+export function samePrIdentity(requested: PrRef, saved: PrRef): boolean {
+  const equal = (left: string, right: string) => left.toLowerCase() === right.toLowerCase();
+  if (requested.provider !== saved.provider || !equal(requested.owner, saved.owner)) return false;
+  if (!equal(requested.repo, saved.repo) || requested.number !== saved.number) return false;
+  if (requested.project && saved.project && !equal(requested.project, saved.project)) return false;
+  const requestedAuthority = canonicalPrAuthority(requested);
+  const savedAuthority = canonicalPrAuthority(saved);
+  return requestedAuthority === savedAuthority || (requestedAuthority === null && savedAuthority === null);
+}
+
+export interface CapabilityUsage {
+  reviewer: string;
+  available: string[];
+  attempted: string[];
+  used: string[];
+  notes: string;
+}
+
+export function readCapabilityUsage(files: Record<string, string>): { usage: CapabilityUsage[]; warnings: string[] } {
+  const usage: CapabilityUsage[] = [];
+  const warnings: string[] = [];
+  const strings = (value: unknown): string[] | null =>
+    Array.isArray(value) && value.every((entry) => typeof entry === 'string') ? value : null;
+  for (const [reviewer, path] of Object.entries(files)) {
+    if (!existsSync(path)) {
+      warnings.push(`installed-plugin pass ${safeSummaryValue(reviewer)} produced no MCP usage evidence`);
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+      const available = strings(parsed.available);
+      const attempted = strings(parsed.attempted);
+      const used = strings(parsed.used);
+      if (!available || !attempted || !used) throw new Error('available/attempted/used must be string arrays');
+      usage.push({
+        reviewer,
+        available,
+        attempted,
+        used,
+        notes: typeof parsed.notes === 'string' ? parsed.notes : '',
+      });
+    } catch (error) {
+      warnings.push(`installed-plugin pass ${safeSummaryValue(reviewer)} wrote invalid MCP usage evidence (${safeSummaryValue((error as Error).message)})`);
+    }
+  }
+  return { usage, warnings };
 }
 
 function earlyExitGate(gather: GatherOutput): string | null {
@@ -163,12 +238,21 @@ export function renderSummary(
   degraded?: string[],
 ): string {
   const totalRaw = outputs.reduce((n, o) => n + o.findings.length, 0);
+  const phaseOneHasSevereFinding = outputs.some(
+    (output) =>
+      output.reviewerName !== 'verifier' &&
+      output.reviewerName !== 'codex' &&
+      output.findings.some((finding) => finding.severity === 'CRITICAL' || finding.severity === 'HIGH'),
+  );
+  const verifierSkipped = (output: ReviewerOutput) =>
+    output.reviewerName === 'verifier' && output.findings.length === 0 && !phaseOneHasSevereFinding;
+  const reviewersRun = outputs.filter((output) => !verifierSkipped(output)).length;
   const lines: string[] = [
     `# PR Review Summary`,
     ``,
     `**PR:** ${prUrl}`,
     `**Elapsed:** ${(elapsedMs / 1000).toFixed(1)}s`,
-    `**Reviewers run:** ${outputs.length} | **Raw findings:** ${totalRaw} | **After dedupe:** ${finalFindings.length} | **Dropped:** ${droppedCount}`,
+    `**Reviewers run:** ${reviewersRun} | **Raw findings:** ${totalRaw} | **After dedupe:** ${finalFindings.length} | **Dropped:** ${droppedCount}`,
   ];
   if (postResult) {
     lines.push(
@@ -185,7 +269,16 @@ export function renderSummary(
   }
   lines.push(``, `| Reviewer | Findings | Status |`, `|---|---|---|`);
   for (const o of outputs) {
-    const status = o.exitCode === 0 && !o.error ? '✓' : o.error ? `✗ ${o.error}` : `✗ exit ${o.exitCode}`;
+    let status: string;
+    if (verifierSkipped(o)) {
+      status = 'skipped (no HIGH/CRITICAL)';
+    } else if (o.exitCode === 0 && !o.error) {
+      status = '✓';
+    } else if (o.error) {
+      status = `✗ ${safeSummaryValue(o.error)}`;
+    } else {
+      status = `✗ exit ${o.exitCode}`;
+    }
     lines.push(`| ${o.reviewerName} | ${o.findings.length} | ${status} |`);
   }
   lines.push('');
@@ -193,7 +286,7 @@ export function renderSummary(
   if (degraded && degraded.length > 0) {
     lines.push(
       ``,
-      `> **Degraded:** ${degraded.length} pack/baseline warning(s) — coverage may be reduced:`,
+      `> **Degraded:** ${degraded.length} coverage warning(s):`,
       ...degraded.map((d) => `> - ${d}`),
     );
   }
@@ -221,6 +314,7 @@ function toConfigOverrides(opts: ReviewCmdOptions): ConfigOverrides {
   if (opts.reviewers) o.reviewers = opts.reviewers;
   if (opts.reviewersDirs) o.reviewersDirs = opts.reviewersDirs;
   if (opts.skills) o.skills = opts.skills;
+  if (opts.forceSkills) o.forceSkills = opts.forceSkills;
   if (opts.skillsDirs) o.skillsDirs = opts.skillsDirs;
   if (opts.plugins) o.plugins = opts.plugins;
   if (opts.pluginDirs) o.pluginDirs = opts.pluginDirs;
@@ -280,6 +374,8 @@ export async function finalizeReview(a: {
   passRouting?: PassRoute[];
   /** Pack/baseline degradation notes — surfaced in the summary, not just stderr. */
   degraded?: string[];
+  /** Parseable review completed, but a required operational contract failed. */
+  operationalFailures?: string[];
 }): Promise<ReviewResult> {
   for (const out of a.outputs) {
     try {
@@ -306,8 +402,11 @@ export async function finalizeReview(a: {
   // 56 findings to post when the real run would post none is the same lie, one
   // step earlier.
   let existingComments = a.gather.existingComments;
-  if (a.refreshExisting && a.dedupeMode !== 'off') {
-    const { provider, ref } = resolvePr(a.prUrl, undefined, a.provider);
+  const resumedCommentCounts = new Map<string, number>();
+  let resumePostingShape = intraBatch.kept;
+  if (a.refreshExisting) {
+    const { provider } = resolvePr(a.prUrl, undefined, a.provider);
+    const ref = a.gather.pr;
     try {
       const refreshed = await withRetry(
         () => provider.fetchExistingComments(ref),
@@ -321,9 +420,25 @@ export async function finalizeReview(a: {
       // silently bury the matching security findings. The only comments this
       // refresh needs are the ones an interrupted run of THIS tool wrote, and
       // those are byte-identical to a finding it was about to post.
-      const ourBodies = new Set(a.outputs.flatMap((o) => o.findings).map((f) => f.body.trim()));
+      const reanchor = provider.name === 'github' || provider.name === 'gitlab';
+      resumePostingShape = snapFindingsToDiff(intraBatch.kept, a.gather.changedFiles, reanchor).findings;
+      const pendingKeys = new Set(
+        resumePostingShape
+          .filter((finding) => finding.file && finding.line)
+          .map((finding) => commentKey(finding.file, finding.line, finding.body)),
+      );
       const known = new Set(existingComments.map((c) => c.id));
-      const ours = refreshed.filter((c) => !known.has(c.id) && ourBodies.has(c.body.trim()));
+      const ours = refreshed.filter(
+        (comment) =>
+          !known.has(comment.id) &&
+          !!comment.file &&
+          !!comment.line &&
+          pendingKeys.has(commentKey(comment.file, comment.line, comment.body)),
+      );
+      for (const comment of ours) {
+        const key = commentKey(comment.file, comment.line, comment.body);
+        resumedCommentCounts.set(key, (resumedCommentCounts.get(key) ?? 0) + 1);
+      }
       existingComments = [...existingComments, ...ours];
       process.stderr.write(
         `[review] read ${refreshed.length} comment(s) from the PR; ${ours.length} match a finding this run would post
@@ -346,12 +461,27 @@ export async function finalizeReview(a: {
     }
   }
 
-  const dedupedAgainstExisting = dedupeAgainstExisting(intraBatch.kept, existingComments, a.dedupeMode);
+  const resumeKept: Finding[] = [];
+  const resumeDropped: ReturnType<typeof dedupeAgainstExisting>['dropped'] = [];
+  for (let index = 0; index < intraBatch.kept.length; index++) {
+    const finding = intraBatch.kept[index]!;
+    const postingFinding = resumePostingShape[index] ?? finding;
+    const key = commentKey(postingFinding.file, postingFinding.line, postingFinding.body);
+    const count = resumedCommentCounts.get(key) ?? 0;
+    if (count > 0) {
+      resumedCommentCounts.set(key, count - 1);
+      resumeDropped.push({ finding, reason: 'exact comment from the interrupted run is already on the PR' });
+    } else {
+      resumeKept.push(finding);
+    }
+  }
+
+  const dedupedAgainstExisting = dedupeAgainstExisting(resumeKept, existingComments, a.dedupeMode);
   const finalFindings = dedupedAgainstExisting.kept;
-  const droppedCount = intraBatch.dropped.length + dedupedAgainstExisting.dropped.length;
+  const droppedCount = intraBatch.dropped.length + resumeDropped.length + dedupedAgainstExisting.dropped.length;
   if (droppedCount > 0) {
     process.stderr.write(
-      `[review] dedupe dropped ${droppedCount} finding(s) (${intraBatch.dropped.length} intra-batch, ${dedupedAgainstExisting.dropped.length} vs existing comments)\n`,
+      `[review] dedupe dropped ${droppedCount} finding(s) (${intraBatch.dropped.length} intra-batch, ${resumeDropped.length} resumed, ${dedupedAgainstExisting.dropped.length} vs existing comments)\n`,
     );
   }
   appendProgress(a.outDir, 'dedupe', `${finalFindings.length} kept, ${droppedCount} dropped`);
@@ -409,6 +539,13 @@ export async function finalizeReview(a: {
     process.stderr.write(`[review] --dry-run: skipping post\n`);
   }
 
+  const operationalFailures = [...(a.operationalFailures ?? [])];
+  if (postResult?.verified === false) operationalFailures.push('post outcome could not be verified');
+  if (postResult && postResult.errors.length > 0) {
+    operationalFailures.push(`${postResult.errors.length} finding post(s) failed`);
+  }
+  const hasOperationalFailure = operationalFailures.length > 0;
+
   let summary: string;
   if (a.findingsUnavailable) {
     // A failed pipeline must never mint the done-state artifacts: `status`
@@ -425,7 +562,16 @@ export async function finalizeReview(a: {
     }
     appendProgress(a.outDir, 'error', 'orchestrator produced no parseable findings');
   } else {
-    summary = renderSummary(a.prUrl, a.outputs, finalFindings, droppedCount, Date.now() - a.overallStart, postResult, a.passRouting, a.degraded);
+    summary = renderSummary(
+      a.prUrl,
+      a.outputs,
+      finalFindings,
+      droppedCount,
+      Date.now() - a.overallStart,
+      postResult,
+      a.passRouting,
+      [...(a.degraded ?? []), ...operationalFailures],
+    );
     writeFileSync(join(a.outDir, 'pr-review-summary.md'), summary, 'utf8');
     writeFileSync(
       join(a.outDir, 'pr-review-findings.json'),
@@ -441,12 +587,31 @@ export async function finalizeReview(a: {
       'utf8',
     );
     process.stderr.write(`[review] wrote summary to ${join(a.outDir, 'pr-review-summary.md')}\n`);
-    appendProgress(a.outDir, 'done', `${postResult?.posted ?? 0} posted, ${finalFindings.length} findings`);
+    if (hasOperationalFailure) {
+      const operationalError = ['operational review failure:', ...operationalFailures.map((failure) => `- ${failure}`)].join('\n');
+      writeFileSync(join(a.outDir, ERROR_FILE), operationalError + '\n', 'utf8');
+      appendProgress(a.outDir, 'error', `${operationalFailures.length} operational failure(s)`);
+    } else {
+      try {
+        unlinkSync(join(a.outDir, ERROR_FILE));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw new Error(`could not clear stale ${ERROR_FILE}: ${(error as Error).message}`);
+        }
+      }
+      appendProgress(a.outDir, 'done', `${postResult?.posted ?? 0} posted, ${finalFindings.length} findings`);
+    }
   }
 
-  const exitCode = decideExitCode(a.findingsUnavailable, finalFindings, a.failOn);
+  const exitCode = decideExitCode(a.findingsUnavailable || hasOperationalFailure, finalFindings, a.failOn);
   if (exitCode === 1) {
     process.stderr.write(`[review] --fail-on ${a.failOn}: findings at/above threshold\n`);
+  } else if (exitCode === 2 && hasOperationalFailure) {
+    process.stderr.write('[review] operational review failure; see the summary degradation details\n');
+  } else if (exitCode === 0 && !a.findingsUnavailable && !a.failOn) {
+    process.stderr.write(
+      `[review] ${finalFindings.length} finding(s) retained; exit 0 because --fail-on was not configured\n`,
+    );
   }
   return { outputs: a.outputs, summary, exitCode };
 }
@@ -465,7 +630,20 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   if (!existsSync(gatherPath)) {
     throw new Error(`resume: run ${runId} has no pr-review-gather.json — cannot resume`);
   }
-  const gather = JSON.parse(readFileSync(gatherPath, 'utf8')) as GatherOutput;
+  let gather = JSON.parse(readFileSync(gatherPath, 'utf8')) as GatherOutput;
+  const invocationCwd = process.cwd();
+  const repoRoot = gitTopLevel(invocationCwd) ?? invocationCwd;
+  const cliOverrides = toConfigOverrides(opts);
+  const trustedConfig = loadConfig({
+    cwd: invocationCwd, repoRoot, homeOverride: opts.homeOverride, cliOverrides, includeRepoConfig: false,
+  }).config;
+  const { provider, ref: requestedRef } = resolvePr(opts.prUrl, trustedConfig.hosts, opts.provider);
+  if (!samePrIdentity(requestedRef, gather.pr)) {
+    throw new Error('resume: supplied PR URL does not match the PR identity saved in this run');
+  }
+  if (!gather.pr.project && requestedRef.project) {
+    gather = { ...gather, pr: { ...gather.pr, project: requestedRef.project } };
+  }
 
   let outputs: ReviewerOutput[] | null = null;
   for (const f of REVIEWER_OUTPUT_FILES) {
@@ -487,7 +665,9 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
 
   process.stderr.write(`[review] resuming run ${runId} from ${outDir}\n`);
   appendProgress(outDir, 'resume', `run ${runId}`);
-  const { config } = loadConfig({ cwd: process.cwd(), homeOverride: opts.homeOverride, cliOverrides: toConfigOverrides(opts) });
+  const config = gatherChangesRepoConfig(gather)
+    ? trustedConfig
+    : loadConfig({ cwd: invocationCwd, repoRoot, homeOverride: opts.homeOverride, cliOverrides }).config;
   // The live run persisted routing here; absent (old / pre-0.7 runs) → Skills section omitted.
   let passRouting: PassRoute[] | undefined;
   const routingPath = join(outDir, 'passes.json');
@@ -523,7 +703,7 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     findingsUnavailable: false,
     forcePost: opts.forcePost,
     overallStart,
-    provider: opts.provider,
+    provider,
     passRouting,
   });
 }
@@ -532,8 +712,13 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   if (opts.resumeRunId) return resumeReview(opts);
 
   const overallStart = Date.now();
-  const cwd = process.cwd();
-  const { provider, ref } = resolvePr(opts.prUrl, undefined, opts.provider);
+  const invocationCwd = process.cwd();
+  const cwd = gitTopLevel(invocationCwd) ?? invocationCwd;
+  const cliOverrides = toConfigOverrides(opts);
+  const trustedConfig = loadConfig({
+    cwd: invocationCwd, repoRoot: cwd, homeOverride: opts.homeOverride, cliOverrides, includeRepoConfig: false,
+  }).config;
+  const { provider, ref } = resolvePr(opts.prUrl, trustedConfig.hosts, opts.provider);
   const outDir = opts.runDir ?? ensureRunDir(ref);
   if (opts.runDir) mkdirSync(opts.runDir, { recursive: true });
   process.stderr.write(`[review] run artifacts → ${outDir}\n`);
@@ -545,10 +730,25 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     // best-effort — status falls back to artifact heuristics without it
   }
 
-  const { config } = loadConfig({ cwd, homeOverride: opts.homeOverride, cliOverrides: toConfigOverrides(opts) });
-
   if (opts.fromGather && !opts.dryRun) {
     throw new Error('--from-gather requires --dry-run (offline eval hook; posting from a fabricated gather is not allowed)');
+  }
+
+  let gather = opts.fromGather
+    ? (JSON.parse(readFileSync(opts.fromGather, 'utf8')) as GatherOutput)
+    : await runGather({
+        prUrl: opts.prUrl,
+        useCache: opts.useCache,
+        extraExcludes: trustedConfig.diffExcludes,
+        provider: opts.provider,
+      });
+  const repoConfigChanged = gatherChangesRepoConfig(gather);
+  const config = repoConfigChanged
+    ? trustedConfig
+    : loadConfig({ cwd: invocationCwd, repoRoot: cwd, homeOverride: opts.homeOverride, cliOverrides }).config;
+  gather = { ...gather, changedFiles: applyDiffExclusions(gather.changedFiles, config.diffExcludes) };
+  if (repoConfigChanged) {
+    process.stderr.write('[config] .pr-review.yaml changed by this PR — checkout-local configuration ignored as untrusted\n');
   }
 
   // CLI --skip replaces the config list for the run (same rule the session uses).
@@ -584,46 +784,67 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     : Promise.resolve();
 
   let installedCompanions: string[] = [];
+  let companionState: CompanionState | undefined;
+  let companionDetectionWarning: string | undefined;
   let companionPromise: Promise<void> = Promise.resolve();
   if (config.invokeCompanions || config.companionWarn) {
     companionPromise = (async () => {
       try {
-        const state = await detectCompanions(opts.copilotBinary, runtime);
-        installedCompanions = state.installed;
+        const state = await (opts.detectCompanionsFn ?? detectCompanions)(opts.copilotBinary, runtime);
+        companionState = state;
+        installedCompanions = state.recognized;
+        if (state.detectionError) companionDetectionWarning = `companion detection failed: ${state.detectionError}`;
         if (state.missing.length > 0 && config.companionWarn && !opts.noCompanionWarning) {
           const warn = formatWarning(state.missing);
           if (warn) process.stderr.write(warn + '\n');
         }
       } catch (err) {
-        process.stderr.write(`[companions] detection failed: ${(err as Error).message}\n`);
+        companionDetectionWarning = `companion detection failed: ${(err as Error).message}`;
+        process.stderr.write(`[companions] ${companionDetectionWarning}\n`);
       }
     })();
   }
 
-  const gather = opts.fromGather
-    ? (JSON.parse(readFileSync(opts.fromGather, 'utf8')) as GatherOutput)
-    : await runGather({
-        prUrl: opts.prUrl,
-        useCache: opts.useCache,
-        extraExcludes: config.diffExcludes,
-      });
+  const companionArtifactPath = join(outDir, 'companions.json');
+  const writeCompanionArtifact = (completedReviewers: string[]) => {
+    const plannedReviewers = config.invokeCompanions ? companionReviewerNames(installedCompanions) : [];
+    const counts = new Map<string, number>();
+    for (const name of completedReviewers) counts.set(name, (counts.get(name) ?? 0) + 1);
+    writeFileSync(
+      companionArtifactPath,
+      JSON.stringify(
+        {
+          runtime,
+          enabled: config.invokeCompanions,
+          allInstalled: companionState?.installed ?? [],
+          recognized: installedCompanions,
+          missing: companionState?.missing.map((companion) => companion.id) ?? [],
+          plannedDispatches: plannedReviewers.length,
+          completedDispatches: completedReviewers.length,
+          plannedReviewers,
+          completedReviewers,
+          missingReviewers: plannedReviewers.filter((name) => !counts.has(name)),
+          duplicateReviewers: [...counts.entries()].filter(([, count]) => count > 1).map(([name]) => name),
+          detectionWarning: companionDetectionWarning,
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+  };
+
   writeFileSync(join(outDir, 'pr-review-gather.json'), JSON.stringify(gather, null, 2), 'utf8');
 
   const earlyExitReason = earlyExitGate(gather);
   if (earlyExitReason) {
+    await companionPromise;
+    writeCompanionArtifact([]);
     process.stderr.write(`[review] early exit: ${earlyExitReason}\n`);
-    const summary = [
-      `# PR Review Summary`,
-      ``,
-      `**PR:** ${opts.prUrl}`,
-      ``,
-      `**Early exit — review aborted.**`,
-      ``,
-      earlyExitReason,
-    ].join('\n');
-    writeFileSync(join(outDir, 'pr-review-summary.md'), summary, 'utf8');
-    appendProgress(outDir, 'done', 'early exit');
-    return { outputs: [], summary, exitCode: 0 };
+    const summary = `review prerequisite failed: ${earlyExitReason}`;
+    writeFileSync(join(outDir, ERROR_FILE), summary + '\n', 'utf8');
+    appendProgress(outDir, 'error', 'review prerequisite failed');
+    return { outputs: [], summary, exitCode: 2 };
   }
   appendProgress(outDir, 'gather', `${gather.changedFiles.filter((f) => !f.excluded).length} files`);
 
@@ -637,26 +858,43 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     process.stderr.write(`[packs] cloned ${name} (first use) — refresh later with \`pr-review packs sync\`\n`);
   }
   for (const w of packsResult.warnings) process.stderr.write(w + '\n');
+  const plannedCompanionReviewers = config.invokeCompanions ? companionReviewerNames(installedCompanions) : [];
+  writeCompanionArtifact([]);
   const includeCodex = wantCodex && codexAvailable;
   if (wantCodex && !codexAvailable) {
     process.stderr.write(`[codex] codex CLI not found on PATH — skipping the second-opinion reviewer\n`);
   }
 
   // Every review pass is a skill: user-authored reviewer .md files are never loaded.
-  const loaded = loadAll({ cwd, config, skillsOnly: true, home: opts.homeOverride });
+  const changedPaths = gather.changedFiles.map((file) => file.path);
+  const loaded = loadAll({ cwd, config, skillsOnly: true, home: opts.homeOverride, changedPaths });
+  const untrustedProjectRules = loaded.skippedProjectSkills;
+  if (untrustedProjectRules.length > 0) {
+    process.stderr.write(
+      `[skills] skipped ${untrustedProjectRules.length} project rule(s) changed by this PR — branch-authored instructions are untrusted input\n`,
+    );
+  }
   process.stderr.write(
-    `[review] discovered ${loaded.skills.length + loaded.catalog.length} project skill(s) + ${loaded.packSkills.length} pack skill(s)\n`,
+    `[review] discovered ${loaded.skills.length + loaded.catalog.length} project skill(s) + ${loaded.packSkills.length} pack skill(s) + ${loaded.installedPluginSkills.length} installed-plugin skill(s)\n`,
   );
 
   const inScopeFiles = gather.changedFiles.filter((f) => !f.excluded);
-  const stack = detectStack(inScopeFiles, { linguist, cwd, pr: ref });
+  const stack = detectStack(inScopeFiles, { linguist, cwd, pr: gather.pr });
+  writeFileSync(join(outDir, 'stack.json'), JSON.stringify(stack, null, 2), 'utf8');
   for (const n of stack.notes) process.stderr.write(`[stack] ${n}\n`);
+  const projectEligible = stack.cwdIsPrRepo;
+  const mcpCapabilities = discoverMcpCapabilities({
+    repoRoot: projectEligible ? cwd : undefined,
+    home: opts.homeOverride,
+    plugins: loaded.installedPlugins,
+    changedPaths,
+  });
+  for (const warning of mcpCapabilities.warnings) process.stderr.write(`[mcp] ${warning}\n`);
 
   // The checkout's skills carry authority ONLY when the checkout IS the PR's
   // repo — reviewing repo A from inside repo B must not inject B's rules.
   // Explicitly forced dirs (--skills-dir / extra_skills_dirs) always apply.
-  const projectEligible = stack.cwdIsPrRepo;
-  const skillsForSelection = projectEligible ? loaded.skills : loaded.skills.filter((s) => s.origin === 'forced');
+  const skillsForSelection = skillsAllowedForCheckout(loaded.skills, projectEligible);
   const catalogForSelection = projectEligible ? loaded.catalog : [];
   if (!projectEligible && (loaded.skills.some((s) => s.origin !== 'forced') || loaded.catalog.length > 0)) {
     process.stderr.write(
@@ -668,10 +906,39 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     skills: skillsForSelection,
     catalog: catalogForSelection,
     packSkills: loaded.packSkills,
+    installedPluginSkills: loaded.installedPluginSkills,
     inScopeFiles,
     stackTags: stack.tags,
+    stackEvidence: {
+      languages: stack.languages,
+      ecosystems: stack.ecosystems,
+      dependencies: stack.dependencies,
+      dependencyTokens: stack.dependencyTokens,
+      dependencyGroups: stack.dependencyGroups,
+    },
     baseline: config.skillPacks.flatMap((p) => p.baseline.map((b) => `${p.name}/${b}`)),
+    reviewContext: { repoName: gather.pr.repo, title: gather.metadata.title },
   });
+  const capabilitiesPath = join(outDir, 'capabilities.json');
+  const capabilityBase = {
+      installedPlugins: loaded.installedPlugins.map((plugin) => ({
+        id: plugin.id,
+        version: plugin.version,
+        mcpServers: plugin.mcpServers,
+      })),
+      selectedPluginSkills: selection.passes
+        .filter((pass) => pass.origin === 'plugin')
+        .map((pass) => ({ name: pass.name, mcpServers: pass.mcpServers ?? [] })),
+      mcpServers: mcpCapabilities.servers,
+      warnings: mcpCapabilities.warnings,
+  };
+  const writeCapabilities = (usage: CapabilityUsage[] = [], auditWarnings: string[] = []) =>
+    writeFileSync(
+      capabilitiesPath,
+      JSON.stringify({ ...capabilityBase, usage, warnings: [...capabilityBase.warnings, ...auditWarnings] }, null, 2),
+      'utf8',
+    );
+  writeCapabilities();
   for (const b of selection.missingBaseline) {
     process.stderr.write(
       `[packs] WARNING: baseline skill '${b}' not found after sync — renamed upstream? Run \`pr-review packs sync\` or fix skill_packs[].baseline\n`,
@@ -682,6 +949,17 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   const degraded = [
     ...packsResult.warnings,
     ...selection.missingBaseline.map((b) => `baseline skill '${b}' not found — renamed upstream?`),
+    ...(config.invokeCompanions
+      ? (companionState?.missing ?? []).map(
+          (companion) => `companion plugin '${companion.id}' not installed — ${companionDispatchCount([companion.id])} dispatch(es) skipped`,
+        )
+      : []),
+    ...(companionDetectionWarning ? [companionDetectionWarning] : []),
+    ...mcpCapabilities.warnings,
+    ...(repoConfigChanged ? ['.pr-review.yaml changed by this PR — checkout-local configuration ignored as untrusted'] : []),
+    ...untrustedProjectRules.map(
+      (skill) => `project rule ${safeSummaryValue(skill.name)} changed by this PR — skipped as untrusted review instructions`,
+    ),
   ];
 
   const sessionOpts = {
@@ -700,6 +978,9 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     language: config.language,
     runtime,
     includeCodex,
+    repoRoot: cwd,
+    mcpServers: mcpCapabilities.servers,
+    trustedMcpConfig: mcpCapabilities.trustedRepoConfig,
   };
 
   if (opts.contextOnly) {
@@ -712,6 +993,9 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
       `**Runtime:** ${runtime}`,
       `**Passes to dispatch:** ${ctx.passes.map((p) => p.name).join(', ') || '(none)'}${includeCodex ? ' + codex (sibling process)' : ''}`,
     ];
+    if (repoConfigChanged) {
+      lines.push(``, `> **Degraded:** .pr-review.yaml changed by this PR — checkout-local configuration ignored as untrusted.`);
+    }
     if (ctx.triageSkipped.length > 0) {
       lines.push(`**Skipped by triage (docs-only PR):** ${ctx.triageSkipped.join(', ')}`);
     }
@@ -776,7 +1060,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
 
   process.stderr.write(
     `[review] single-session dispatch: ${sessionCtx.passes.length} pass(es) + verifier + ` +
-      `${config.invokeCompanions ? `${installedCompanions.length} companion(s)` : '0 companions'}` +
+      `${config.invokeCompanions ? `${installedCompanions.length} companion plugin(s), ${companionDispatchCount(installedCompanions)} dispatch(es)` : '0 companion plugins'}` +
       `${includeCodex ? ' + codex' : ''}\n`,
   );
 
@@ -801,13 +1085,48 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     });
   }
 
-  const session = await runSingleSession(sessionOpts, sessionCtx);
+  const session = await (opts.runSingleSessionFn ?? runSingleSession)(sessionOpts, sessionCtx);
 
   const outputs = session.outputs;
+  const capabilityAudit = readCapabilityUsage(sessionCtx.capabilityFiles);
+  degraded.push(...capabilityAudit.warnings);
+  writeCapabilities(capabilityAudit.usage, capabilityAudit.warnings);
+  const plannedPassReviewers = sessionCtx.passes.map((pass) => pass.name);
+  const plannedPassSet = new Set(plannedPassReviewers);
+  const completedPassCounts = new Map<string, number>();
+  for (const output of outputs) {
+    if (plannedPassSet.has(output.reviewerName)) {
+      completedPassCounts.set(output.reviewerName, (completedPassCounts.get(output.reviewerName) ?? 0) + 1);
+    }
+  }
+  const passOperationalFailures = [
+    ...plannedPassReviewers
+      .filter((name) => !completedPassCounts.has(name))
+      .map((name) => `planned pass ${safeSummaryValue(name)} produced no output`),
+    ...[...completedPassCounts.entries()]
+      .filter(([, count]) => count > 1)
+      .map(([name]) => `pass ${safeSummaryValue(name)} produced duplicate outputs`),
+  ];
+  const completedCompanionReviewers = outputs
+    .filter((output) => output.reviewerName.startsWith('companion:'))
+    .map((output) => output.reviewerName);
+  const completedCompanionCounts = new Map<string, number>();
+  for (const name of completedCompanionReviewers) {
+    completedCompanionCounts.set(name, (completedCompanionCounts.get(name) ?? 0) + 1);
+  }
+  const missingCompanionOutputs = plannedCompanionReviewers.filter((name) => !completedCompanionCounts.has(name));
+  const duplicateCompanionOutputs = [...completedCompanionCounts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([name]) => name);
+  const companionOperationalFailures = [
+    ...missingCompanionOutputs.map((name) => `planned companion '${name}' produced no output`),
+    ...duplicateCompanionOutputs.map((name) => `companion '${name}' produced duplicate outputs`),
+  ];
   if (codexPromise) {
     const codexOut = await codexPromise;
     outputs.push(codexOut);
   }
+  writeCompanionArtifact(completedCompanionReviewers);
   appendProgress(outDir, 'dispatch', `done — ${outputs.reduce((n, o) => n + o.findings.length, 0)} raw findings`);
 
   const result = await finalizeReview({
@@ -820,6 +1139,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     dryRun: opts.dryRun,
     failOn: opts.failOn,
     findingsUnavailable: session.findingsUnavailable,
+    operationalFailures: [...passOperationalFailures, ...companionOperationalFailures],
     forcePost: opts.forcePost,
     degraded,
     overallStart,
@@ -827,7 +1147,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     passRouting: sessionCtx.routing,
   });
 
-  if (result.exitCode === 2) {
+  if (session.findingsUnavailable) {
     const codexNote = outputs.some((o) => o.reviewerName === 'codex' && o.findings.length > 0)
       ? ' Codex second-opinion findings were still collected/posted, but a lone sibling pass is not a complete review.'
       : '';

@@ -1,6 +1,6 @@
 ---
 description: Review a GitHub, Azure DevOps, or GitLab pull request using parallel review passes in a single agent session (Copilot CLI or Claude Code) with auto-discovered local skills.
-argument-hint: "<pr-url> [--dry-run | --context-only] [--resume <run-id>] [--skip <pass,...>] [--fail-on <severity>] [--lang <code>] [--runtime <copilot|claude>] [--no-companions] [--no-codex] [--skill <file>] [--skills-dir <path>]"
+argument-hint: "<pr-url> [--dry-run | --context-only] [--resume <run-id>] [--skip <pass,...>] [--fail-on <severity>] [--lang <code>] [--runtime <copilot|claude>] [--no-companions] [--no-codex] [--skill <file>] [--force-skill <file>] [--skills-dir <path>]"
 allowed-tools: ["Bash"]
 ---
 
@@ -43,6 +43,6 @@ React to the `status` exit code:
 - **22** — the run stopped before producing findings. `status` surfaces the recorded fatal error when one exists; report it and point at `~/.pr-review/runs/<run-id>/detached.log`; stop.
 - **1** — run not found: report the error and stop.
 
-Print the review summary verbatim — do not editorialize, summarize, or skip sections. `review --fail-on` exiting 1 means findings at/above that severity were reported, not a tool failure; exit 2 is a pipeline error. All run artifacts (gather data, prompts, raw outputs, findings JSON, the `progress.ndjson` feed, summary) live under `~/.pr-review/runs/<run-id>/`.
+Print the review summary verbatim — do not editorialize, summarize, or skip sections. `review --fail-on` exiting 1 means findings at/above that severity were reported, not a tool failure. Exit 2 is a pipeline error (no parseable findings, zero passes on a code PR) or an operational failure of an otherwise parseable review (failed prerequisite, a planned pass/companion that delivered no output, a post that failed or could not be verified) — `error.txt` in the run dir and the summary's Degraded block say which. Exit 0 means the pipeline completed, not that nothing was found: without `--fail-on`, retained findings still exit 0. All run artifacts (gather data, prompts, raw outputs, findings JSON, the `progress.ndjson` feed, summary) live under `~/.pr-review/runs/<run-id>/`.
 
 Your only job is plumbing. Do not call `gh pr view`, `gh pr diff`, `az repos pr show`, `git log`, or read any PR file. The CLI handles all of that.

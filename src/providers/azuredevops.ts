@@ -137,6 +137,11 @@ export function orgUrlFor(ref: PrRef): string {
   return ref.baseUrl ?? parseAdoUrl(ref.url)?.baseUrl ?? `https://dev.azure.com/${ref.organization}`;
 }
 
+/** Project-omitted ADO URLs are resolved org-wide by PR id; retain the authoritative project for later checkout gating. */
+export function hydrateAdoProject(ref: PrRef, project?: { name?: string | null; id?: string | null }): void {
+  if (!ref.project) ref.project = project?.name ?? project?.id ?? undefined;
+}
+
 /** Exported for tests. azure-devops-node-api surfaces HTTP codes as `statusCode`; check `status` too so a library change cannot silently kill retries. */
 export function isTransientAdoError(err: Error): boolean {
   const e = err as { statusCode?: number; status?: number };
@@ -300,13 +305,17 @@ export class AzureDevOpsProvider implements PrProvider {
   }
 
   /** One PR fetch per (url, number) for the provider instance's lifetime — posting N findings must not re-fetch N times. */
-  private getPr(ref: PrRef): Promise<GitPullRequest> {
+  private async getPr(ref: PrRef): Promise<GitPullRequest> {
     const key = `${orgUrlFor(ref)}#${ref.project ?? ''}#${ref.number}`;
-    let pr = this.prCache.get(key);
-    if (!pr) {
-      pr = this.gitApi(ref).then((git) => git.getPullRequestById(ref.number, ref.project));
-      this.prCache.set(key, pr);
+    let pending = this.prCache.get(key);
+    if (!pending) {
+      pending = this.gitApi(ref).then((git) => git.getPullRequestById(ref.number, ref.project));
+      this.prCache.set(key, pending);
     }
+    const pr = await pending;
+    hydrateAdoProject(ref, pr.repository?.project);
+    const hydratedKey = `${orgUrlFor(ref)}#${ref.project ?? ''}#${ref.number}`;
+    if (hydratedKey !== key && !this.prCache.has(hydratedKey)) this.prCache.set(hydratedKey, pending);
     return pr;
   }
 

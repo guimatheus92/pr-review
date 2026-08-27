@@ -3,18 +3,31 @@ import { dirname } from 'node:path';
 import { resolvePr } from '../providers/index.js';
 import type { GatherOutput } from '../types.js';
 import { applyDiffExclusions, summarizeExclusions } from '../dispatch/diff-filter.js';
+import { lastCommentIdFrom } from '../cache/keys.js';
 import { readGatherCache, writeGatherCache } from '../cache/store.js';
+import type { PrProvider } from '../providers/types.js';
 
 interface GatherCmdOptions {
   prUrl: string;
   outPath?: string;
   extraExcludes?: string[];
   useCache?: boolean;
+  /** Test seam; production resolves the provider from prUrl. */
+  provider?: PrProvider;
+  /** Test seams; production reads and writes the on-disk gather cache. */
+  readGatherCacheFn?: typeof readGatherCache;
+  writeGatherCacheFn?: typeof writeGatherCache;
+}
+
+export function refreshCachedGatherIdentity(gather: GatherOutput, ref: GatherOutput['pr']): GatherOutput {
+  return { ...gather, pr: { ...gather.pr, ...ref } };
 }
 
 export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
   const useCache = opts.useCache ?? true;
-  const { provider, ref } = resolvePr(opts.prUrl);
+  const { provider, ref } = resolvePr(opts.prUrl, undefined, opts.provider);
+  const readCache = opts.readGatherCacheFn ?? readGatherCache;
+  const writeCache = opts.writeGatherCacheFn ?? writeGatherCache;
 
   process.stderr.write(`[gather] fetching metadata for ${ref.provider} PR #${ref.number}…\n`);
   const [metadata, existingComments] = await Promise.all([
@@ -22,22 +35,29 @@ export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
     provider.fetchExistingComments(ref),
   ]);
 
-  if (useCache) {
-    const sortedIds = existingComments
-      .slice()
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-    const lastCommentId = sortedIds.length > 0 ? sortedIds[sortedIds.length - 1]!.id : 'none';
+  const cacheAllowed = useCache && (ref.provider !== 'azuredevops' || ref.project !== undefined);
+  if (useCache && !cacheAllowed) {
+    process.stderr.write('[gather] ADO project could not be resolved — bypassing gather cache to avoid cross-project reuse\n');
+  }
 
-    const hit = readGatherCache(ref, metadata.headSha, lastCommentId);
+  if (cacheAllowed) {
+    const lastCommentId = lastCommentIdFrom(existingComments);
+    const hit = readCache(ref, metadata.headSha, lastCommentId);
     if (hit) {
-      process.stderr.write(
-        `[gather] cache hit (age ${(hit.ageMs / 1000).toFixed(1)}s) — ${hit.path}\n`,
-      );
-      if (opts.outPath) {
-        mkdirSync(dirname(opts.outPath), { recursive: true });
-        writeFileSync(opts.outPath, JSON.stringify(hit.data, null, 2), 'utf8');
+      const legacyFiltered = hit.data.changedFiles.some((file) => file.excluded || file.excludedReason);
+      if (!legacyFiltered) {
+        const cachedRaw = refreshCachedGatherIdentity(hit.data, ref);
+        const cached = { ...cachedRaw, changedFiles: applyDiffExclusions(cachedRaw.changedFiles, opts.extraExcludes) };
+        process.stderr.write(
+          `[gather] cache hit (age ${(hit.ageMs / 1000).toFixed(1)}s) — ${hit.path}\n`,
+        );
+        if (opts.outPath) {
+          mkdirSync(dirname(opts.outPath), { recursive: true });
+          writeFileSync(opts.outPath, JSON.stringify(cached, null, 2), 'utf8');
+        }
+        return cached;
       }
-      return hit.data;
+      process.stderr.write('[gather] filtered legacy cache entry ignored — refetching raw changed files\n');
     }
   }
 
@@ -61,9 +81,9 @@ export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
     gatheredAt: new Date().toISOString(),
   };
 
-  if (useCache) {
+  if (cacheAllowed) {
     try {
-      const cachePath = writeGatherCache(out);
+      const cachePath = writeCache({ ...out, changedFiles: changedFilesRaw });
       process.stderr.write(`[gather] cached at ${cachePath}\n`);
     } catch (err) {
       process.stderr.write(`[gather] cache write failed: ${(err as Error).message}\n`);

@@ -10,6 +10,8 @@ interface Frontmatter {
   appliesTo?: string[] | string;
   // awesome-copilot convention: CSV string of globs (comma-separated) or a list.
   applyTo?: string[] | string;
+  // Claude Code rules convention.
+  paths?: string[] | string;
   tags?: string[] | string;
   model?: string;
   output_format?: 'json' | 'markdown';
@@ -127,7 +129,7 @@ export function loadSkillFile(filePath: string): SkillDefinition {
     description: meta.description ?? firstHeading(body),
     source: filePath,
     body,
-    appliesTo: parseGlobList(meta.applies_to ?? meta.appliesTo ?? meta.applyTo),
+    appliesTo: parseGlobList(meta.applies_to ?? meta.appliesTo ?? meta.applyTo ?? meta.paths),
     tags: parseGlobList(meta.tags),
   };
 }

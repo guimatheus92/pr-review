@@ -9,7 +9,7 @@ description: "pr-review performance optimizations: diff exclusion, file pre-filt
 | # | Optimization | Impact |
 |---|---|---|
 | 1 | **Diff exclusion** — lockfiles, generated code, vendor dirs stripped before any pass sees them | Highest — big PRs are often 80% noise |
-| 2 | **Pass selection** — glob/tag matching against the detected stack picks at most 10 skill passes; everything else goes to the on-demand index instead of a prompt | High — smaller prompts = faster + cheaper |
+| 2 | **Pass selection** — evidence-tiered matching against the detected stack (specific glob > manifest dependency > language-consistent weak glob > tag) picks at most 6 stack passes; everything else goes to the on-demand index instead of a prompt. Baseline pointers are contractual and ride on top of that ceiling, so the real total is typically ~13 | High — smaller prompts = faster + cheaper |
 | 3 | **Single-session dispatch** — one runtime process (copilot or claude) dispatches all passes via `task()` / `Task()` | High — avoids N cold starts (~42% faster) |
 | 4 | **Parallel dispatch** — all passes run concurrently within the session; the optional Codex second-opinion reviewer runs as a sibling process in parallel with the whole session (adds no wall-clock when it's not the slowest) | High — wall-clock = slowest pass, not sum |
 | 5 | **Docs-only triage** — deterministic Node-side triage runs only glob/forced passes (never baseline) when all in-scope files are docs (`**/*.md`, `**/*.txt`, `docs/**`, etc.) | High on docs PRs — skips the baseline passes |

@@ -23,7 +23,7 @@ description: "pr-review companion plugins: pr-review-toolkit and code-review ins
 /plugin install code-review@claude-code-plugins
 ```
 
-Verify with `/plugin list` inside the session, or `copilot plugin list` from bash (the read-only subcommand exists at the bash level for Copilot CLI).
+Verify with `/plugin list` inside the session, or `copilot plugin list` from the shell. A directory under `~/.copilot/installed-plugins/<marketplace>/` can be marketplace cache only; it is not proof of installation unless the plugin appears in the registry/list output.
 
 ## How auto-invocation works
 
@@ -39,7 +39,7 @@ Each companion reviewer is dispatched via `task()` / `Task()` inside the same si
 
 Skill routing note: companion agents receive `skills-all.md` — the union of every review pass's skill body — as reference context alongside the PR context. They keep their own review criteria; the union file is background, not a mandate.
 
-pr-review-toolkit’s six agents each get their own summary row (`companion:pr-review-toolkit/<agent>`); the `code-review` slash companion is one row:
+pr-review-toolkit’s six agents each get their own summary row (`companion:pr-review-toolkit/<agent>`); the `code-review` slash companion is one row. `companions.json` records all installed plugins, recognized companion plugins, missing companions, planned dispatches, and completed output rows. A context-only preview has planned dispatches but zero completed dispatches:
 
 ```
 | Reviewer                    | Findings | Status |
@@ -80,14 +80,14 @@ If a companion's format ever changes and findings stop being extracted, the raw 
 
 ## Warning behavior
 
-If neither companion is installed and `companion_warn` is true (default), `pr-review` prints a one-line install hint to stderr on each run. The hint uses the correct slash-command install syntax. Suppress with `--no-companion-warning` or `PR_REVIEW_NO_COMPANION_WARN=1`.
+If either companion is missing and `companion_warn` is true (default), `pr-review` prints an install hint. Missing companion coverage is also recorded in the summary's Degraded block; suppressing the console hint does not make the missing dispatches invisible.
 
 If a companion **is** installed and `invokeCompanions` is on (default), no warning — it just runs.
 
 ## Verifying
 
 ```bash
-pr-review plugins doctor       # shows install state of each companion
+pr-review doctor               # shows install state and dispatch count of each companion
 pr-review review <url> --dry-run   # runs everything (including companions) but doesn't post
 pr-review review <url> --no-companions --dry-run   # review passes only
 ```

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { CACHE_ROOT, gatherCachePath, lastCommentIdFrom } from './keys.js';
+import { CACHE_ROOT, gatherCachePath, gatherCacheScope, lastCommentIdFrom } from './keys.js';
 import { safeOwner, safeSegment } from '../util/tmp.js';
 import type { GatherOutput, PrRef } from '../types.js';
 
@@ -33,7 +33,7 @@ export function readGatherCache(ref: PrRef, headSha: string, lastCommentId: stri
 }
 
 export function writeGatherCache(gather: GatherOutput): string {
-  const path = gatherCachePath(gather.pr, gather.metadata.headSha, lastCommentIdFrom(gather));
+  const path = gatherCachePath(gather.pr, gather.metadata.headSha, lastCommentIdFrom(gather.existingComments));
   writeJson(path, gather);
   return path;
 }
@@ -73,12 +73,41 @@ export function cacheInfo(): CacheInfo {
   return { root: CACHE_ROOT, totalFiles: files.length, totalBytes, gatherEntries, responseEntries };
 }
 
-export function clearCache(opts: { prRef?: PrRef; clearAll?: boolean }): { removedFiles: number } {
+function cacheTargetMatchesRef(target: string, ref: PrRef): boolean {
+  return walk(target).some((file) => {
+    const cached = readJson<GatherOutput>(file)?.pr;
+    return (
+      cached?.provider === ref.provider &&
+      cached.owner.toLowerCase() === ref.owner.toLowerCase() &&
+      cached.repo.toLowerCase() === ref.repo.toLowerCase() &&
+      cached.number === ref.number
+    );
+  });
+}
+
+export function clearCache(opts: { prRef?: PrRef; clearAll?: boolean; rootOverride?: string }): { removedFiles: number } {
+  const root = opts.rootOverride ?? CACHE_ROOT;
   let target: string;
   if (opts.clearAll) {
-    target = CACHE_ROOT;
+    target = root;
   } else if (opts.prRef) {
-    target = join(CACHE_ROOT, opts.prRef.provider, `${safeOwner(opts.prRef)}__${safeSegment(opts.prRef.repo)}`, String(opts.prRef.number));
+    if (opts.prRef.provider === 'azuredevops' && opts.prRef.project === undefined) {
+      const providerRoot = join(root, opts.prRef.provider);
+      if (!existsSync(providerRoot)) return { removedFiles: 0 };
+      const prefix = `${safeOwner(opts.prRef)}__`;
+      const suffix = `__${safeSegment(opts.prRef.repo)}`;
+      const targets = readdirSync(providerRoot, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && entry.name.startsWith(prefix) && entry.name.endsWith(suffix))
+        .map((entry) => join(providerRoot, entry.name, String(opts.prRef!.number)))
+        .filter((candidate) => cacheTargetMatchesRef(candidate, opts.prRef!));
+      let removedFiles = 0;
+      for (const candidate of targets) {
+        removedFiles += walk(candidate).length;
+        rmSync(candidate, { recursive: true, force: true });
+      }
+      return { removedFiles };
+    }
+    target = join(root, opts.prRef.provider, gatherCacheScope(opts.prRef), String(opts.prRef.number));
   } else {
     return { removedFiles: 0 };
   }

@@ -19,19 +19,25 @@ Node CLI (deterministic plumbing)
   3. ensurePacks() + loadLinguist() → clone missing skill packs, load the Linguist language index (fail-soft, in parallel with gather)
   4. detectCompanions()         → check installed companion plugins (per runtime)
   5. runGather()                → fetch metadata + comments in parallel, diff (cached)
-  6. earlyExitGate()            → abort if PR is malformed/too large
-  7. loadAll({ skillsOnly })    → discover repo skills + pack skills (reviewer .md files are never loaded)
-  8. detectStack()              → Linguist language tags for the changed files + dependency/ecosystem tags from manifests
-  9. selectPasses()             → project skills = context in every pass; passes = pack glob/tag (cap 6) + every baseline; overflow/unmatched/index-mode → skills-index.md
- 10. prepareSessionContext()    → pr-context.md + one pass-<name>.md per pass + skills-all.md + skills-index.md + verifier.md + passes.json
+  6. earlyExitGate()            → abort if PR is malformed/too large (exit 2 + error.txt)
+  7. loadAll({ skillsOnly })    → repo skills + pack skills + installed-plugin skills; rules the PR itself changed are dropped as untrusted
+  8. detectStack()              → canonical Linguist languages + categorized ecosystem/dependency/token evidence from root and changed-file manifests
+  9. selectPasses()             → project skills = context in every pass; passes ranked by evidence tier (glob > dependency > weak glob > tag, cap 6) + every baseline (on top of the cap); overflow/unmatched/index-mode → skills-index.md
+ 10. prepareSessionContext()    → pr-context.md + pass-<name>.md per pass + skills-all.md + skills-index.md + verifier.md + passes.json + stack.json + companions.json (+ capabilities.json / .mcp.json)
  11. runSingleSession()         → one runtime session, one generic agent per pass via task()/Task(); verifier only if Phase 1 has CRITICAL/HIGH
      └─ runCodex()              → optional Codex second-opinion reviewer as a parallel sibling process
  12. dedupe                     → intra-batch + against existing comments
  13. runPost() / renderSummary  → every finding posts inline (snap + re-anchor; GitHub batched review, ADO threads) or print summary
- 14. exit code                  → 0 clean (incl. docs-only with zero passes), 1 findings ≥ --fail-on, 2 no parseable findings or zero passes on a code PR
+ 14. exit code                  → 0 pipeline completed (findings may still be retained — see below), 1 findings ≥ --fail-on,
+                                  2 pipeline OR operational failure (no parseable findings, zero passes on a code PR,
+                                  failed prerequisite, missing/duplicate reviewer or companion output, failed/unverified post)
 ```
 
 A single agent session (Copilot CLI or Claude Code, selected by `--runtime` / `runtime:` / `PR_REVIEW_RUNTIME`, default `auto`) dispatches every review pass and companion plugin via the `task` tool (copilot: `task(agent_type="general-purpose")`) or `Task` tool (claude: `Task(subagent_type="general-purpose")`) — the orchestrator prompt adapts its tool vocabulary to the runtime. There are no built-in reviewer agents: each pass is ONE skill (from a synced skill pack or the repo's own skill dirs) applied by a generic agent that reads its `pass-<name>.md`. Pack passes are named `<pack>/<skill>` (e.g. `awesome-copilot/go`); repo skills keep their plain name. Docs-only PRs run only glob/forced passes (never baseline). The orchestrator prompt instructs the session to launch the passes in parallel, collect their JSON arrays, then write a consolidated findings file — and NOT to read `pr-context.md` itself, keeping the orchestrator's context lean. Existing PR comments inside `pr-context.md` are wrapped in an untrusted-content fence. The verifier survives as a pipeline step: its brief is the `VERIFIER_BRIEF` constant, written to `verifier.md` and dispatched as another generic agent — only when Phase 1 produced at least one CRITICAL/HIGH finding — reading `phase1-findings.json` from the run dir rather than inline-spliced JSON. The Node CLI reads the findings file and handles dedupe + posting; if the orchestrator produced no parseable findings the run exits 2 (never a silent 0).
+
+**Delivery is verified, not assumed.** Every dispatched pass and companion is instructed to write its own `raw-<reviewer>.json` *before returning*, so the run does not depend on the orchestrator surviving long enough to consolidate: if its turn ends after the tasks finish, the CLI recovers from the **complete** set of sidecars, and a partial set still fails closed. Planned companion dispatch names come from `companionReviewerNames()` and are reconciled against what was delivered — a missing or duplicated output, a failed or unverified post, or a failed review prerequisite is an *operational failure*: exit 2 with `error.txt`, named in the summary's Degraded block, and reported by detached `status` as failed rather than done. Findings that did parse still get a diagnostic summary. Conversely, exit 0 without `--fail-on` means the pipeline completed, not that nothing was found — the CLI prints how many findings were retained.
+
+**Untrusted input.** Anything the branch under review authored cannot instruct its own review: a rule file the PR added or modified is dropped from both the authoritative context and the on-demand index (and named as degraded coverage), a changed `.pr-review.yaml` is ignored in favour of the trusted config, and changed repository MCP configuration is refused. `--force-skill` is the explicit per-file override; directory-level forced sources (`--skills-dir`, `extra_skills_dirs`, `PR_REVIEW_SKILLS_DIR`) bypass it too.
 
 When the `codex` CLI is installed, a Codex second-opinion reviewer runs in parallel with the orchestrator session as a sibling process (`codex exec -s read-only --skip-git-repo-check -C <runDir> -o codex-output.txt`) with an adversarial-review prompt reading the same `pr-context.md` plus `skills-all.md` (the union of the pass skill bodies, also read by companion agents and the verifier). Its findings merge into the normal dedupe/post pipeline under reviewer name `codex`. A failed Codex run writes `codex-failure.log` (argv, exit code, full stdout + stderr) to the run dir — `codex-output.txt` is absent on an early exit, so the failure log is the artifact to read. Rationale: a different model family catches what the primary model misses. Opt out with `--no-codex`, `invoke_codex: false`, `PR_REVIEW_NO_CODEX=1`, or `--skip codex`; when codex isn't installed it's silently skipped (with a stderr note).
 
@@ -46,7 +52,7 @@ src/
 ├── dedupe.ts                # Jaccard token similarity, strict/loose/off modes
 ├── types.ts                 # shared types (Finding, ReviewerOutput, GatherOutput, etc.)
 ├── commands/
-│   ├── review.ts            # full pipeline; runReview (+ --resume fast path, finalizeReview tail); exit code (0/1/2)
+│   ├── review.ts            # full pipeline; runReview (+ --resume fast path, finalizeReview tail); exit code (0/1/2) incl. operationalFailures
 │   ├── gather.ts            # fetch PR metadata + comments in parallel → cache → JSON
 │   ├── post.ts              # snapFindingsToDiff (snap + re-anchor: every finding lands inline) + batched posting, reconciled against the PR before any retry/fallback
 │   ├── status.ts            # `status <run-id>`: live progress snapshot / summary / resume hint (--detach poll target)
@@ -63,17 +69,18 @@ src/
 │   ├── github.ts            # @octokit/rest, batched review posting + per-comment retry (inline only — no issue-comment fallback)
 │   ├── azuredevops.ts       # azure-devops-node-api, LCS diff synthesis (per-run PR/git API cache)
 │   ├── gitlab.ts            # plain fetch, per-discussion posting
+│   ├── identity.ts          # canonicalPrAuthority: legacy visualstudio.com / encoded HTTPS / ssh.dev.azure.com remotes → one authority (incl. ADO project)
 │   └── index.ts             # detectProvider(url) switch
 ├── packs/
 │   ├── sync.ts              # ensurePacks (review-time clone-if-missing), `packs sync` clone/pull, staleness tracking
 │   └── load.ts              # enumerate + parse skill files from synced packs (include/exclude globs)
 ├── stack/
 │   ├── linguist.ts          # download/cache GitHub Linguist languages.yml → language tags per changed file
-│   ├── manifests.ts         # dependency names from checkout manifests + ecosystem tags per manifest kind
-│   └── detect.ts            # detectStack: language + dependency + ecosystem tags for the PR
+│   ├── manifests.ts         # dependency names + groups from root manifests AND manifests owning changed files; ecosystem tags per manifest kind
+│   └── detect.ts            # detectStack: categorized language / ecosystem / dependency / token evidence + cwdMatchesPr
 ├── dispatch/
-│   ├── single-session.ts    # prepareSessionContext (pr-context.md + pass-*.md + skills-all.md + skills-index.md + verifier.md + passes.json), PASS_RULES + VERIFIER_BRIEF, orchestrator prompt, runs the runtime (parseFindingsFile is reused by --resume)
-│   ├── pass-select.ts       # selectPasses: project skills → context; pack glob/tag (MAX_STACK_PASSES cap) + baselines always; index overflow
+│   ├── single-session.ts    # prepareSessionContext (pr-context.md + pass-*.md + skills-all.md + skills-index.md + verifier.md + passes.json), PASS_RULES + VERIFIER_BRIEF, orchestrator prompt, runs the runtime; raw-<reviewer>.json sidecar contract + overlayReviewerFiles recovery (parseFindingsFile is reused by --resume)
+│   ├── pass-select.ts       # selectPasses: project skills → context; evidence-tiered pack passes (MAX_STACK_PASSES cap) + baselines on top of the cap; index overflow
 │   ├── skill-match.ts       # name/description relevance heuristic for untargeted repo skills
 │   ├── runtime.ts           # resolveRuntime, runtimeSpawnArgs, taskCall, normalizeModel (copilot | claude | auto)
 │   ├── codex.ts             # optional Codex second-opinion reviewer (sibling process, codex exec)
@@ -83,15 +90,18 @@ src/
 ├── plugins/
 │   ├── loader.ts            # resolve skills from all sources (loadAll has a skillsOnly option, used by review)
 │   ├── builtin.ts           # parse skill .md files: frontmatter + body, name normalization
-│   ├── companions.ts        # detect pr-review-toolkit / code-review installs (copilot plugin list | installed_plugins.json)
+│   ├── trust.ts             # rule files the PR changed are untrusted; only --force-skill overrides
+│   ├── installed.ts         # host-agnostic plugin discovery (Copilot CLI + Claude Code) + the MCP capability inventory
+│   ├── companions.ts        # detect pr-review-toolkit / code-review installs (copilot plugin list | installed_plugins.json); companionReviewerNames = the planned dispatch list
 │   └── types.ts             # PluginManifest, PluginReviewerEntry, PluginSkillEntry
 ├── cache/
 │   ├── store.ts             # disk cache at ~/.pr-review/cache/
-│   └── keys.ts              # key = provider+repo+pr+headSha+lastCommentId
+│   └── keys.ts              # key = provider+scope+pr+headSha+lastCommentId (ADO scope includes the project)
 └── util/
     ├── globs.ts             # minimatch wrapper
     ├── retry.ts             # retry/backoff helper (2s/5s/15s) for transient API errors
     ├── progress.ts          # progress.ndjson feed: appendProgress / readProgress / renderProgressSnapshot
+    ├── git.ts               # gitTopLevel(): resolve the checkout root once, so a run from a subdirectory still finds repo config/rules
     ├── posted-marker.ts     # posted.marker: idempotency guard for --resume re-posts
     └── tmp.ts               # ensureRunDir() + RUNS_ROOT → ~/.pr-review/runs/<id>/
 ```

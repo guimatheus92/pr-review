@@ -4,7 +4,11 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ReviewerDefinition } from '../types.js';
 
-interface CompanionInfo {
+type CompanionDispatch =
+  | { kind: 'agents'; agents: readonly string[] }
+  | { kind: 'slash'; command: string };
+
+export interface CompanionInfo {
   id: string;
   marketplace: string;
   installSlash: string;
@@ -13,6 +17,7 @@ interface CompanionInfo {
   entryCommand: string;
   invocable: boolean;
   invocableReason?: string;
+  dispatch: CompanionDispatch;
 }
 
 export const KNOWN_COMPANIONS: CompanionInfo[] = [
@@ -24,6 +29,17 @@ export const KNOWN_COMPANIONS: CompanionInfo[] = [
     description: 'Comprehensive PR review using six specialized review subagents (comment-analyzer, pr-test-analyzer, silent-failure-hunter, type-design-analyzer, code-reviewer, code-simplifier).',
     entryCommand: '/pr-review-toolkit:review-pr',
     invocable: true,
+    dispatch: {
+      kind: 'agents',
+      agents: [
+        'pr-review-toolkit:code-reviewer',
+        'pr-review-toolkit:code-simplifier',
+        'pr-review-toolkit:comment-analyzer',
+        'pr-review-toolkit:pr-test-analyzer',
+        'pr-review-toolkit:silent-failure-hunter',
+        'pr-review-toolkit:type-design-analyzer',
+      ],
+    },
   },
   {
     id: 'code-review',
@@ -33,8 +49,38 @@ export const KNOWN_COMPANIONS: CompanionInfo[] = [
     description: 'Anthropic\'s code review with 0-100 confidence scoring; only ≥80 are surfaced.',
     entryCommand: '/code-review:code-review',
     invocable: true,
+    dispatch: { kind: 'slash', command: '/code-review:code-review' },
   },
 ];
+
+export function recognizedCompanions(installed: string[]): string[] {
+  const installedSet = new Set(installed);
+  return KNOWN_COMPANIONS.filter((companion) => installedSet.has(companion.id)).map((companion) => companion.id);
+}
+
+function dispatchCount(companion: CompanionInfo): number {
+  if (companion.dispatch.kind === 'agents') return companion.dispatch.agents.length;
+  return 1;
+}
+
+export function companionDispatchCount(installed: string[]): number {
+  const installedSet = new Set(installed);
+  return KNOWN_COMPANIONS.reduce(
+    (count, companion) => count + (installedSet.has(companion.id) ? dispatchCount(companion) : 0),
+    0,
+  );
+}
+
+export function companionReviewerNames(installed: string[]): string[] {
+  const installedSet = new Set(installed);
+  return KNOWN_COMPANIONS.filter((companion) => installedSet.has(companion.id)).flatMap((companion) =>
+    companion.dispatch.kind === 'agents'
+      ? companion.dispatch.agents.map(
+          (agent) => `companion:${companion.id}/${agent.replace(/^[^:]+:/, '')}`,
+        )
+      : [`companion:${companion.id}`],
+  );
+}
 
 const COMPANION_TIMEOUT_MS = 20 * 60 * 1000;
 
@@ -78,8 +124,12 @@ export function discoverCompanionReviewers(opts: {
 }
 
 export interface CompanionState {
+  /** Every plugin reported by the runtime. */
   installed: string[];
+  /** Installed plugins pr-review knows how to dispatch. */
+  recognized: string[];
   missing: CompanionInfo[];
+  detectionError?: string;
 }
 
 function runCopilot(args: string[], copilotBinary = 'copilot', timeoutMs = 30_000): Promise<{ stdout: string; stderr: string; code: number | null }> {
@@ -117,33 +167,40 @@ export function parsePluginListOutput(stdout: string): string[] {
  * companion detection is best-effort and must never crash a review run.
  */
 export function parseInstalledPluginsJson(raw: string): string[] {
+  return parseInstalledPluginsState(raw).installed;
+}
+
+export function parseInstalledPluginsState(raw: string): { installed: string[]; detectionError?: string } {
   try {
     const parsed = JSON.parse(raw) as { plugins?: Record<string, unknown> };
-    if (!parsed || typeof parsed !== 'object' || !parsed.plugins) return [];
-    return Object.keys(parsed.plugins).map((k) => k.split('@')[0]!);
-  } catch {
-    return [];
+    if (!parsed || typeof parsed !== 'object' || !parsed.plugins || typeof parsed.plugins !== 'object') {
+      return { installed: [], detectionError: 'installed_plugins.json has no plugins object' };
+    }
+    return { installed: Object.keys(parsed.plugins).map((k) => k.split('@')[0]!) };
+  } catch (error) {
+    return { installed: [], detectionError: `installed_plugins.json is invalid JSON: ${(error as Error).message}` };
   }
 }
 
-function detectClaudePlugins(): string[] {
+export function detectClaudePlugins(home = homedir()): { installed: string[]; detectionError?: string } {
   try {
-    const raw = readFileSync(join(homedir(), '.claude', 'plugins', 'installed_plugins.json'), 'utf8');
-    return parseInstalledPluginsJson(raw);
+    const raw = readFileSync(join(home, '.claude', 'plugins', 'installed_plugins.json'), 'utf8');
+    return parseInstalledPluginsState(raw);
   } catch (err) {
-    process.stderr.write(
-      `[companions] could not read ~/.claude/plugins/installed_plugins.json (${(err as Error).message.split('\n')[0]}); treating as none installed\n`,
-    );
-    return [];
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { installed: [] };
+    const detectionError = `could not read ~/.claude/plugins/installed_plugins.json (${(err as Error).message.split('\n')[0]})`;
+    process.stderr.write(`[companions] warning: ${detectionError}; installation state unknown\n`);
+    return { installed: [], detectionError };
   }
 }
 
 export async function detectCompanions(binary = 'copilot', runtime: 'copilot' | 'claude' = 'copilot'): Promise<CompanionState> {
   let installed: string[] = [];
+  let detectionError: string | undefined;
   const debug = process.env.PR_REVIEW_DEBUG === '1';
 
   if (runtime === 'claude') {
-    installed = detectClaudePlugins();
+    ({ installed, detectionError } = detectClaudePlugins());
   } else {
     // Skip the --json probe in normal runs; it's not supported in Copilot CLI 1.0.52
     // and just adds a spawn of overhead that has timed out on cold Windows starts.
@@ -154,21 +211,25 @@ export async function detectCompanions(binary = 'copilot', runtime: 'copilot' | 
       );
     }
     if (text.code !== 0) {
-      process.stderr.write(
-        `[companions] warning: \`${binary} plugin list\` failed (exit ${text.code}); treating as none installed.${text.stderr ? ' ' + text.stderr.trim().slice(0, 200) : ''}\n`,
-      );
+      detectionError = `\`${binary} plugin list\` failed (exit ${text.code})`;
+      process.stderr.write(`[companions] warning: ${detectionError}; installation state unknown\n`);
     } else {
       installed = parsePluginListOutput(text.stdout);
+      if (installed.length === 0 && !/Installed plugins:/i.test(text.stdout)) {
+        detectionError = '`copilot plugin list` returned an unrecognized output format';
+        process.stderr.write(`[companions] warning: ${detectionError}; installation state unknown\n`);
+      }
     }
   }
-  const missing = KNOWN_COMPANIONS.filter((c) => !installed.includes(c.id));
-  return { installed, missing };
+  const recognized = recognizedCompanions(installed);
+  const missing = detectionError ? [] : KNOWN_COMPANIONS.filter((c) => !installed.includes(c.id));
+  return { installed, recognized, missing, detectionError };
 }
 
 export function formatWarning(missing: CompanionInfo[]): string {
   if (missing.length === 0) return '';
   const lines = [
-    '⚠ Companion plugins not installed. Once installed, their agents run automatically alongside the built-ins.',
+    '⚠ Companion plugins not installed. Once installed, their agents run automatically alongside selected skill passes.',
     '  Inside a `copilot` session, run these slash commands:',
   ];
   const seenMarketplace = new Set<string>();

@@ -8,7 +8,7 @@ description: "pr-review caching: gather cache, invalidation, bypass flags, and m
 
 | Layer | Location | Key | Invalidation |
 |---|---|---|---|
-| PR metadata (gather) | `~/.pr-review/cache/<provider>/<owner__repo>/<n>/` | `<headSha>-<lastCommentId>.json` | New commit or new comment |
+| PR metadata (gather) | `~/.pr-review/cache/<provider>/<scope>/<n>/` | `<headSha>-<lastCommentId>.json` | New commit or new comment |
 | Linguist languages.yml | `~/.pr-review/cache/linguist-languages.yml` | — (auto-downloaded on first review) | Refreshed by `pr-review packs sync` |
 | Skill pack clones | `~/.pr-review/packs/<name>/` | pack name | `pr-review packs sync` pulls; >30 days without a sync warns on every review |
 | Per-reviewer LLM responses | `~/.pr-review/cache/responses/` | `<reviewer>-<prompt-sha>.json` | **Unused by the single-session review path** — passes run as `task()` agents inside one session, so there is no per-pass response to cache |
@@ -32,5 +32,7 @@ pr-review cache clear --all          # clear everything
 ## Design notes
 
 - Gather cache hits save ~5-10s per run (skips API calls). The key is `headSha` + last comment id, so a new commit or comment auto-busts it.
+- GitHub/GitLab cache scope is `<owner__repo>`. Azure DevOps scope is `<organization__project__repo>`; an unresolved ADO project bypasses the cache rather than sharing data across same-name repositories.
+- Clearing a project-omitted ADO URL removes every project-scoped entry whose cached PR identity matches that organization, repository, and PR number.
 - The per-reviewer response cache was removed; only stale files may remain under `responses/` until `pr-review cache clear`.
 - Run artifacts (orchestrator prompt, `pr-context.md`, per-pass `pass-<name>.md` files, `skills-all.md`, `skills-index.md`, `passes.json`, `phase1-findings.json`, raw outputs, findings JSON, summary) go to `~/.pr-review/runs/<id>/` — these are not cached, just persisted for debugging.

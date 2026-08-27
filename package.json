@@ -1,6 +1,6 @@
 {
   "name": "pr-review",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Generic, plugin-based PR review for GitHub, Azure DevOps, and GitLab. Orchestrates parallel reviewer agents in a single agent session (Copilot CLI or Claude Code) with stack/business-rule skills.",
   "private": true,
   "type": "module",
@@ -11,6 +11,7 @@
     "build": "tsc && npm run bundle",
     "build:watch": "tsc --watch",
     "bundle": "node scripts/bundle.mjs",
+    "dogfood": "node scripts/dogfood.mjs",
     "test": "node scripts/test.mjs",
     "clean": "rimraf dist",
     "prepare": "npm run build"

@@ -16,10 +16,12 @@ export function linguistCachePath(home: string = homedir()): string {
 }
 
 export interface LinguistIndex {
-  /** '.tf' → lowercase tags (language name + aliases), unioned across languages claiming the ext. */
+  /** '.tf' → canonical lowercase language names, unioned across languages claiming the extension. */
   byExt: Map<string, Set<string>>;
-  /** 'dockerfile' → tags, for extension-less well-known filenames. */
+  /** 'dockerfile' → canonical language names, for extension-less well-known filenames. */
   byFilename: Map<string, Set<string>>;
+  /** Canonical language name → lowercase aliases, used only to resolve ambiguous claims. */
+  aliasesByName: Map<string, Set<string>>;
 }
 
 interface RawLang {
@@ -32,40 +34,61 @@ export function parseLinguist(yamlText: string): LinguistIndex {
   const doc = parseYaml(yamlText) as Record<string, RawLang> | null;
   const byExt = new Map<string, Set<string>>();
   const byFilename = new Map<string, Set<string>>();
-  const add = (map: Map<string, Set<string>>, key: string, tags: string[]) => {
+  const aliasesByName = new Map<string, Set<string>>();
+  const add = (map: Map<string, Set<string>>, key: string, language: string) => {
     let set = map.get(key);
     if (!set) {
       set = new Set();
       map.set(key, set);
     }
-    for (const t of tags) set.add(t);
+    set.add(language);
   };
   if (doc && typeof doc === 'object') {
     for (const [name, lang] of Object.entries(doc)) {
       if (!lang || typeof lang !== 'object') continue;
-      const tags = [name, ...(Array.isArray(lang.aliases) ? lang.aliases : [])].map((t) =>
-        String(t).toLowerCase(),
+      const canonical = name.toLowerCase();
+      aliasesByName.set(
+        canonical,
+        new Set((Array.isArray(lang.aliases) ? lang.aliases : []).map((alias) => String(alias).toLowerCase())),
       );
       for (const ext of Array.isArray(lang.extensions) ? lang.extensions : []) {
-        add(byExt, String(ext).toLowerCase(), tags);
+        add(byExt, String(ext).toLowerCase(), canonical);
       }
       for (const fn of Array.isArray(lang.filenames) ? lang.filenames : []) {
-        add(byFilename, String(fn).toLowerCase(), tags);
+        add(byFilename, String(fn).toLowerCase(), canonical);
       }
     }
   }
-  return { byExt, byFilename };
+  return { byExt, byFilename, aliasesByName };
 }
 
-/** Tags for one changed path: filename exact match, then every dotted suffix ('a.cs.pp' → '.cs.pp', '.pp'). */
-export function languageTags(index: LinguistIndex, path: string): string[] {
+/** Canonical languages for one changed path, optionally narrowed by known ecosystem/dependency tags. */
+export function languageTags(index: LinguistIndex, path: string, preferredTags: Iterable<string> = []): string[] {
   const base = path.replace(/\\/g, '/').split('/').pop()!.toLowerCase();
   const out = new Set<string>();
-  for (const t of index.byFilename.get(base) ?? []) out.add(t);
+  const preferred = new Set([...preferredTags].map((tag) => tag.toLowerCase()));
+  const extension = base.includes('.') ? base.split('.').at(-1) : undefined;
+  if (extension) preferred.add(extension);
+  const addCandidates = (candidates: Set<string> | undefined) => {
+    if (!candidates) return;
+    let selected = [...candidates];
+    if (selected.length > 1 && preferred.size > 0) {
+      const supported = selected.filter(
+        (name) => preferred.has(name) || [...(index.aliasesByName.get(name) ?? [])].some((alias) => preferred.has(alias)),
+      );
+      if (supported.length > 0) selected = supported;
+    }
+    for (const name of selected) out.add(name);
+  };
+  const filenameCandidates = index.byFilename.get(base);
+  if (filenameCandidates) {
+    addCandidates(filenameCandidates);
+    return [...out];
+  }
   const parts = base.split('.');
   for (let i = 1; i < parts.length; i++) {
     const suffix = '.' + parts.slice(i).join('.');
-    for (const t of index.byExt.get(suffix) ?? []) out.add(t);
+    addCandidates(index.byExt.get(suffix));
   }
   return [...out];
 }

@@ -1,4 +1,5 @@
 import type { SkillDefinition } from '../types.js';
+import { matchesAny } from '../util/globs.js';
 
 // Relevance heuristic: which untargeted (catalog) skills are worth force-injecting
 // for THIS PR. A skill's name+description is matched against the changed file paths
@@ -37,9 +38,82 @@ function fold(s: string): string {
 }
 
 function tokenize(s: string): string[] {
-  return fold(s)
+  return fold(s.replace(/([a-z0-9])([A-Z])/g, '$1 $2'))
     .split(/[^a-z0-9]+/)
     .filter((t) => t.length >= MIN_TOKEN_LEN);
+}
+
+function identityTokens(s: string): string[] {
+  return fold(s)
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 3 && !PLUGIN_NOISE.has(token));
+}
+
+const PLUGIN_NOISE = new Set([
+  ...STOPWORDS,
+  'create', 'modify', 'manage', 'workflow', 'solution', 'developer', 'installed',
+  'generic', 'existing', 'changes', 'change', 'authoring', 'collection', 'docs',
+  'plugin', 'plugins', 'suite', 'toolkit', 'tools',
+]);
+const REVIEW_INTENT = new Set(['review', 'reviewer', 'audit', 'validate', 'validation', 'testing', 'security', 'quality', 'knowledge']);
+const REVIEW_ACTIVATION = new Set(['review', 'reviewer', 'audit', 'knowledge', 'investigate', 'investigation', 'analyze', 'analysis']);
+
+export interface PluginSkillMatch {
+  skill: SkillDefinition;
+  matchedOn: string[];
+  score: number;
+}
+
+/**
+ * Installed plugins are selected from evidence, not a technology table. A
+ * direct appliesTo match wins. Otherwise two exact topic tokens are required,
+ * except an exact repository-name match, which is strong enough on its own.
+ */
+export function selectRelevantPluginSkills(
+  skills: SkillDefinition[],
+  inScopeFiles: { path: string }[],
+  context: { repoName: string; stackTags: string[]; title?: string },
+): { matched: PluginSkillMatch[]; rest: SkillDefinition[] } {
+  const evidence = new Set(
+    tokenize([
+      context.repoName,
+      context.title ?? '',
+      ...context.stackTags,
+      ...inScopeFiles.map((file) => file.path),
+    ].join(' ')),
+  );
+  const repoTokens = new Set(tokenize(context.repoName));
+  const identityEvidence = new Set(identityTokens([
+    context.repoName,
+    context.title ?? '',
+    ...inScopeFiles.map((file) => file.path),
+  ].join(' ')));
+  const matched: PluginSkillMatch[] = [];
+  const rest: SkillDefinition[] = [];
+  for (const skill of skills) {
+    const globHits = skill.appliesTo.filter((glob) => inScopeFiles.some((file) => matchesAny(file.path, [glob])));
+    const topics = new Set(
+      tokenize(`${skill.name} ${skill.description ?? ''}`)
+        .filter((token) => !PLUGIN_NOISE.has(token)),
+    );
+    const topicHits = [...topics].filter((token) => evidence.has(token)).sort();
+    const repoHit = repoTokens.size > 0 && [...repoTokens].every((token) => topics.has(token));
+    const pluginTokens = identityTokens(skill.plugin ?? '');
+    const pluginHit = pluginTokens.length > 0 && pluginTokens.every((token) => identityEvidence.has(token));
+    const reviewActivation = tokenize(skill.name).some((token) => REVIEW_ACTIVATION.has(token));
+    if (globHits.length === 0 && (!(repoHit && reviewActivation) && (!pluginHit || topicHits.length < 2))) {
+      rest.push(skill);
+      continue;
+    }
+    const intent = [...topics].filter((token) => REVIEW_INTENT.has(token)).length;
+    matched.push({
+      skill,
+      matchedOn: globHits.length > 0 ? globHits : topicHits,
+      score: globHits.length * 100 + topicHits.length * 10 + intent * 20 + (repoHit ? 25 : 0) + (reviewActivation ? 50 : 0),
+    });
+  }
+  matched.sort((left, right) => right.score - left.score || left.skill.name.localeCompare(right.skill.name));
+  return { matched, rest };
 }
 
 /** Split the catalog into skills relevant to the changed files (matched) and the rest. */

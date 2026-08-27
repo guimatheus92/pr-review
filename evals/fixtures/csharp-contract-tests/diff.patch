@@ -1,0 +1,63 @@
+diff --git a/src/Api/WorkspaceController.cs b/src/Api/WorkspaceController.cs
+--- a/src/Api/WorkspaceController.cs
++++ b/src/Api/WorkspaceController.cs
+@@ -8,7 +8,7 @@ public sealed class WorkspaceController
+ {
+-    [ServiceApiAuthorization(Policy = "Catalog.Read", AuthenticationSchemes = "Service,OnBehalfOf")]
+-    [RouteFilter("workspaceResourceId")]
+-    public void Get(Guid workspaceResourceId)
++    [ServiceApiAuthorization(Policy = "Catalog.Write", AuthenticationSchemes = "Service")]
++    [RouteFilter("workspaceId")]
++    public void Get(Guid workspaceId)
+	 {
+	 }
+ }
+diff --git a/tests/ApiContractTests/ApiContractTests.csproj b/tests/ApiContractTests/ApiContractTests.csproj
+new file mode 100644
+--- /dev/null
++++ b/tests/ApiContractTests/ApiContractTests.csproj
+@@ -0,0 +1,16 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup>
++    <TargetFramework>net8.0</TargetFramework>
++    <IsTestProject>true</IsTestProject>
++  </PropertyGroup>
++  <ItemGroup>
++    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
++    <PackageReference Include="MSTest.TestFramework" Version="4.0.0" />
++    <PackageReference Include="MSTest.TestAdapter" Version="4.0.0" />
++  </ItemGroup>
++  <ItemGroup>
++    <ProjectReference Include="../../src/Api/Api.csproj" />
++  </ItemGroup>
++</Project>
+diff --git a/tests/ApiContractTests/WorkspaceControllerContractTests.cs b/tests/ApiContractTests/WorkspaceControllerContractTests.cs
+new file mode 100644
+--- /dev/null
++++ b/tests/ApiContractTests/WorkspaceControllerContractTests.cs
+@@ -0,0 +1,25 @@
++using Microsoft.VisualStudio.TestTools.UnitTesting;
++using System.Reflection;
++using Contoso.Api;
++
++namespace Contoso.Api.Tests;
++
++[TestClass]
++public sealed class WorkspaceControllerContractTests
++{
++    [TestMethod]
++    public void Get_WhenEndpointDeclared_MatchesCurrentMetadata()
++    {
++        var action = typeof(WorkspaceController).GetMethod(nameof(WorkspaceController.Get));
++        Assert.IsNotNull(action);
++
++        var authorization = action.GetCustomAttribute<ServiceApiAuthorizationAttribute>();
++        Assert.IsNotNull(authorization);
++
++        var routeFilter = action.GetCustomAttribute<RouteFilterAttribute>();
++        Assert.IsNotNull(routeFilter);
++
++        var expectedFilterArgument = action.GetParameters()[0].Name;
++        Assert.AreEqual(expectedFilterArgument, routeFilter.ArgumentName);
++    }
++}

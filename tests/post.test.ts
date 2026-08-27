@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { snapFindingsToDiff } from '../src/commands/post.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { commentKey, snapFindingsToDiff } from '../src/commands/post.js';
 import type { ChangedFile, Finding } from '../src/types.js';
 
 const PATCH = [
@@ -15,6 +17,12 @@ const PATCH = [
 const FILES: ChangedFile[] = [
   { path: 'src/a.ts', status: 'modified', additions: 2, deletions: 1, patch: PATCH },
 ];
+
+test('post source — reconciliation delimiters are escaped text, never literal NUL bytes', () => {
+  const source = readFileSync(fileURLToPath(new URL('../src/commands/post.ts', import.meta.url)));
+  assert.equal(source.includes(0), false);
+  assert.equal(commentKey('a.ts', 7, ' body '), ['a.ts', '7', 'body'].join('\0'));
+});
 
 function finding(file?: string, line?: number): Finding {
   return { severity: 'MEDIUM', title: 't', body: 'the body', file, line };
@@ -140,6 +148,43 @@ test('runPost — on publish, a finding the provider cannot place inline becomes
   assert.equal(result.skipped, 0, 'skipped exists only for --dry-run');
   assert.equal(result.errors.length, 1);
   assert.match(result.errors[0].error, /inline/);
+});
+
+test('runPost — posting and reconciliation use the hydrated gather PR project', async () => {
+  const gather = gatherFixture();
+  gather.pr = {
+    provider: 'azuredevops', url: 'https://dev.azure.com/org/_git/r/pullrequest/1',
+    owner: 'org', organization: 'org', project: 'Platform', repo: 'r', number: 1,
+  };
+  const seen: string[] = [];
+  const provider: PrProvider = {
+    name: 'azuredevops', authEnv: () => ({}),
+    parseUrl: (url: string): PrRef => ({
+      provider: 'azuredevops', url, owner: 'org', organization: 'org', repo: 'r', number: 1,
+    }),
+    fetchMetadata: async () => gather.metadata,
+    fetchChangedFiles: async () => [],
+    fetchFullDiff: async () => '',
+    fetchExistingComments: async (ref) => {
+      seen.push(`read:${ref.project}`);
+      return [{
+        id: 'landed', author: 'me', body: 'the body', file: 'src/a.ts', line: 11,
+        createdAt: new Date().toISOString(), source: 'human',
+      }];
+    },
+    postLineComment: async (ref) => {
+      seen.push(`post:${ref.project}`);
+      throw Object.assign(new Error('lost response'), { status: 500 });
+    },
+    isTransientError: () => true,
+  };
+  const result = await runPost({
+    prUrl: gather.pr.url, outputs: wrap([finding('src/a.ts', 11)]), publish: true, gather, provider,
+  });
+  assert.deepEqual(seen, ['post:Platform', 'read:Platform']);
+  assert.equal(result.posted, 1);
+  assert.equal(result.verified, true);
+  assert.equal(result.errors.length, 0);
 });
 
 // ---- reconciliation: the write landed but the response was lost ----

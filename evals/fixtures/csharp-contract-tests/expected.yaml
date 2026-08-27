@@ -1,0 +1,22 @@
+must_find:
+  - "(?=.*authoriz)(?=.*(?:policy|schemes?))(?=.*(?:test|assert))(?=.*(?:only checks|not assert|missing|exact expected|exact value))"
+  - "(?=.*(?:route.?filter|filter))(?=.*(?:argument|parameter))(?=.*(?:deriv|comput|circular))(?=.*(?:expected|oracle|implementation|current))"
+distinct_findings: true
+must_not_find:
+  # Pure naming nitpick only. A finding that cites the convention while making the
+  # circular-assertion point is substantive, not noise, so it must pass through —
+  # the -safe control proves the pipeline discriminates defect from clean code.
+  - "(?=.*(?:test naming convention|MethodName_Condition_Expected))(?!.*(?:itself|circular|tautolog|never fail|no matter how|agrees with))"
+must_dispatch:
+  - csharp-mstest
+  - dotnet-best-practices
+must_not_dispatch:
+  - azure-functions-csharp
+  - azure-durable-functions-csharp
+  - csharp-mcp-server
+  - github-copilot-sdk-c#
+stack:
+  include: ["c#"]
+  exclude: [smalltalk, cake, cakescript, rss, wsdl, xsd]
+dependencies:
+  include: [mstest.testframework, mstest.testadapter]

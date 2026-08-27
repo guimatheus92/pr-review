@@ -16,24 +16,8 @@ import {
 } from './runtime.js';
 import { appendProgress } from '../util/progress.js';
 import type { IndexEntry, PassRoute, ReviewPass } from './pass-select.js';
-
-const COMPANION_DISPATCH = [
-  {
-    pluginId: 'pr-review-toolkit',
-    agents: [
-      'pr-review-toolkit:code-reviewer',
-      'pr-review-toolkit:code-simplifier',
-      'pr-review-toolkit:comment-analyzer',
-      'pr-review-toolkit:pr-test-analyzer',
-      'pr-review-toolkit:silent-failure-hunter',
-      'pr-review-toolkit:type-design-analyzer',
-    ],
-  },
-] as const;
-
-const COMPANION_SLASH = [
-  { pluginId: 'code-review', command: '/code-review:code-review' },
-] as const;
+import { companionReviewerNames, KNOWN_COMPANIONS } from '../plugins/companions.js';
+import type { McpCapability } from '../plugins/installed.js';
 
 export interface SingleSessionOptions {
   prUrl: string;
@@ -59,6 +43,12 @@ export interface SingleSessionOptions {
   runtime?: Runtime;
   /** Accepted for parity with the caller; the codex sibling is wired in review.ts. */
   includeCodex?: boolean;
+  /** Checkout root available to read-only tools and MCPs. */
+  repoRoot?: string;
+  /** Sanitized capability inventory; names and provenance only. */
+  mcpServers?: McpCapability[];
+  /** Unchanged checkout MCP definitions normalized for the isolated runtime. */
+  trustedMcpConfig?: { mcpServers: Record<string, unknown> };
 }
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
@@ -176,6 +166,10 @@ export interface SessionContext {
   skillsFiles: Record<string, string>;
   /** verifier.md — present when the verifier will be dispatched. */
   verifierPath?: string;
+  /** Installed-plugin pass name → MCP usage sidecar the subagent must write. */
+  capabilityFiles: Record<string, string>;
+  /** Phase-1 reviewer name → independently persisted findings array. */
+  reviewerFiles: Record<string, string>;
 }
 
 /** Docs-only PRs run only passes pinned to files (glob) or forced — never baseline noise. */
@@ -205,6 +199,7 @@ function writeContextFile(
     `- **Title:** ${gather.metadata.title}`,
     `- **Author:** ${gather.metadata.author}`,
     `- **Branch:** ${gather.metadata.headBranch} → ${gather.metadata.baseBranch}`,
+    ...(opts.repoRoot ? [`- **Checkout root:** ${opts.repoRoot}`] : []),
     `- **Head SHA:** ${gather.metadata.headSha.slice(0, 12)}`,
     `- **Labels:** ${gather.metadata.labels.length ? gather.metadata.labels.join(', ') : '(none)'}`,
     `- **Draft:** ${gather.metadata.isDraft ? 'yes' : 'no'}`,
@@ -243,6 +238,12 @@ function writeContextFile(
   }
 
   metaLines.push('', `## Stack`, '', `- **Tags:** ${opts.stackTags.length ? opts.stackTags.join(', ') : '(none detected)'}`);
+
+  if ((opts.mcpServers?.length ?? 0) > 0) {
+    metaLines.push('', `## Available MCP Capabilities`, '');
+    for (const server of opts.mcpServers ?? []) metaLines.push(`- ${server.name} (${server.source})`);
+    metaLines.push('', 'Use only read-only inspection/validation tools relevant to your pass. Never claim MCP validation unless a tool call succeeds.');
+  }
 
   metaLines.push('', `## Changed Files (${inScope.length} in scope, ${gather.changedFiles.length - inScope.length} excluded)`);
   for (const f of inScope) {
@@ -289,11 +290,22 @@ export const NO_POSTING_DIRECTIVE =
   'The pr-review CLI is the only thing that posts; your findings JSON is your entire output.';
 
 /** One review pass: a generic agent reads the PR context + the project rules, then applies exactly one skill. */
-function passTaskPrompt(contextPath: string, passPath: string, projectPath: string | undefined): string {
+function passTaskPrompt(
+  contextPath: string,
+  passPath: string,
+  projectPath: string | undefined,
+  outputPath: string,
+  capabilityAudit?: { path: string; reviewer: string; servers: string[] },
+): string {
+  const audit = capabilityAudit
+    ? ` This installed-plugin pass declares MCP servers: ${capabilityAudit.servers.join(', ') || '(none)'}. Use relevant read-only MCP inspection/validation tools when available. Before returning, write a JSON object to \`${capabilityAudit.path}\` using exactly this shape: {"reviewer":"${capabilityAudit.reviewer}","available":["server-name"],"attempted":["server-name"],"used":["server-name"],"notes":"evidence"}. available, attempted, and used MUST be arrays of server-name strings, never booleans. Put a server in attempted only if you called it, and in used only after a successful tool result; otherwise keep those arrays empty.`
+    : '';
   return (
     `Read the PR context at \`${contextPath}\`, then read your review pass at \`${passPath}\` and apply ONLY that pass's rules to the diff.` +
     `${skillsRulesSentence(projectPath)} ` +
-    `Output ONLY a JSON array of findings using the shape: ${OUTPUT_SHAPE}. If you find nothing, output []. No prose. No fences. ` +
+    audit +
+    `Before returning, write your exact JSON findings array to \`${outputPath}\` using the Write or apply_patch tool, even when it is empty. ` +
+    `Then output that same JSON array using the shape: ${OUTPUT_SHAPE}. If you find nothing, write and output []. No prose. No fences. ` +
     NO_POSTING_DIRECTIVE
   );
 }
@@ -317,10 +329,11 @@ function renderProjectFile(skills: SkillDefinition[]): string {
 }
 
 /** Companion agents keep their own criteria; the union skills file is optional context. */
-function companionTaskPrompt(contextPath: string, skillsPath: string | undefined): string {
+function companionTaskPrompt(contextPath: string, skillsPath: string | undefined, outputPath: string): string {
   return (
     `Read the PR context at \`${contextPath}\`.${skillsRulesSentence(skillsPath)} Apply your review criteria. ` +
-    `Output ONLY a JSON array of findings using the shape: ${OUTPUT_SHAPE}. If you find nothing, output []. No prose. No fences. ` +
+    `Before returning, write your exact JSON findings array to \`${outputPath}\` using the Write or apply_patch tool, even when it is empty. ` +
+    `Then output that same JSON array using the shape: ${OUTPUT_SHAPE}. If you find nothing, write and output []. No prose. No fences. ` +
     NO_POSTING_DIRECTIVE
   );
 }
@@ -329,7 +342,7 @@ function renderPassFile(pass: ReviewPass): string {
   let body = pass.body.trim();
   // Only third-party PACK bodies cap: a project skill running as a pass (the
   // skill_packs: [] fallback) carries business rules and must land whole.
-  const isProjectSkill = pass.origin !== undefined && pass.origin !== 'pack';
+  const isProjectSkill = pass.origin === 'repo' || pass.origin === 'explicit' || pass.origin === 'forced';
   if (!isProjectSkill && body.length > PASS_BODY_CAP) {
     body = body.slice(0, PASS_BODY_CAP) + `\n\n[truncated: skill body exceeded ${PASS_BODY_CAP} bytes]`;
     process.stderr.write(
@@ -406,6 +419,9 @@ function renderIndexFile(entries: IndexEntry[]): string {
  */
 export function prepareSessionContext(opts: SingleSessionOptions): SessionContext {
   mkdirSync(opts.outDir, { recursive: true });
+  if (opts.trustedMcpConfig) {
+    writeFileSync(resolve(opts.outDir, '.mcp.json'), JSON.stringify(opts.trustedMcpConfig, null, 2), 'utf8');
+  }
   const contextPath = resolve(opts.outDir, 'pr-context.md');
   const findingsPath = resolve(opts.outDir, 'single-session-findings.json');
   const phase1Path = resolve(opts.outDir, 'phase1-findings.json');
@@ -416,9 +432,18 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
   const skippedByFlag = opts.passes.filter((p) => isSkipped(skip, p.name));
   const afterSkip = opts.passes.filter((p) => !isSkipped(skip, p.name));
   const { dispatch: afterTriage, skipped: triaged } = triagePasses(afterSkip, inScopePaths);
-  // Last line of defence — the selection module already caps, but this file owns the token budget.
-  const passes = afterTriage.slice(0, MAX_TOTAL_PASSES);
-  const capOverflow = afterTriage.slice(MAX_TOTAL_PASSES);
+  // Last line of defence for discretionary passes. Baselines are contractual:
+  // every configured baseline dispatches, even when that takes the total over
+  // the normal prompt-budget ceiling.
+  const isBaseline = (pass: ReviewPass) => pass.baseline ?? pass.matchedBy === 'baseline';
+  const baselineCount = afterTriage.filter(isBaseline).length;
+  const discretionaryBudget = Math.max(0, MAX_TOTAL_PASSES - baselineCount);
+  let admittedDiscretionary = 0;
+  const passes = afterTriage.filter(
+    (pass) => isBaseline(pass) || admittedDiscretionary++ < discretionaryBudget,
+  );
+  const passNames = new Set(passes.map((pass) => pass.name));
+  const capOverflow = afterTriage.filter((pass) => !passNames.has(pass.name));
   if (capOverflow.length > 0) {
     process.stderr.write(
       `[skills] warning: ${capOverflow.length} pass(es) beyond the ${MAX_TOTAL_PASSES}-pass ceiling moved to the on-demand index: ${capOverflow.map((p) => p.name).join(', ')}
@@ -448,10 +473,21 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
   writeContextFile(opts, indexEntries.length > 0 ? { count: indexEntries.length, path: indexPath } : null);
 
   const skillsFiles: Record<string, string> = {};
+  const capabilityFiles: Record<string, string> = {};
+  const reviewerFiles: Record<string, string> = {};
   for (const p of passes) {
     const path = resolve(opts.outDir, `pass-${sanitizeForFilename(p.name)}.md`);
     writeFileSync(path, renderPassFile(p), 'utf8');
     skillsFiles[p.name] = path;
+    reviewerFiles[p.name] = resolve(opts.outDir, `raw-${sanitizeForFilename(p.name)}.json`);
+    if (p.origin === 'plugin') {
+      capabilityFiles[p.name] = resolve(opts.outDir, `capability-${sanitizeForFilename(p.name)}.json`);
+    }
+  }
+  if (opts.invokeCompanions) {
+    for (const name of companionReviewerNames(opts.installedCompanions)) {
+      reviewerFiles[name] = resolve(opts.outDir, `raw-${sanitizeForFilename(name)}.json`);
+    }
   }
   if (projectSkills.length > 0) {
     const projectPath = resolve(opts.outDir, 'skills-project.md');
@@ -502,6 +538,8 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
     passes,
     triageSkipped,
     skillsFiles,
+    capabilityFiles,
+    reviewerFiles,
     wantVerifier,
     verifierPath,
   });
@@ -518,6 +556,8 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
     triageSkipped,
     routing,
     skillsFiles,
+    capabilityFiles,
+    reviewerFiles,
     verifierPath,
   };
 }
@@ -531,6 +571,8 @@ function buildOrchestratorPrompt(
     passes: ReviewPass[];
     triageSkipped: string[];
     skillsFiles: Record<string, string>;
+    capabilityFiles: Record<string, string>;
+    reviewerFiles: Record<string, string>;
     wantVerifier: boolean;
     verifierPath?: string;
   },
@@ -542,25 +584,36 @@ function buildOrchestratorPrompt(
   const companionDispatchLines: string[] = [];
   const companionSlashLines: string[] = [];
   if (opts.invokeCompanions) {
-    for (const c of COMPANION_DISPATCH) {
-      if (!opts.installedCompanions.includes(c.pluginId)) continue;
-      for (const agent of c.agents) {
-        const shortAgent = agent.replace(/^[^:]+:/, '');
-        companionDispatchLines.push(
-          `- ${taskCall(runtime, agent, companionTaskPrompt(ctx.contextPath, authoritativeSkills))} — record as reviewer name \`companion:${c.pluginId}/${shortAgent}\``,
+    for (const companion of KNOWN_COMPANIONS) {
+      if (!opts.installedCompanions.includes(companion.id)) continue;
+      if (companion.dispatch.kind === 'agents') {
+        for (const agent of companion.dispatch.agents) {
+          const shortAgent = agent.replace(/^[^:]+:/, '');
+          const reviewerName = `companion:${companion.id}/${shortAgent}`;
+          const agentType = runtime === 'copilot' ? shortAgent : agent;
+          companionDispatchLines.push(
+            `- ${taskCall(runtime, agentType, companionTaskPrompt(ctx.contextPath, authoritativeSkills, ctx.reviewerFiles[reviewerName]!))} — record as reviewer name \`${reviewerName}\``,
+          );
+        }
+      } else {
+        const command = companion.dispatch.command;
+        const reviewerName = `companion:${companion.id}`;
+        companionSlashLines.push(
+          `- ${taskCall(runtime, GENERIC_AGENT, `Invoke the slash command \`${command} ${opts.prUrl}\` in analysis-only mode. ${NO_POSTING_DIRECTIVE} If the command's own instructions tell you to post a comment or review, SKIP that step and return the review content as output instead. Parse any structured findings into a JSON array using shape ${OUTPUT_SHAPE}. Before returning, write that exact array to \`${ctx.reviewerFiles[reviewerName]}\` using the Write or apply_patch tool, even when it is empty. If no findings, write and output []. Output ONLY the JSON array.`)} — record as reviewer name \`${reviewerName}\``,
         );
       }
-    }
-    for (const c of COMPANION_SLASH) {
-      if (!opts.installedCompanions.includes(c.pluginId)) continue;
-      companionSlashLines.push(
-        `- ${taskCall(runtime, GENERIC_AGENT, `Invoke the slash command \`${c.command} ${opts.prUrl}\` in analysis-only mode. ${NO_POSTING_DIRECTIVE} If the command's own instructions tell you to post a comment or review, SKIP that step and return the review content as output instead. Parse any structured findings into a JSON array using shape ${OUTPUT_SHAPE}. If no findings, output []. Output ONLY the JSON array.`)} — record as reviewer name \`companion:${c.pluginId}\``,
-      );
     }
   }
 
   const passDispatchLines = ctx.passes.map((p) => {
-    return `- ${taskCall(runtime, GENERIC_AGENT, passTaskPrompt(ctx.contextPath, ctx.skillsFiles[p.name]!, ctx.skillsFiles['project']))} — record as reviewer name \`${p.name}\``;
+    const capabilityPath = ctx.capabilityFiles[p.name];
+    return `- ${taskCall(runtime, GENERIC_AGENT, passTaskPrompt(
+      ctx.contextPath,
+      ctx.skillsFiles[p.name]!,
+      ctx.skillsFiles['project'],
+      ctx.reviewerFiles[p.name]!,
+      capabilityPath ? { path: capabilityPath, reviewer: p.name, servers: p.mcpServers ?? [] } : undefined,
+    ))} — record as reviewer name \`${p.name}\``;
   });
 
   const allParallel = [...passDispatchLines, ...companionDispatchLines, ...companionSlashLines];
@@ -685,6 +738,62 @@ export function parseFindingsFile(path: string, model: string, durationMs: numbe
   }));
 }
 
+function parseReviewerFiles(
+  files: Record<string, string>,
+  model: string,
+  durationMs: number,
+): { outputs: ReviewerOutput[]; complete: boolean; missing: string[]; invalid: string[] } {
+  const outputs: ReviewerOutput[] = [];
+  const missing: string[] = [];
+  const invalid: string[] = [];
+  const entries = Object.entries(files);
+  for (const [reviewerName, path] of entries) {
+    if (!existsSync(path)) {
+      missing.push(reviewerName);
+      continue;
+    }
+    try {
+      const rawOutput = readFileSync(path, 'utf8');
+      const parsed = JSON.parse(rawOutput) as unknown;
+      if (!Array.isArray(parsed)) throw new Error('expected a JSON array');
+      const findings = parseReviewerOutput(rawOutput, 'json');
+      if (parsed.length > 0 && findings.length === 0) throw new Error('array contains no valid findings');
+      outputs.push({ reviewerName, model, findings, rawOutput, durationMs, exitCode: 0 });
+    } catch {
+      invalid.push(reviewerName);
+    }
+  }
+  return {
+    outputs,
+    complete: entries.length > 0 && outputs.length === entries.length,
+    missing,
+    invalid,
+  };
+}
+
+function overlayReviewerFiles(
+  outputs: ReviewerOutput[],
+  files: Record<string, string>,
+  model: string,
+  durationMs: number,
+): ReviewerOutput[] {
+  const individual = parseReviewerFiles(files, model, durationMs);
+  if (!individual.complete) return outputs;
+  const byName = new Map(individual.outputs.map((output) => [output.reviewerName, output]));
+  const seen = new Set<string>();
+  const overlaid = outputs.map((output) => {
+    const replacement = byName.get(output.reviewerName);
+    if (!replacement) return output;
+    seen.add(output.reviewerName);
+    return replacement;
+  });
+  for (const output of individual.outputs) {
+    if (!seen.has(output.reviewerName)) overlaid.push(output);
+  }
+  process.stderr.write(`[single-session] verified ${individual.outputs.length} reviewer output(s) from raw sidecars\n`);
+  return overlaid;
+}
+
 /**
  * The verifier is a conditional pass (only on CRITICAL/HIGH), so its absence is
  * normal. But when severe findings ARE present and no verifier entry made it
@@ -750,7 +859,12 @@ async function attemptOrchestrator(
 ): Promise<SingleSessionResult> {
   const start = Date.now();
 
-  for (const stale of [ctx.findingsPath, ctx.phase1Path]) {
+  for (const stale of [
+    ctx.findingsPath,
+    ctx.phase1Path,
+    ...Object.values(ctx.reviewerFiles ?? {}),
+    ...Object.values(ctx.capabilityFiles ?? {}),
+  ]) {
     try {
       if (existsSync(stale)) unlinkSync(stale);
     } catch {
@@ -765,6 +879,7 @@ async function attemptOrchestrator(
     promptBody: ctx.orchestratorPrompt,
     timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     addDir: opts.outDir,
+    repoRoot: opts.repoRoot,
   });
 
   const durationMs = Date.now() - start;
@@ -779,6 +894,7 @@ async function attemptOrchestrator(
     // file that EXISTS but is corrupt.
     if (!finalExists) throw new Error('consolidated findings file was not written');
     outputs = parseFindingsFile(ctx.findingsPath, model, durationMs);
+    outputs = overlayReviewerFiles(outputs, ctx.reviewerFiles ?? {}, model, durationMs);
     warnIfVerifierMissing(outputs);
   } catch (err) {
     if (finalExists) {
@@ -792,6 +908,7 @@ async function attemptOrchestrator(
     // can be absent from it.
     try {
       outputs = parseFindingsFile(ctx.phase1Path, model, durationMs);
+      outputs = overlayReviewerFiles(outputs, ctx.reviewerFiles ?? {}, model, durationMs);
       process.stderr.write(
         finalExists
           ? `[single-session] salvaged findings from ${ctx.phase1Path}\n`
@@ -799,23 +916,39 @@ async function attemptOrchestrator(
       );
       warnIfVerifierMissing(outputs);
     } catch {
-      // Salvage 2: the orchestrator sometimes prints the JSON instead of writing it.
-      const salvaged = parseReviewerOutput(childResult.stdout, 'json');
-      if (salvaged.length > 0) {
-        outputs = [
-          {
-            reviewerName: 'orchestrator',
-            model,
-            findings: salvaged,
-            rawOutput: '',
-            durationMs,
-            // Findings were recovered; the stderr salvage note is the signal, not a ✗.
-            exitCode: 0,
-          },
-        ];
-        process.stderr.write(`[single-session] salvaged ${salvaged.length} finding(s) from orchestrator stdout\n`);
+      // Salvage 2: every phase-1 reviewer writes its own sidecar before
+      // returning. This survives a coordinator turn ending after all tasks
+      // complete but before it assembles the consolidated file.
+      const individual = parseReviewerFiles(ctx.reviewerFiles ?? {}, model, durationMs);
+      if (individual.outputs.length > 0) {
+        outputs = individual.outputs;
+        findingsUnavailable = !individual.complete;
+        const safeNames = (names: string[]) => names.map((name) => JSON.stringify(name)).join(', ');
+        process.stderr.write(
+          `[single-session] recovered ${individual.outputs.length}/${Object.keys(ctx.reviewerFiles ?? {}).length} reviewer output(s) from raw sidecars` +
+            `${individual.missing.length ? `; missing: ${safeNames(individual.missing)}` : ''}` +
+            `${individual.invalid.length ? `; invalid: ${safeNames(individual.invalid)}` : ''}\n`,
+        );
+        warnIfVerifierMissing(outputs);
       } else {
-        findingsUnavailable = true;
+        // Salvage 3: the orchestrator sometimes prints the JSON instead of writing it.
+        const salvaged = parseReviewerOutput(childResult.stdout, 'json');
+        if (salvaged.length > 0) {
+          outputs = [
+            {
+              reviewerName: 'orchestrator',
+              model,
+              findings: salvaged,
+              rawOutput: '',
+              durationMs,
+              // Findings were recovered; the stderr salvage note is the signal, not a ✗.
+              exitCode: 0,
+            },
+          ];
+          process.stderr.write(`[single-session] salvaged ${salvaged.length} finding(s) from orchestrator stdout\n`);
+        } else {
+          findingsUnavailable = true;
+        }
       }
     }
   }
@@ -851,13 +984,14 @@ function spawnRuntime(args: {
   promptBody: string;
   timeoutMs: number;
   addDir: string;
+  repoRoot?: string;
 }): Promise<SpawnResult> {
   assertSafeArg('runtime binary', args.binary);
   assertSafeArg('model', args.model);
   assertSafeArg('add-dir', args.addDir);
   return new Promise((resolve) => {
-    const argv = runtimeSpawnArgs(args.runtime, args.model, args.addDir);
-    const child = spawnCli(args.binary, argv, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const argv = runtimeSpawnArgs(args.runtime, args.model, args.addDir, args.repoRoot);
+    const child = spawnCli(args.binary, argv, { stdio: ['pipe', 'pipe', 'pipe'], cwd: args.addDir });
 
     let stdout = '';
     let stderr = '';

@@ -4,6 +4,8 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-09-01
+
 ### Added
 - **Node-owned resilient reviewer delivery:** description-bearing runtime calls write attempt-scoped exact `Finding[]` JSON; Node promotes write-once canonical sidecars, assembles Phase 1/final output, gates a direct verifier, and records reviewer-level progress. One automatic selective recovery retries only unresolved reviewers; `--resume` gets the bounded final targeted attempt.
 - Schema-v1 runs persist HMAC-authenticated plan, delivery, Codex, and posting authority under `~/.pr-review/control/`, with repairable diagnostic mirrors in the run dir. State binds PR/config/bundle/input hashes, attempts, canonical digests, and sticky dry-run/publish mode.

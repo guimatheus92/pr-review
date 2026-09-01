@@ -247,6 +247,11 @@ for (const scenario of [
   test(`finalizeReview — ${scenario.name} is an operational failure`, async () => {
     const id = `finalize-post-${scenario.readFails ? 'unverified' : 'failed'}-test`;
     const dir = seedRun(id);
+    // Without homeOverride, finalizeReview takes its lease under the real
+    // ~/.pr-review/control/ and leaves the directory behind on the developer's
+    // machine every test run. (`control.key` itself comes from status.test.ts,
+    // which needs the real home because runStatus resolves RUNS_ROOT itself.)
+    const home = mkdtempSync(join(tmpdir(), 'finalize-post-home-'));
     try {
       const outputs: ReviewerOutput[] = [{
         reviewerName: 'p/one', model: 'm', rawOutput: '', durationMs: 0, exitCode: 0,
@@ -257,6 +262,7 @@ for (const scenario of [
         dedupeMode: 'strict', publish: true, dryRun: false,
         findingsUnavailable: false, overallStart: Date.now(),
         provider: failingPostProvider(scenario.readFails),
+        homeOverride: home,
       });
 
       assert.equal(result.exitCode, 2);
@@ -269,6 +275,7 @@ for (const scenario of [
       assert.equal(runStatus(basename(dir)).state, 'failed');
     } finally {
       rmSync(dir, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
     }
   });
 }

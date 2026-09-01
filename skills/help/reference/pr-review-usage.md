@@ -59,7 +59,7 @@ Posting line comments back to the PR is the default. Add `--dry-run` to preview 
 
 The run also reports which skills it used: a progress brief at dispatch (`N pass(es) · M project rule(s) · K on-demand`, on stderr / `detached.log` and the live `status` feed) and a `## Skills` section in the final summary — a totals line (`**Passes:** N · **Project rules (in every pass):** M · **On-demand (index):** K`) plus a `| Pass | Matched by |` table and the project rules listed by name. Index (on-demand) skills are counted, not listed by name.
 
-Exit codes: `0` pipeline completed with no finding at/above a configured threshold (without `--fail-on`, findings may still be retained), `1` findings at/above `--fail-on` survived dedupe, `2` incomplete delivery or another operational failure. `status` exit 21 means authenticated recovery is available; `--resume` retries only incomplete schema-v1 coverage and keeps dry-run/publish mode sticky. Legacy Phase 1 is dry-run diagnostic evidence only.
+Exit codes: `0` pipeline completed with no finding at/above a configured threshold (without `--fail-on`, findings may still be retained), `1` findings at/above `--fail-on` survived dedupe, `2` incomplete delivery or another operational failure. `status` exit 21 means authenticated recovery is available; `--resume` retries only incomplete schema-v1 coverage; resuming a *complete* dry run without `--dry-run` posts what it previewed, while an incomplete one is refused. Legacy Phase 1 is dry-run diagnostic evidence only.
 
 ## Add or remove review content
 
@@ -76,7 +76,7 @@ Most review knowledge comes from skill packs (git repos under `~/.pr-review/pack
 | `--context-only` | Prepare `pr-context.md` + the pass files and print the detected stack + passes table, without spawning the runtime (exits 2 if a code PR gets zero passes) |
 | `--runtime <name>` | `copilot`\|`claude`\|`auto` — which agent CLI hosts the session (default `auto`) |
 | `--no-codex` | Skip the Codex second-opinion reviewer |
-| `--resume <run-id>` | Reuse authenticated complete output or make the final targeted attempt for incomplete schema-v1 coverage; never changes execution mode |
+| `--resume <run-id>` | Reuse authenticated complete output or make the final targeted attempt for incomplete schema-v1 coverage; drop `--dry-run` on a complete run to post what it previewed |
 | `--lang <code>` | Language for finding titles/bodies (default `en`) |
 | `--fail-on <severity>` | Exit 1 if findings at/above this severity survive dedupe (`critical`\|`high`\|`medium`\|`low`\|`nit`) |
 | `--skip <names>` | Comma-separated pass names to skip — full (`awesome-copilot/go`) or bare suffix (`go`); also `verifier`, `codex` |

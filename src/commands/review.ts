@@ -166,8 +166,7 @@ function metadataMatchesPlan(live: GatherOutput['metadata'], plan: DispatchPlan)
     live.headBranch === plan.metadata.headBranch &&
     live.baseBranch === plan.metadata.baseBranch &&
     live.state === plan.metadata.state &&
-    live.isDraft === plan.metadata.isDraft &&
-    live.state === 'open';
+    live.isDraft === plan.metadata.isDraft;
 }
 
 async function validateRecoveryPreconditions(args: {
@@ -177,9 +176,25 @@ async function validateRecoveryPreconditions(args: {
   state: DeliveryState;
   provider: PrProvider;
   recoveryNeeded: boolean;
-}): Promise<void> {
+}): Promise<{ promotingDryRunToPublish: boolean }> {
   const requested = requestedExecutionMode(args.opts);
-  if (requested.dryRun !== args.plan.execution.dryRun || requested.publish !== args.plan.execution.publish) {
+  // Previewing with --dry-run and then posting what you saw is the point of a dry
+  // run, so dry-run → publish is allowed — but ONLY on a complete delivery, which
+  // keeps the real invariant ("partial findings never post") intact. The reverse
+  // (publish → dry-run) stays refused: that run may already have posted.
+  const promotingDryRunToPublish =
+    args.plan.execution.dryRun && !requested.dryRun && requested.publish;
+  if (promotingDryRunToPublish) {
+    if (args.recoveryNeeded) {
+      throw new Error(
+        'resume recovery refused [incomplete-promotion]: this dry-run delivery is incomplete — ' +
+        'finish it with --dry-run first, then resume without --dry-run to publish',
+      );
+    }
+  } else if (
+    requested.dryRun !== args.plan.execution.dryRun ||
+    requested.publish !== args.plan.execution.publish
+  ) {
     throw new Error(
       `resume recovery refused [mode-mismatch]: this run is sticky ` +
       `${args.plan.execution.dryRun ? 'dry-run' : 'publish'} and cannot change execution mode`,
@@ -200,10 +215,17 @@ async function validateRecoveryPreconditions(args: {
   if (!metadataMatchesPlan(live, args.plan)) {
     throw new Error('resume recovery refused [stale-pr]: PR head/base/branches/state/draft no longer match the saved dispatch plan');
   }
+  // Only a *posting* resume needs the PR still open. Requiring it unconditionally
+  // killed dry-run resume on every merged/closed PR — including the merged-PR
+  // dogfood flow — and reported it as "stale" even when every field matched.
+  if (requested.publish && live.state !== 'open') {
+    throw new Error(`resume recovery refused [pr-not-open]: cannot publish to a ${live.state} PR`);
+  }
   const recoverablePendingCodex = args.state.codex?.state === 'pending' && args.state.codex.attempts > 0;
   if (args.recoveryNeeded && args.state.kind === 'terminal-incomplete' && !recoverablePendingCodex) {
     throw new Error(`resume recovery refused [attempts-exhausted]: ${args.state.reasonCodes.join(', ') || 'delivery is terminal'}`);
   }
+  return { promotingDryRunToPublish };
 }
 
 export interface CapabilityUsage {
@@ -796,7 +818,9 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     }
     const state = repairDeliveryStateMirror(stateMirrorPath, authoritativeStatePath, plan);
     const recoveryNeeded = state.kind !== 'complete';
-    await validateRecoveryPreconditions({ opts, outDir, plan, state, provider, recoveryNeeded });
+    const { promotingDryRunToPublish } = await validateRecoveryPreconditions({
+      opts, outDir, plan, state, provider, recoveryNeeded,
+    });
     process.stderr.write(
       recoveryNeeded
         ? `[review] resume: ${state.valid.length}/${state.planned.length} reviewers delivered; re-dispatching unresolved only\n`
@@ -878,8 +902,10 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
       outputs: session.outputs,
       refreshExisting: true,
       dedupeMode: plan.execution.dedupeMode,
-      publish: plan.execution.publish,
-      dryRun: plan.execution.dryRun,
+      // The saved mode is authoritative EXCEPT for the one transition the guard
+      // above admits: a complete dry-run the caller asked to publish.
+      publish: promotingDryRunToPublish || plan.execution.publish,
+      dryRun: promotingDryRunToPublish ? false : plan.execution.dryRun,
       failOn: plan.execution.failOn,
       findingsUnavailable: session.findingsUnavailable,
       deliveryState: session.deliveryState,

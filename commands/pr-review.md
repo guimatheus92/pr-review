@@ -39,7 +39,7 @@ React to the `status` exit code:
 
 - **0** — done. The final summary can be 10–20 KB and **background/monitor notifications truncate long text — never reproduce the summary from a notification**. Read `~/.pr-review/runs/<run-id>/pr-review-summary.md` (on exit 0 `status` also prints `summary file: <path>` on stderr), or re-run `node "$CLI" status <run-id>` once in the foreground, and print that full content verbatim. Then stop.
 - **20** — still running: show the snapshot, then poll again.
-- **21** — authenticated delivery is incomplete or the parent stopped before finalization. Run the exact recovery command printed by `status` (it includes `--dry-run` for a sticky dry-run); it reuses valid attempts and dispatches only incomplete coverage. Print the returned summary verbatim.
+- **21** — authenticated delivery is incomplete or the parent stopped before finalization. Run the exact recovery command printed by `status` (it includes `--dry-run` when the run was a dry run); it reuses valid attempts and dispatches only incomplete coverage. Print the returned summary verbatim.
 - **22** — terminal pipeline/operational failure. `status` surfaces the authenticated reason and recorded error; report it and point at `~/.pr-review/runs/<run-id>/detached.log`; stop.
 - **1** — run not found: report the error and stop.
 

@@ -8,12 +8,17 @@ import { writePostedMarker } from '../src/util/posted-marker.js';
 import { controlDirForRun, RUNS_ROOT } from '../src/util/tmp.js';
 import { prepareSessionContext, resumePlannedSession } from '../src/dispatch/single-session.js';
 import {
+  artifactState,
+  assembleConsolidated,
+  assemblePhase1,
   attemptOutputPath,
   createDeliveryState,
   inspectReviewerDelivery,
+  reconcileDeliveryCompletion,
   writeDeliveryState,
 } from '../src/dispatch/delivery.js';
-import type { Finding, PrRef } from '../src/types.js';
+import { sha256File } from '../src/util/atomic-json.js';
+import type { Finding, GatherOutput, PrRef } from '../src/types.js';
 import type { BatchComment, PrProvider } from '../src/providers/types.js';
 import { runStatus } from '../src/commands/status.js';
 
@@ -72,10 +77,18 @@ function seedRun(reviewers: Array<{ name: string; findings: Finding[] }>): strin
   return dir;
 }
 
-function seedPlannedPartialRun(underRunsRoot = false) {
+function seedPlannedPartialRun(
+  underRunsRoot = false,
+  execution: { dryRun: boolean; publish: boolean; dedupeMode: 'strict' | 'loose' | 'off' } =
+    { dryRun: true, publish: false, dedupeMode: 'strict' },
+  metadataState: GatherOutput['metadata']['state'] = 'open',
+) {
   if (underRunsRoot) mkdirSync(RUNS_ROOT, { recursive: true });
   const dir = mkdtempSync(join(underRunsRoot ? RUNS_ROOT : tmpdir(), 'pr-resume-planned-'));
   const gather = gatherFixture();
+  // A PR that was ALREADY merged when the run was gathered: plan and live agree,
+  // so nothing is stale — only publishing should care that it is closed.
+  gather.metadata = { ...gather.metadata, state: metadataState };
   writeFileSync(join(dir, 'pr-review-gather.json'), JSON.stringify(gather), 'utf8');
   const controlDir = controlDirForRun(dir, TEST_HOME);
   const ctx = prepareSessionContext({
@@ -93,7 +106,7 @@ function seedPlannedPartialRun(underRunsRoot = false) {
     controlDir,
     invokeCompanions: false,
     runtime: 'copilot',
-    execution: { dryRun: true, publish: false, dedupeMode: 'strict' },
+    execution,
   });
   const plan = ctx.dispatchPlan!;
   writeFileSync(plan.reviewers[0]!.canonicalOutputPath, '[]', 'utf8');
@@ -115,6 +128,40 @@ function seedPlannedPartialRun(underRunsRoot = false) {
       rmSync(controlDir, { recursive: true, force: true });
     },
   };
+}
+
+/** Turn a seeded partial run into a COMPLETE one: every planned reviewer valid. */
+function completeSeededDelivery(seeded: ReturnType<typeof seedPlannedPartialRun>): void {
+  const { plan } = seeded;
+  writeFileSync(
+    plan.reviewers[1]!.canonicalOutputPath,
+    JSON.stringify([{ severity: 'MEDIUM', title: 'promoted', body: 'a preview finding worth posting', file: 'src/a.ts', line: 11 }]),
+    'utf8',
+  );
+  const inventory = inspectReviewerDelivery(
+    Object.fromEntries(plan.reviewers.map((reviewer) => [reviewer.name, reviewer.canonicalOutputPath])),
+    plan.model,
+    0,
+  );
+  const state = createDeliveryState(plan, inventory);
+  state.reviewerAttempts['pack/valid'] = 1;
+  state.reviewerAttempts['pack/missing'] = 1;
+  // Same finishing sequence the live path runs, so state.kind really is 'complete'
+  // rather than a hand-set flag that the guard would be right to distrust.
+  assemblePhase1(plan.phase1Path, inventory);
+  state.phase1 = 'valid';
+  state.phase1Digest = sha256File(plan.phase1Path);
+  state.verifier = { state: 'skipped-no-severe', phase1Digest: state.phase1Digest, attempts: 0 };
+  assembleConsolidated(plan.findingsPath, inventory.outputs, undefined);
+  state.consolidated = artifactState(plan.findingsPath);
+  state.consolidatedDigest = sha256File(plan.findingsPath);
+  reconcileDeliveryCompletion(plan, state);
+  assert.equal(state.kind, 'complete', 'the seed must be a genuinely complete delivery');
+  writeDeliveryState(
+    state,
+    join(seeded.dir, 'delivery-state.json'),
+    join(controlDirForRun(seeded.dir, TEST_HOME), 'delivery-state.json'),
+  );
 }
 
 function enableCodexOnSeed(seeded: ReturnType<typeof seedPlannedPartialRun>) {
@@ -683,8 +730,10 @@ test('resume — pending final Codex attempt is adopted before terminal exhausti
 
 for (const scenario of [
   {
-    name: 'execution mode changes',
-    expected: /mode-mismatch/,
+    // dry-run → publish is allowed, but not while delivery is still incomplete:
+    // that is the "partial findings never post" invariant, and it survives.
+    name: 'an INCOMPLETE dry-run is promoted to publish',
+    expected: /incomplete-promotion/,
     mutate: (_seeded: ReturnType<typeof seedPlannedPartialRun>, _provider: PrProvider) => ({ dryRun: false, publish: true }),
   },
   {
@@ -750,3 +799,87 @@ for (const scenario of [
     }
   });
 }
+
+test('resume — a COMPLETE dry-run is promoted to publish and actually posts', async () => {
+  const seeded = seedPlannedPartialRun();
+  completeSeededDelivery(seeded);
+  try {
+    const { provider, calls } = fakeProvider();
+    let spawns = 0;
+    const result = await runReview({
+      homeOverride: TEST_HOME,
+      prUrl: 'u',
+      resumeRunId: 'x',
+      runDir: seeded.dir,
+      dryRun: false,
+      publish: true,
+      provider,
+      resumePlannedSessionFn: async () => {
+        spawns++;
+        throw new Error('a complete delivery must not re-dispatch');
+      },
+    });
+    assert.equal(spawns, 0, 'promotion replays saved output; it never re-reviews');
+    assert.equal(result.exitCode, 0);
+    assert.ok(calls.batches.length + calls.singles.length > 0, 'the previewed finding is posted');
+    assert.ok(existsSync(join(seeded.dir, 'posted.marker')), 'a publish attempt always writes the marker');
+  } finally {
+    seeded.cleanup();
+  }
+});
+
+test('resume — publish can never be demoted to dry-run', async () => {
+  const seeded = seedPlannedPartialRun(false, { dryRun: false, publish: true, dedupeMode: 'strict' });
+  completeSeededDelivery(seeded);
+  try {
+    await assert.rejects(
+      runReview({
+        homeOverride: TEST_HOME,
+        prUrl: 'u',
+        resumeRunId: 'x',
+        runDir: seeded.dir,
+        dryRun: true,
+        publish: false,
+        provider: fakeProvider().provider,
+      }),
+      /mode-mismatch/,
+    );
+  } finally {
+    seeded.cleanup();
+  }
+});
+
+test('resume — a dry-run resume works on an already-merged PR; only publishing requires it open', async () => {
+  const seeded = seedPlannedPartialRun(false, { dryRun: true, publish: false, dedupeMode: 'strict' }, 'merged');
+  completeSeededDelivery(seeded);
+  const merged = seeded.gather.metadata;
+  try {
+    const dryRunProvider = fakeProvider().provider;
+    dryRunProvider.fetchMetadata = async () => merged;
+    const result = await runReview({
+      homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: seeded.dir,
+      dryRun: true, publish: false, provider: dryRunProvider,
+    });
+    assert.equal(result.exitCode, 0, 'nothing is stale — a merged PR is fine to re-summarize');
+  } finally {
+    seeded.cleanup();
+  }
+});
+
+test('resume — promoting to publish on a merged PR is refused as not-open, not as stale', async () => {
+  const seeded = seedPlannedPartialRun(false, { dryRun: true, publish: false, dedupeMode: 'strict' }, 'merged');
+  completeSeededDelivery(seeded);
+  try {
+    const provider = fakeProvider().provider;
+    provider.fetchMetadata = async () => seeded.gather.metadata;
+    await assert.rejects(
+      runReview({
+        homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: seeded.dir,
+        dryRun: false, publish: true, provider,
+      }),
+      /pr-not-open/,
+    );
+  } finally {
+    seeded.cleanup();
+  }
+});

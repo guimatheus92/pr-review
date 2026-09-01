@@ -1,14 +1,20 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   isTransientOrchestratorFailure,
+  prepareSessionContext,
+  resumePlannedSession,
   runSingleSession,
   type SessionContext,
   type SingleSessionOptions,
 } from '../src/dispatch/single-session.js';
+import { attemptOutputPath, verifierAttemptOutputPath } from '../src/dispatch/delivery.js';
+import { sha256File } from '../src/util/atomic-json.js';
+import { readReviewerProgress } from '../src/dispatch/reviewer-progress.js';
+import { createDeliveryState, inspectReviewerDelivery, promoteReviewerAttempt, writeDeliveryState } from '../src/dispatch/delivery.js';
 
 // spawnRuntime's resolved shape — the seam the fake must satisfy.
 type SpawnResult = { stdout: string; stderr: string; exitCode: number };
@@ -195,4 +201,224 @@ test('runSingleSession — clears stale raw reviewer sidecars before dispatch', 
   assert.equal(result.findingsUnavailable, true);
   assert.equal(result.outputs.length, 0);
   assert.equal(existsSync(ctx.reviewerFiles.quality!), false);
+});
+
+test('runSingleSession — exit 0 with 18/22 sidecars selectively recovers four, preserves valid outputs, then verifies HIGH', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-review-planned-recovery-'));
+  try {
+    const reviewerNames = Array.from({ length: 22 }, (_, index) => `pack/reviewer-${String(index + 1).padStart(2, '0')}`);
+    const gather = {
+      pr: { provider: 'github' as const, url: 'https://github.com/o/r/pull/1', owner: 'o', repo: 'r', number: 1 },
+      metadata: {
+        title: 'Test PR', description: 'A complete description.', author: 'tester',
+        headSha: 'abcdef1234567890', baseSha: '1234567890abcdef', baseBranch: 'main', headBranch: 'feature',
+        labels: [], linkedItems: [], createdAt: '', updatedAt: '', isDraft: false, state: 'open' as const,
+      },
+      changedFiles: [{ path: 'src/app.ts', status: 'modified' as const, additions: 1, deletions: 0, patch: '@@ -1 +1 @@\n-old\n+new' }],
+      fullDiff: '', existingComments: [], gatheredAt: '',
+    };
+    const opts = {
+      prUrl: gather.pr.url,
+      gather,
+      passes: reviewerNames.map((name) => ({
+        name, source: `/${name}.md`, body: 'Review carefully.', matchedBy: 'baseline' as const, matchedOn: [], baseline: true,
+      })),
+      indexEntries: [], stackTags: ['typescript'], installedCompanions: [], skipReviewers: [],
+      outDir: dir, invokeCompanions: false, runtime: 'copilot' as const,
+    };
+    const ctx = prepareSessionContext(opts);
+    const plan = ctx.dispatchPlan!;
+    const missing = new Set(reviewerNames.slice(18));
+    let calls = 0;
+    let firstHashes = new Map<string, string>();
+    const prompts: string[] = [];
+
+    const result = await runSingleSession(opts, ctx, async (args) => {
+      calls++;
+      prompts.push(args.promptBody);
+      assert.equal(args.repoRoot, undefined, 'planned runtimes are confined to materialized run artifacts');
+      if (calls === 1) {
+        for (const [index, reviewer] of plan.reviewers.entries()) {
+          if (missing.has(reviewer.name)) continue;
+          writeFileSync(
+            attemptOutputPath(reviewer, 1),
+            JSON.stringify(index === 0
+              ? [{ severity: 'HIGH', title: 'real risk', body: 'fix this', file: 'src/app.ts', line: 1 }]
+              : []),
+          );
+        }
+        assert.equal(existsSync(plan.phase1Path), false, 'partial delivery never creates Phase 1');
+        return { stdout: 'DONE', stderr: '', exitCode: 0 };
+      }
+      if (calls === 2) {
+        firstHashes = new Map(
+          plan.reviewers.slice(0, 18).map((reviewer) => [reviewer.name, sha256File(reviewer.canonicalOutputPath)]),
+        );
+        for (const reviewer of plan.reviewers.filter((entry) => missing.has(entry.name))) {
+          writeFileSync(attemptOutputPath(reviewer, 2), '[]');
+        }
+        assert.equal(existsSync(plan.phase1Path), false, 'recovery output is promoted before aggregation');
+        return { stdout: 'DONE', stderr: '', exitCode: 0 };
+      }
+      assert.equal(calls, 3, 'the third and final runtime is the direct verifier');
+      assert.ok(!args.promptBody.includes('task('), 'the verifier is the runtime session, not a nested task');
+      writeFileSync(verifierAttemptOutputPath(plan.verifier, 1), '[]');
+      return { stdout: '[]', stderr: '', exitCode: 0 };
+    });
+
+    assert.equal(calls, 3);
+    assert.equal(result.findingsUnavailable, false);
+    assert.equal(result.deliveryState?.kind, 'complete');
+    assert.equal(result.deliveryState?.valid.length, 22);
+    assert.equal(result.deliveryState?.verifier.state, 'valid');
+    assert.deepEqual(
+      plan.reviewers.slice(0, 18).map((reviewer) => sha256File(reviewer.canonicalOutputPath)),
+      plan.reviewers.slice(0, 18).map((reviewer) => firstHashes.get(reviewer.name)),
+      'the automatic recovery does not touch already-valid sidecars',
+    );
+    for (const name of reviewerNames.slice(0, 18)) assert.ok(!prompts[1]!.includes('record as reviewer name `' + name + '`'));
+    for (const name of reviewerNames.slice(18)) assert.ok(prompts[1]!.includes('record as reviewer name `' + name + '`'));
+    const phase1 = JSON.parse(readFileSync(plan.phase1Path, 'utf8')) as { reviewers: Array<{ name: string }> };
+    const consolidated = JSON.parse(readFileSync(plan.findingsPath, 'utf8')) as { reviewers: Array<{ name: string }> };
+    assert.deepEqual(phase1.reviewers.map((reviewer) => reviewer.name), reviewerNames);
+    assert.deepEqual(consolidated.reviewers.map((reviewer) => reviewer.name), [...reviewerNames, 'verifier']);
+    const events = readReviewerProgress(dir);
+    const kinds = events.map((event) => event.kind);
+    assert.ok(kinds.includes('session-attempt-started'));
+    assert.ok(kinds.includes('output-first-seen'));
+    assert.ok(kinds.includes('output-promoted'));
+    assert.ok(kinds.includes('recovery-started'));
+    assert.ok(kinds.includes('recovery-completed'));
+    assert.ok(kinds.includes('phase1-assembled'));
+    assert.ok(kinds.includes('verifier-started'));
+    assert.ok(kinds.includes('verifier-completed'));
+    assert.ok(kinds.includes('consolidated-assembled'));
+    assert.equal(events.filter((event) => event.kind === 'output-promoted').length, 22);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runSingleSession — selective recovery rejects mutation of an already-valid canonical sidecar', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-review-planned-tamper-'));
+  try {
+    const gather = {
+      pr: { provider: 'github' as const, url: 'https://github.com/o/r/pull/1', owner: 'o', repo: 'r', number: 1 },
+      metadata: {
+        title: 'Test PR', description: 'A complete description.', author: 'tester',
+        headSha: 'abcdef', baseSha: '123456', baseBranch: 'main', headBranch: 'feature',
+        labels: [], linkedItems: [], createdAt: '', updatedAt: '', isDraft: false, state: 'open' as const,
+      },
+      changedFiles: [{ path: 'src/app.ts', status: 'modified' as const, additions: 1, deletions: 0, patch: '@@ -1 +1 @@\n-old\n+new' }],
+      fullDiff: '', existingComments: [], gatheredAt: '',
+    };
+    const opts = {
+      prUrl: gather.pr.url, gather,
+      passes: ['valid', 'missing'].map((name) => ({
+        name, source: `/${name}.md`, body: 'review', matchedBy: 'baseline' as const, matchedOn: [], baseline: true,
+      })),
+      indexEntries: [], stackTags: [], installedCompanions: [], skipReviewers: [],
+      outDir: dir, invokeCompanions: false, runtime: 'copilot' as const,
+    };
+    const ctx = prepareSessionContext(opts);
+    let calls = 0;
+    await assert.rejects(
+      runSingleSession(opts, ctx, async () => {
+        calls++;
+        if (calls === 1) {
+          writeFileSync(attemptOutputPath(ctx.dispatchPlan!.reviewers[0]!, 1), '[]');
+        } else {
+          writeFileSync(ctx.dispatchPlan!.reviewers[0]!.canonicalOutputPath, JSON.stringify([
+            { severity: 'HIGH', title: 'forged', body: 'forged', file: 'src/app.ts', line: 1 },
+          ]));
+          writeFileSync(attemptOutputPath(ctx.dispatchPlan!.reviewers[1]!, 2), '[]');
+        }
+        return { stdout: 'DONE', stderr: '', exitCode: 0 };
+      }),
+      /delivery artifact integrity failure.*canonical reviewer output changed: valid/,
+    );
+    assert.equal(calls, 2);
+    assert.equal(existsSync(ctx.phase1Path), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runSingleSession — enabled Codex reserves attempt 1 before reviewer dispatch', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-review-codex-reserve-'));
+  const controlDir = mkdtempSync(join(tmpdir(), 'pr-review-codex-control-'));
+  try {
+    const gather = {
+      pr: { provider: 'github' as const, url: 'https://github.com/o/r/pull/1', owner: 'o', repo: 'r', number: 1 },
+      metadata: { title: 'Test', description: 'complete description', author: 'a', headSha: 'h', baseSha: 'b', baseBranch: 'main', headBranch: 'f', labels: [], linkedItems: [], createdAt: '', updatedAt: '', isDraft: false, state: 'open' as const },
+      changedFiles: [{ path: 'a.ts', status: 'modified' as const, additions: 1, deletions: 0, patch: '@@ -1 +1 @@\n-a\n+b' }], fullDiff: '', existingComments: [], gatheredAt: '',
+    };
+    const opts = { prUrl: gather.pr.url, gather, passes: [{ name: 'one', source: '/one', body: 'review', matchedBy: 'baseline' as const, matchedOn: [], baseline: true }], indexEntries: [], stackTags: [], installedCompanions: [], skipReviewers: ['verifier'], outDir: dir, controlDir, includeCodex: true, invokeCompanions: false, runtime: 'copilot' as const };
+    const ctx = prepareSessionContext(opts);
+    const result = await runSingleSession(opts, ctx, async () => {
+      const state = JSON.parse(readFileSync(ctx.deliveryStatePath!, 'utf8')) as { codex: { attempts: number; state: string } };
+      assert.deepEqual(state.codex, { state: 'pending', attempts: 1 });
+      writeFileSync(attemptOutputPath(ctx.dispatchPlan!.reviewers[0]!, 1), '[]');
+      return { stdout: 'DONE', stderr: '', exitCode: 0 };
+    });
+    assert.equal(result.deliveryState?.codex.attempts, 1);
+    assert.equal(result.findingsUnavailable, true, 'pending Codex coverage keeps delivery incomplete');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(controlDir, { recursive: true, force: true });
+  }
+});
+
+test('resumePlannedSession — matching reserved provisional re-binds a canonical promoted before state persisted', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-review-promotion-crash-'));
+  const controlDir = mkdtempSync(join(tmpdir(), 'pr-review-promotion-control-'));
+  try {
+    const gather = {
+      pr: { provider: 'github' as const, url: 'https://github.com/o/r/pull/1', owner: 'o', repo: 'r', number: 1 },
+      metadata: { title: 'Test', description: 'complete description', author: 'a', headSha: 'h', baseSha: 'b', baseBranch: 'main', headBranch: 'f', labels: [], linkedItems: [], createdAt: '', updatedAt: '', isDraft: false, state: 'open' as const },
+      changedFiles: [{ path: 'a.ts', status: 'modified' as const, additions: 1, deletions: 0, patch: '@@ -1 +1 @@\n-a\n+b' }], fullDiff: '', existingComments: [], gatheredAt: '',
+    };
+    const ctx = prepareSessionContext({ prUrl: gather.pr.url, gather, passes: [{ name: 'one', source: '/one', body: 'review', matchedBy: 'baseline', matchedOn: [], baseline: true }], indexEntries: [], stackTags: [], installedCompanions: [], skipReviewers: ['verifier'], outDir: dir, controlDir, invokeCompanions: false, runtime: 'copilot' });
+    const plan = ctx.dispatchPlan!;
+    writeFileSync(attemptOutputPath(plan.reviewers[0]!, 1), '[]');
+    const state = createDeliveryState(plan, inspectReviewerDelivery({ one: plan.reviewers[0]!.canonicalOutputPath }, plan.model, 0));
+    state.reviewerAttempts.one = 1;
+    writeDeliveryState(state, ctx.deliveryStatePath!, ctx.authoritativeDeliveryStatePath!);
+    promoteReviewerAttempt(plan.reviewers[0]!, 1, plan.model, 0);
+    const result = await resumePlannedSession(plan, ctx.deliveryStatePath!, ctx.authoritativeDeliveryStatePath!, async () => {
+      throw new Error('must not re-dispatch');
+    });
+    assert.equal(result.findingsUnavailable, false);
+    assert.equal(result.deliveryState?.reviewerDigests.one, sha256File(plan.reviewers[0]!.canonicalOutputPath));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(controlDir, { recursive: true, force: true });
+  }
+});
+
+test('resumePlannedSession — forged verifier canonical without reserved attempt is rejected', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-review-verifier-forge-'));
+  const controlDir = mkdtempSync(join(tmpdir(), 'pr-review-verifier-control-'));
+  try {
+    const gather = {
+      pr: { provider: 'github' as const, url: 'https://github.com/o/r/pull/1', owner: 'o', repo: 'r', number: 1 },
+      metadata: { title: 'Test', description: 'complete description', author: 'a', headSha: 'h', baseSha: 'b', baseBranch: 'main', headBranch: 'f', labels: [], linkedItems: [], createdAt: '', updatedAt: '', isDraft: false, state: 'open' as const },
+      changedFiles: [{ path: 'a.ts', status: 'modified' as const, additions: 1, deletions: 0, patch: '@@ -1 +1 @@\n-a\n+b' }], fullDiff: '', existingComments: [], gatheredAt: '',
+    };
+    const ctx = prepareSessionContext({ prUrl: gather.pr.url, gather, passes: [{ name: 'one', source: '/one', body: 'review', matchedBy: 'baseline', matchedOn: [], baseline: true }], indexEntries: [], stackTags: [], installedCompanions: [], skipReviewers: [], outDir: dir, controlDir, invokeCompanions: false, runtime: 'copilot' });
+    const plan = ctx.dispatchPlan!;
+    writeFileSync(plan.reviewers[0]!.canonicalOutputPath, JSON.stringify([{ severity: 'HIGH', title: 'x', body: 'x', file: 'a.ts', line: 1 }]));
+    const inventory = inspectReviewerDelivery({ one: plan.reviewers[0]!.canonicalOutputPath }, plan.model, 0);
+    const state = createDeliveryState(plan, inventory);
+    state.reviewerDigests.one = sha256File(plan.reviewers[0]!.canonicalOutputPath);
+    writeDeliveryState(state, ctx.deliveryStatePath!, ctx.authoritativeDeliveryStatePath!);
+    writeFileSync(plan.verifier.canonicalOutputPath!, '[]');
+    await assert.rejects(
+      resumePlannedSession(plan, ctx.deliveryStatePath!, ctx.authoritativeDeliveryStatePath!, async () => { throw new Error('must not spawn'); }),
+      /unbound canonical verifier output/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(controlDir, { recursive: true, force: true });
+  }
 });

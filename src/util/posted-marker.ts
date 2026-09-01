@@ -1,5 +1,8 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { controlDirForRun } from './tmp.js';
+import { readAuthenticatedJsonSync, writeAuthenticatedJsonSync } from './control-auth.js';
+import { atomicFileExistsSync } from './atomic-json.js';
 
 /**
  * Written to the run dir after every publish attempt — including one that
@@ -33,18 +36,45 @@ const MARKER_FILE = 'posted.marker';
  * trust its outcome, so callers should fail CLOSED (refuse to re-post) rather
  * than risk duplicates.
  */
-export function readPostedMarker(outDir: string): PostedMarker | 'corrupt' | null {
+function markerShaped(value: unknown): value is PostedMarker {
+  const marker = value as Partial<PostedMarker> | null;
+  return !!marker && typeof marker.posted === 'number' && typeof marker.attempted === 'number';
+}
+
+export function readPostedMarker(outDir: string, homeOverride?: string): PostedMarker | 'corrupt' | null {
   const p = join(outDir, MARKER_FILE);
+  const authority = join(controlDirForRun(outDir, homeOverride), MARKER_FILE);
+  if (atomicFileExistsSync(authority)) {
+    try {
+      const marker = readAuthenticatedJsonSync<unknown>(authority);
+      return markerShaped(marker) ? marker : 'corrupt';
+    } catch {
+      return 'corrupt';
+    }
+  }
   if (!existsSync(p)) return null;
   try {
     const m = JSON.parse(readFileSync(p, 'utf8')) as Partial<PostedMarker>;
-    if (typeof m?.posted === 'number' && typeof m?.attempted === 'number') return m as PostedMarker;
+    // Schema-v1 writes marker authority BEFORE this mirror. With no authority,
+    // a mirror can only be runtime-forged; it must not suppress a real post.
+    const controlDir = controlDirForRun(outDir, homeOverride);
+    if (atomicFileExistsSync(join(controlDir, 'dispatch-plan.json'))) return null;
+    if (markerShaped(m)) return m;
     return 'corrupt';
   } catch {
     return 'corrupt';
   }
 }
 
-export function writePostedMarker(outDir: string, m: Omit<PostedMarker, 'postedAt'>): void {
-  writeFileSync(join(outDir, MARKER_FILE), JSON.stringify({ postedAt: Date.now(), ...m }, null, 2), 'utf8');
+export function writePostedMarker(
+  outDir: string,
+  m: Omit<PostedMarker, 'postedAt'>,
+  homeOverride?: string,
+): void {
+  const marker = { postedAt: Date.now(), ...m };
+  const controlDir = controlDirForRun(outDir, homeOverride);
+  if (existsSync(join(controlDir, 'dispatch-plan.json'))) {
+    writeAuthenticatedJsonSync(join(controlDir, MARKER_FILE), marker);
+  }
+  writeFileSync(join(outDir, MARKER_FILE), JSON.stringify(marker, null, 2), 'utf8');
 }

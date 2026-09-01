@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { ERROR_FILE, RUNS_ROOT } from '../src/util/tmp.js';
 import { finalizeReview, writeOrchestratorFailureLog } from '../src/commands/review.js';
@@ -122,7 +123,7 @@ test('writeOrchestratorFailureLog — persists the ENTIRE stdout/stderr, never a
   }
 });
 
-test('finalizeReview — codex sibling findings still post on a pipeline failure, exit stays 2', async () => {
+test('finalizeReview — codex sibling findings never post when reviewer delivery is incomplete', async () => {
   const id = 'finalize-failure-codex-test';
   const dir = seedRun(id);
   try {
@@ -142,14 +143,60 @@ test('finalizeReview — codex sibling findings still post on a pipeline failure
       overallStart: Date.now(),
       provider,
     });
-    assert.equal(calls.batches.length, 1, 'the lone sibling pass is still posted');
-    assert.equal(calls.batches[0]!.length, 1, 'the batch carries exactly the codex finding');
-    assert.match(calls.batches[0]![0]!.body, /a real finding body/, 'the posted comment is the seeded finding');
-    assert.equal(r.exitCode, 2, 'a sibling pass is not a complete review — still a pipeline failure');
+    assert.equal(calls.batches.length, 0, 'partial coverage must fail before invoking the provider');
+    assert.equal(r.exitCode, 2, 'a sibling pass is not a complete review');
     assert.ok(!existsSync(join(dir, 'pr-review-summary.md')), 'still no done-state artifact');
+    assert.ok(!existsSync(join(dir, 'posted.marker')), 'no post attempt means no posting marker');
     assert.ok(existsSync(join(dir, ERROR_FILE)));
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('finalizeReview — concurrent finalizers reach the provider only once', async () => {
+  const id = 'finalize-concurrency-test';
+  const dir = seedRun(id);
+  const home = mkdtempSync(join(tmpdir(), 'finalize-concurrency-home-'));
+  let releasePost!: () => void;
+  const postMayFinish = new Promise<void>((resolve) => { releasePost = resolve; });
+  let postStarted!: () => void;
+  const postDidStart = new Promise<void>((resolve) => { postStarted = resolve; });
+  let batches = 0;
+  const provider: PrProvider = {
+    ...fakeProvider().provider,
+    postBatchComments: async (_ref, _sha, comments) => {
+      batches++;
+      postStarted();
+      await postMayFinish;
+      return { posted: comments.length };
+    },
+  };
+  const outputs: ReviewerOutput[] = [{
+    reviewerName: 'p/one', model: 'm', rawOutput: '', durationMs: 0, exitCode: 0,
+    findings: [{ severity: 'HIGH', title: 'x', body: 'one concurrent finding', file: 'src/a.ts', line: 11 }],
+  }];
+  const args = {
+    prUrl: 'u', outDir: dir, gather: gatherFixture(), outputs,
+    dedupeMode: 'strict' as const, publish: true, dryRun: false,
+    findingsUnavailable: false, overallStart: Date.now(), provider, homeOverride: home,
+  };
+  try {
+    const first = finalizeReview(args);
+    await postDidStart;
+    await assert.rejects(
+      finalizeReview(args),
+      /finalization is already in progress.*refusing concurrent posting/,
+    );
+    assert.equal(batches, 1, 'the contending finalizer never reaches the provider');
+    releasePost();
+    const completed = await first;
+    assert.equal(completed.exitCode, 0);
+    assert.equal(batches, 1);
+    assert.ok(existsSync(join(dir, 'posted.marker')));
+  } finally {
+    releasePost?.();
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   }
 });
 

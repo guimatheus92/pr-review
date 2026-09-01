@@ -53,7 +53,7 @@ pr-review-toolkit’s six agents each get their own summary row (`companion:pr-r
 
 Each companion plugin's slash command kicks off the plugin's internal orchestrator, which dispatches its own sub-agents inside the review session. pr-review-toolkit runs six agents; code-review runs five. Wall-clock time per companion is typically 5–15 minutes.
 
-There is no per-pass timeout: everything dispatched inside the session — passes and companions alike — shares the orchestrator process timeout (30 minutes).
+There is no per-pass timeout: everything dispatched inside one session shares its 30-minute process timeout. Node independently accounts for each companion attempt; absent/invalid companions are selectively retried and never interpreted as clean empty output.
 
 ## Cost note
 
@@ -71,12 +71,7 @@ invoke_companions: false
 
 ## Output format
 
-The dispatch prompt asks every companion for the standard JSON finding shape. When one answers in prose instead, the markdown parser at [src/dispatch/parsers.ts](../../src/dispatch/parsers.ts) is the fallback, extracting findings via:
-
-- `### [SEVERITY] Title` lines
-- `File: path:line` references in the body
-
-If a companion's format ever changes and findings stop being extracted, the raw output is still in the run dir (`~/.pr-review/runs/<id>/`) and the summary will show 0 findings with a clear note. Check the orchestrator prompt and raw per-reviewer outputs there to see what was sent and what came back.
+Every companion must write exact top-level `Finding[]` JSON to its attempt path. Prose or malformed arrays remain under `reviewer-attempts/` for diagnosis, count as invalid delivery, and trigger bounded selective recovery. Only Node-promoted canonical output participates in Phase 1.
 
 ## Warning behavior
 

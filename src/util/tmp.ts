@@ -1,6 +1,7 @@
 import { mkdtempSync, mkdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import type { PrRef } from '../types.js';
 
 /**
@@ -25,10 +26,25 @@ export function safeOwner(ref: Pick<PrRef, 'owner'>): string {
 
 /** Flatten any name (pass name, reviewer name) into a filename-safe token. */
 export function sanitizeForFilename(name: string): string {
-  return name.replace(/[\\/:*?"<>|]/g, '_');
+  const readable = name
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Za-z0-9._-]+/g, '_')
+    .replace(/^[. ]+|[. ]+$/g, '')
+    .slice(0, 80) || 'reviewer';
+  const digest = createHash('sha256').update(name, 'utf8').digest('hex').slice(0, 12);
+  return `${readable}--${digest}`;
 }
 
 export const RUNS_ROOT = join(homedir(), '.pr-review', 'runs');
+
+/** Recovery authority lives outside the runtime-writable run directory. */
+export function controlDirForRun(runDir: string, home = homedir()): string {
+  const absolute = resolve(runDir);
+  const identity = process.platform === 'win32' ? absolute.toLowerCase() : absolute;
+  const digest = createHash('sha256').update(identity, 'utf8').digest('hex').slice(0, 16);
+  return join(home, '.pr-review', 'control', `${basename(runDir)}--${digest}`);
+}
 
 /**
  * Fatal-error artifact of a run, surfaced inline by `status` on a failed run.

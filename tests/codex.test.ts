@@ -54,6 +54,13 @@ test('mapCodexResult — exit 0 with an explicit empty array is clean', () => {
   assert.equal(out.error, undefined);
 });
 
+for (const raw of ['not-json', '{}', '[{"unexpected":true}]']) {
+  test(`mapCodexResult — exit 0 with invalid payload stays failed: ${raw}`, () => {
+    const out = mapCodexResult({ exitCode: 0, timedOut: false, raw, durationMs: 5 });
+    assert.match(out.error ?? '', /invalid Finding\[\] JSON/);
+  });
+}
+
 test('createCapture — keeps the head and the tail, elides the middle', () => {
   const cap = createCapture(4, 4);
   cap.push('HEAD');

@@ -1,7 +1,7 @@
 import { assertSafeArg, spawnCli } from '../util/spawn.js';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import type { GatherOutput, ReviewerOutput, SkillDefinition } from '../types.js';
+import { basename, dirname, join, resolve } from 'node:path';
+import type { GatherOutput, ReviewerOutput, Severity, SkillDefinition } from '../types.js';
 import { matchesAny } from '../util/globs.js';
 import { sanitizeForFilename } from '../util/tmp.js';
 import { parseReviewerOutput } from './parsers.js';
@@ -18,6 +18,41 @@ import { appendProgress } from '../util/progress.js';
 import type { IndexEntry, PassRoute, ReviewPass } from './pass-select.js';
 import { companionReviewerNames, KNOWN_COMPANIONS } from '../plugins/companions.js';
 import type { McpCapability } from '../plugins/installed.js';
+import {
+  OUTPUT_PATH_TOKEN,
+  assertDispatchPlanMirrors,
+  artifactState,
+  assembleConsolidated,
+  assemblePhase1,
+  createDispatchPlan,
+  createDeliveryState,
+  hasSevereFindings,
+  inspectReviewerDelivery,
+  promoteReviewerAttempt,
+  promoteVerifierAttempt,
+  readDeliveryState,
+  reconcileDeliveryCompletion,
+  repairDeliveryStateMirror,
+  reserveCodexAttempt,
+  renderAttemptPrompt,
+  validateDispatchArtifacts,
+  validateDeliveryArtifacts,
+  verifierAttemptOutputPath,
+  writeDeliveryState,
+  writeDispatchPlan,
+  type DeliveryInventory,
+  type DeliveryState,
+  type DispatchPlan,
+  type DispatchPlanArtifact,
+  type DispatchReviewerPlan,
+  type RuntimeAttemptState,
+} from './delivery.js';
+import { canonicalJson, sha256, sha256File } from '../util/atomic-json.js';
+import {
+  appendReviewerProgress,
+  describePromotedOutput,
+  watchAttemptOutputs,
+} from './reviewer-progress.js';
 
 export interface SingleSessionOptions {
   prUrl: string;
@@ -49,6 +84,21 @@ export interface SingleSessionOptions {
   mcpServers?: McpCapability[];
   /** Unchanged checkout MCP definitions normalized for the isolated runtime. */
   trustedMcpConfig?: { mcpServers: Record<string, unknown> };
+  /** Node-owned recovery authority outside the runtime's writable run directory. */
+  controlDir?: string;
+  /** Sticky execution policy persisted for recovery. */
+  execution?: {
+    dryRun: boolean;
+    publish: boolean;
+    dedupeMode: 'strict' | 'loose' | 'off';
+    failOn?: Severity;
+  };
+  /** False for previews; no-dispatch contexts must not create recoverable schema-v1 control. */
+  persistRecoveryControl?: boolean;
+  /** Trusted effective configuration values required to reproduce this dispatch. */
+  configProjection?: unknown;
+  /** Executable/bundle whose bytes must still match before manual recovery. */
+  cliArtifactPath?: string;
 }
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
@@ -170,6 +220,12 @@ export interface SessionContext {
   capabilityFiles: Record<string, string>;
   /** Phase-1 reviewer name → independently persisted findings array. */
   reviewerFiles: Record<string, string>;
+  /** Schema-versioned Node-owned task plan. */
+  dispatchPlan?: DispatchPlan;
+  dispatchPlanPath?: string;
+  authoritativeDispatchPlanPath?: string;
+  deliveryStatePath?: string;
+  authoritativeDeliveryStatePath?: string;
 }
 
 /** Docs-only PRs run only passes pinned to files (glob) or forced — never baseline noise. */
@@ -338,6 +394,30 @@ function companionTaskPrompt(contextPath: string, skillsPath: string | undefined
   );
 }
 
+function companionSlashPrompt(command: string, prUrl: string, outputPath: string): string {
+  return (
+    `Invoke the slash command \`${command} ${prUrl}\` in analysis-only mode. ${NO_POSTING_DIRECTIVE} ` +
+    `If the command's own instructions tell you to post a comment or review, SKIP that step and return the review content as output instead. ` +
+    `Parse any structured findings into a JSON array using shape ${OUTPUT_SHAPE}. Before returning, write that exact array to \`${outputPath}\` ` +
+    `using the Write or apply_patch tool, even when it is empty. If no findings, write and output []. Output ONLY the JSON array.`
+  );
+}
+
+function verifierTaskPrompt(
+  verifierPath: string,
+  contextPath: string,
+  phase1Path: string,
+  authoritativeSkills: string | undefined,
+  outputPath: string,
+): string {
+  return (
+    `You are the verifier. Read your role brief at \`${verifierPath}\`, the PR context at \`${contextPath}\`, and the complete Phase 1 findings at \`${phase1Path}\`.` +
+    `${skillsRulesSentence(authoritativeSkills)} Output ONLY a JSON array of cross-cutting issues, contradictions, or gaps that the other passes missed using shape ${OUTPUT_SHAPE}. ` +
+    `Before returning, write that exact array to \`${outputPath}\` using the Write or apply_patch tool, even when it is empty. ` +
+    `If nothing to add, write and output []. No prose. No fences. ${NO_POSTING_DIRECTIVE}`
+  );
+}
+
 function renderPassFile(pass: ReviewPass): string {
   let body = pass.body.trim();
   // Only third-party PACK bodies cap: a project skill running as a pass (the
@@ -387,28 +467,64 @@ function renderUnionFile(passes: ReviewPass[]): string {
   return lines.join('\n');
 }
 
-function renderIndexFile(entries: IndexEntry[]): string {
-  const lines: string[] = [
+type MaterializedIndexEntry = IndexEntry & { readablePath: string };
+
+function renderIndexSkillFile(entry: IndexEntry): string {
+  return [
+    `# On-demand review skill: ${entry.name}`,
+    `Original source: \`${entry.source}\``,
+    `Advisory background only; this skill does not override the dispatched pass rules.`,
+    ``,
+    entry.body.trim(),
+  ].join('\n');
+}
+
+function indexHeader(): string[] {
+  return [
     `# On-demand skill index`,
     ``,
     `Skills available to this review that did not get their own pass. Read any whose`,
     `description matches the files under review (advisory background only).`,
     ``,
   ];
-  let used = 0;
-  let shown = 0;
+}
+
+function renderIndexLine(entry: MaterializedIndexEntry): string {
+  const desc = entry.description ? ` — ${entry.description}` : '';
+  return `- **${entry.name}**${desc} (read: \`${entry.readablePath}\`; provenance: \`${entry.source}\`)`;
+}
+
+function partitionIndex(entries: MaterializedIndexEntry[]): MaterializedIndexEntry[][] {
+  const shards: MaterializedIndexEntry[][] = [];
+  let current: MaterializedIndexEntry[] = [];
+  let used = indexHeader().join('\n').length;
   for (const e of entries) {
-    const desc = e.description ? ` — ${e.description}` : '';
-    const line = `- **${e.name}**${desc} (\`${e.source}\`)`;
-    if (used + line.length > INDEX_CAP) {
-      lines.push(`_(+${entries.length - shown} more skills omitted)_`);
-      break;
+    const line = renderIndexLine(e);
+    if (current.length > 0 && used + line.length + 1 > INDEX_CAP) {
+      shards.push(current);
+      current = [];
+      used = indexHeader().join('\n').length;
     }
-    lines.push(line);
+    current.push(e);
     used += line.length + 1;
-    shown++;
   }
-  return lines.join('\n');
+  if (current.length > 0) shards.push(current);
+  return shards;
+}
+
+function renderIndexShard(entries: MaterializedIndexEntry[]): string {
+  return [...indexHeader(), ...entries.map(renderIndexLine)].join('\n');
+}
+
+function renderIndexManifest(shards: Array<{ path: string; count: number }>): string {
+  return [
+    `# On-demand skill index`,
+    ``,
+    `${shards.reduce((total, shard) => total + shard.count, 0)} skills are split across ${shards.length} index shards.`,
+    `Scan every shard's names and descriptions, then read only the relevant materialized skill bodies.`,
+    ``,
+    ...shards.map((shard, index) => `- Shard ${index + 1}: ${shard.count} skill(s) — \`${shard.path}\``),
+  ].join('\n');
 }
 
 /**
@@ -461,13 +577,39 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
       name: p.name,
       description: p.description ?? '',
       source: p.source,
+      body: p.body,
       tags: [],
     })),
     ...opts.indexEntries,
   ];
   const indexPath = resolve(opts.outDir, 'skills-index.md');
+  const indexedSkillPaths: string[] = [];
+  const indexShardPaths: string[] = [];
   if (indexEntries.length > 0) {
-    writeFileSync(indexPath, renderIndexFile(indexEntries), 'utf8');
+    const candidates = indexEntries.map((entry, index) => ({
+      ...entry,
+      readablePath: resolve(
+        opts.outDir,
+        `indexed-skill-${String(index + 1).padStart(4, '0')}-${sanitizeForFilename(entry.name)}.md`,
+      ),
+    }));
+    for (const entry of candidates) {
+      const { readablePath } = entry;
+      writeFileSync(readablePath, renderIndexSkillFile(entry), 'utf8');
+      indexedSkillPaths.push(readablePath);
+    }
+    const shards = partitionIndex(candidates);
+    if (shards.length === 1) {
+      writeFileSync(indexPath, renderIndexShard(shards[0]!), 'utf8');
+    } else {
+      const manifestEntries = shards.map((entries, index) => {
+        const path = resolve(opts.outDir, `skills-index-${String(index + 1).padStart(4, '0')}.md`);
+        writeFileSync(path, renderIndexShard(entries), 'utf8');
+        indexShardPaths.push(path);
+        return { path, count: entries.length };
+      });
+      writeFileSync(indexPath, renderIndexManifest(manifestEntries), 'utf8');
+    }
   }
 
   writeContextFile(opts, indexEntries.length > 0 ? { count: indexEntries.length, path: indexPath } : null);
@@ -531,7 +673,7 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
   }
 
   const triageSkipped = triaged.map((p) => p.name);
-  const orchestratorPrompt = buildOrchestratorPrompt(opts, {
+  const promptContext = {
     contextPath,
     findingsPath,
     phase1Path,
@@ -542,7 +684,99 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
     reviewerFiles,
     wantVerifier,
     verifierPath,
+  };
+  const reviewerPlans = buildReviewerPlans(opts, promptContext);
+  const runtime = opts.runtime ?? 'copilot';
+  const model = normalizeModel(runtime, opts.defaultModel ?? 'claude-opus-4.8');
+  const immutablePaths = [
+    resolve(opts.outDir, 'pr-review-gather.json'),
+    contextPath,
+    resolve(opts.outDir, 'passes.json'),
+    resolve(opts.outDir, '.mcp.json'),
+    indexPath,
+    ...indexShardPaths,
+    ...indexedSkillPaths,
+    ...Object.values(skillsFiles),
+    ...(verifierPath ? [verifierPath] : []),
+  ].filter((path, index, all) => existsSync(path) && all.indexOf(path) === index);
+  const artifacts: DispatchPlanArtifact[] = immutablePaths.map((path) => ({ path, sha256: sha256File(path) }));
+  const cliArtifact = opts.cliArtifactPath && existsSync(opts.cliArtifactPath)
+    ? { path: resolve(opts.cliArtifactPath), sha256: sha256File(opts.cliArtifactPath) }
+    : undefined;
+  const configProjection = opts.configProjection ?? {
+    runtime,
+    model,
+    skipReviewers: [...opts.skipReviewers],
+    invokeCompanions: opts.invokeCompanions,
+    language: opts.language ?? 'en',
+  };
+  const verifierOutputPath = resolve(opts.outDir, 'raw-verifier.json');
+  const verifierAttemptsDir = resolve(opts.outDir, 'reviewer-attempts', 'verifier');
+  if (wantVerifier) mkdirSync(verifierAttemptsDir, { recursive: true });
+  const codexAttemptsDir = resolve(opts.outDir, 'codex-attempts');
+  if (opts.includeCodex) mkdirSync(codexAttemptsDir, { recursive: true });
+  const plan = createDispatchPlan({
+    runId: basename(opts.outDir),
+    runDir: resolve(opts.outDir),
+    createdAt: new Date().toISOString(),
+    pr: opts.gather.pr,
+    metadata: {
+      headSha: opts.gather.metadata.headSha,
+      baseSha: opts.gather.metadata.baseSha,
+      headBranch: opts.gather.metadata.headBranch,
+      baseBranch: opts.gather.metadata.baseBranch,
+      state: opts.gather.metadata.state,
+      isDraft: opts.gather.metadata.isDraft,
+    },
+    runtime,
+    runtimeBinary: runtimeBinary(runtime, opts.copilotBinary),
+    repoRoot: opts.repoRoot,
+    disabledMcpServers: [...new Set((opts.mcpServers ?? []).map((server) => server.name))].sort(),
+    model,
+    timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    phase1Path,
+    findingsPath,
+    execution: opts.execution ?? { dryRun: true, publish: false, dedupeMode: 'strict' },
+    configProjection,
+    configFingerprint: sha256(canonicalJson(configProjection)),
+    cliArtifact,
+    artifacts,
+    reviewers: reviewerPlans,
+    verifier: {
+      enabled: wantVerifier,
+      promptTemplate: wantVerifier && verifierPath
+        ? verifierTaskPrompt(
+            verifierPath,
+            contextPath,
+            phase1Path,
+            skillsFiles['project'] ?? skillsFiles['all'],
+            OUTPUT_PATH_TOKEN,
+          )
+        : undefined,
+      canonicalOutputPath: wantVerifier ? verifierOutputPath : undefined,
+      attemptsDir: wantVerifier ? verifierAttemptsDir : undefined,
+      maxAttempts: 2,
+    },
+    codex: {
+      enabled: !!opts.includeCodex,
+      contextPath,
+      skillsPath: skillsFiles['project'] ?? skillsFiles['all'],
+      attemptsDir: codexAttemptsDir,
+      maxAttempts: 2,
+    },
   });
+  const dispatchPlanPath = resolve(opts.outDir, 'dispatch-plan.json');
+  const deliveryStatePath = resolve(opts.outDir, 'delivery-state.json');
+  const persistRecoveryControl = opts.persistRecoveryControl !== false && passes.length > 0;
+  const authoritativeDispatchPlanPath = persistRecoveryControl && opts.controlDir
+    ? resolve(opts.controlDir, 'dispatch-plan.json')
+    : undefined;
+  const authoritativeDeliveryStatePath = persistRecoveryControl && opts.controlDir
+    ? resolve(opts.controlDir, 'delivery-state.json')
+    : undefined;
+  if (persistRecoveryControl) writeDispatchPlan(plan, dispatchPlanPath, authoritativeDispatchPlanPath);
+
+  const orchestratorPrompt = buildDispatchPrompt(plan, reviewerPlans, () => 1, 'initial');
   const orchestratorPath = resolve(opts.outDir, 'orchestrator-prompt.md');
   writeFileSync(orchestratorPath, orchestratorPrompt, 'utf8');
 
@@ -559,10 +793,24 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
     capabilityFiles,
     reviewerFiles,
     verifierPath,
+    dispatchPlan: plan,
+    dispatchPlanPath: persistRecoveryControl ? dispatchPlanPath : undefined,
+    authoritativeDispatchPlanPath,
+    deliveryStatePath: persistRecoveryControl ? deliveryStatePath : undefined,
+    authoritativeDeliveryStatePath,
   };
 }
 
-function buildOrchestratorPrompt(
+function reviewerPlan(
+  args: Omit<DispatchReviewerPlan, 'attemptsDir' | 'maxAttempts'> & { outDir: string },
+): DispatchReviewerPlan {
+  const { outDir, ...reviewer } = args;
+  const attemptsDir = resolve(outDir, 'reviewer-attempts', sanitizeForFilename(reviewer.name));
+  mkdirSync(attemptsDir, { recursive: true });
+  return { ...reviewer, attemptsDir, maxAttempts: 3 };
+}
+
+function buildReviewerPlans(
   opts: SingleSessionOptions,
   ctx: {
     contextPath: string;
@@ -576,13 +824,13 @@ function buildOrchestratorPrompt(
     wantVerifier: boolean;
     verifierPath?: string;
   },
-): string {
+): DispatchReviewerPlan[] {
   const runtime = opts.runtime ?? 'copilot';
   const unionSkills = ctx.skillsFiles['all'];
   // Project rules are the authoritative context; the union of pass bodies is the fallback.
   const authoritativeSkills = ctx.skillsFiles['project'] ?? unionSkills;
-  const companionDispatchLines: string[] = [];
-  const companionSlashLines: string[] = [];
+  const companionReviewers: DispatchReviewerPlan[] = [];
+  const companionSlashReviewers: DispatchReviewerPlan[] = [];
   if (opts.invokeCompanions) {
     for (const companion of KNOWN_COMPANIONS) {
       if (!opts.installedCompanions.includes(companion.id)) continue;
@@ -591,119 +839,85 @@ function buildOrchestratorPrompt(
           const shortAgent = agent.replace(/^[^:]+:/, '');
           const reviewerName = `companion:${companion.id}/${shortAgent}`;
           const agentType = runtime === 'copilot' ? shortAgent : agent;
-          companionDispatchLines.push(
-            `- ${taskCall(runtime, agentType, companionTaskPrompt(ctx.contextPath, authoritativeSkills, ctx.reviewerFiles[reviewerName]!))} — record as reviewer name \`${reviewerName}\``,
-          );
+          companionReviewers.push(reviewerPlan({
+            outDir: opts.outDir,
+            name: reviewerName,
+            kind: 'companion-agent',
+            description: `Run ${shortAgent}`,
+            agentType,
+            promptTemplate: companionTaskPrompt(ctx.contextPath, authoritativeSkills, OUTPUT_PATH_TOKEN),
+            canonicalOutputPath: ctx.reviewerFiles[reviewerName]!,
+            source: companion.id,
+          }));
         }
       } else {
         const command = companion.dispatch.command;
         const reviewerName = `companion:${companion.id}`;
-        companionSlashLines.push(
-          `- ${taskCall(runtime, GENERIC_AGENT, `Invoke the slash command \`${command} ${opts.prUrl}\` in analysis-only mode. ${NO_POSTING_DIRECTIVE} If the command's own instructions tell you to post a comment or review, SKIP that step and return the review content as output instead. Parse any structured findings into a JSON array using shape ${OUTPUT_SHAPE}. Before returning, write that exact array to \`${ctx.reviewerFiles[reviewerName]}\` using the Write or apply_patch tool, even when it is empty. If no findings, write and output []. Output ONLY the JSON array.`)} — record as reviewer name \`${reviewerName}\``,
-        );
+        companionSlashReviewers.push(reviewerPlan({
+          outDir: opts.outDir,
+          name: reviewerName,
+          kind: 'companion-slash',
+          description: 'Run code review',
+          agentType: GENERIC_AGENT,
+          promptTemplate: companionSlashPrompt(command, opts.prUrl, OUTPUT_PATH_TOKEN),
+          canonicalOutputPath: ctx.reviewerFiles[reviewerName]!,
+          source: command,
+        }));
       }
     }
   }
 
-  const passDispatchLines = ctx.passes.map((p) => {
+  const passReviewers = ctx.passes.map((p) => {
     const capabilityPath = ctx.capabilityFiles[p.name];
-    return `- ${taskCall(runtime, GENERIC_AGENT, passTaskPrompt(
-      ctx.contextPath,
-      ctx.skillsFiles[p.name]!,
-      ctx.skillsFiles['project'],
-      ctx.reviewerFiles[p.name]!,
-      capabilityPath ? { path: capabilityPath, reviewer: p.name, servers: p.mcpServers ?? [] } : undefined,
-    ))} — record as reviewer name \`${p.name}\``;
+    return reviewerPlan({
+      outDir: opts.outDir,
+      name: p.name,
+      kind: 'pass',
+      description: `Review ${p.name}`,
+      agentType: GENERIC_AGENT,
+      promptTemplate: passTaskPrompt(
+        ctx.contextPath,
+        ctx.skillsFiles[p.name]!,
+        ctx.skillsFiles['project'],
+        OUTPUT_PATH_TOKEN,
+        capabilityPath ? { path: capabilityPath, reviewer: p.name, servers: p.mcpServers ?? [] } : undefined,
+      ),
+      canonicalOutputPath: ctx.reviewerFiles[p.name]!,
+      capabilityPath,
+      source: p.source,
+      matchedBy: p.matchedBy,
+    });
   });
 
-  const allParallel = [...passDispatchLines, ...companionDispatchLines, ...companionSlashLines];
+  return [...passReviewers, ...companionReviewers, ...companionSlashReviewers];
+}
 
-  const exampleNames = [
-    ...ctx.passes.slice(0, 2).map((p) => p.name),
-  ];
-  const exampleRows = [
-    ...exampleNames.map((n) => `    { "name": "${n}",  "findings": [ <that pass's array> ] },`),
-    `    ...`,
-    `    { "name": "companion:pr-review-toolkit/code-reviewer", "findings": [...] },`,
-    `    ...`,
-    `    { "name": "verifier",  "findings": [ <verifier's array> ] }`,
-  ];
-
+export function buildDispatchPrompt(
+  plan: Pick<DispatchPlan, 'runtime'>,
+  reviewers: readonly DispatchReviewerPlan[],
+  attemptFor: (reviewer: DispatchReviewerPlan) => number,
+  mode: 'initial' | 'recovery',
+): string {
+  const runtime = plan.runtime;
+  const dispatchLines = reviewers.map((reviewer) => {
+    const attempt = attemptFor(reviewer);
+    const outputPath = resolve(reviewer.attemptsDir, `attempt-${attempt}.json`);
+    return `- ${taskCall(runtime, reviewer.agentType, renderAttemptPrompt(reviewer.promptTemplate, outputPath), reviewer.description)} — record as reviewer name \`${reviewer.name}\``;
+  });
   const lines = [
-    `You are the pr-review orchestrator. Your ONLY job is to coordinate a comprehensive pull request review by dispatching review passes in parallel, collecting their JSON findings, then writing a single consolidated JSON file.`,
+    `You are the pr-review ${mode === 'initial' ? 'orchestrator' : 'recovery orchestrator'}. Your ONLY job is to dispatch the listed review tasks in parallel and wait for them to return. Node owns delivery accounting and aggregation.`,
     ``,
-    `## Input`,
-    `- PR context: \`${ctx.contextPath}\` (already prepared by the Node CLI; do not refetch or modify)`,
-    `- Do NOT read the PR context file yourself — only the subagents read it. Your context must stay lean.`,
     `- ${NO_POSTING_DIRECTIVE} This binds you AND every subagent you dispatch.`,
+    `- Do not read or modify reviewer output files yourself. Each subagent writes its own attempt-scoped file; Node validates and promotes it after this process exits.`,
     ``,
-    `## Phase 1 — Parallel pass dispatch`,
+    `## ${mode === 'initial' ? 'Phase 1' : 'Selective recovery'} — Parallel dispatch`,
     ``,
     `Use the \`${taskToolName(runtime)}\` tool to launch ALL of the following in parallel. Do not wait between them; dispatch them as a batch:`,
     ``,
-    ...allParallel,
+    ...dispatchLines,
     ``,
-    `Each subagent returns a JSON array of findings (possibly empty: \`[]\`). Collect every array along with the reviewer name shown after the \`—\`.`,
+    `After every listed task returns, reply with the single word \`DONE\`. Do not aggregate, rewrite, summarize, or repair any task output.`,
   ];
-
-  if (ctx.triageSkipped.length > 0) {
-    lines.push(
-      ``,
-      `(Passes ${ctx.triageSkipped.join(', ')} were skipped by the CLI because this PR only touches documentation files — only file-scoped passes run.)`,
-    );
-  }
-
-  lines.push(
-    ``,
-    `## Phase 2 — Write the findings files (do this the moment Phase 1 returns)`,
-    ``,
-    `Once ALL Phase 1 subagents return, assemble their collected arrays into the exact JSON shape shown in Phase 4 below (a \`reviewers\` array; one entry per dispatched pass, empty arrays included).`,
-    ``,
-    `Write that SAME JSON to BOTH of these files immediately — before you even consider the verifier:`,
-    `1. \`${ctx.phase1Path}\``,
-    `2. \`${ctx.findingsPath}\` (the file the CLI consumes)`,
-    ``,
-    `Writing \`${ctx.findingsPath}\` here — not "later" — is the single most important step of this run. Do NOT defer it on the assumption that you will write it after the verifier: if your turn ends early, that file MUST already exist, or the whole review is lost.`,
-  );
-
-  if (ctx.wantVerifier) {
-    const verifierRules = skillsRulesSentence(authoritativeSkills);
-    lines.push(
-      ``,
-      `## Phase 3 — Verifier (conditional)`,
-      ``,
-      `Dispatch the verifier ONLY if at least one Phase 1 finding has severity CRITICAL or HIGH. Otherwise skip it — the files you wrote in Phase 2 are already final (they record reviewer \`verifier\` with an empty findings array).`,
-      ``,
-      `- ${taskCall(runtime, GENERIC_AGENT, `Read your role brief at \`${ctx.verifierPath}\`, the PR context at \`${ctx.contextPath}\`, and the Phase 1 findings at \`${ctx.phase1Path}\`.${verifierRules} Output ONLY a JSON array of cross-cutting issues, contradictions, or gaps that the other passes missed. Use shape ${OUTPUT_SHAPE}. If nothing to add, output []. ${NO_POSTING_DIRECTIVE}`)} — record as reviewer name \`verifier\``,
-    );
-  }
-
-  lines.push(
-    ``,
-    `## Phase 4 — Consolidated output file`,
-    ``,
-    `The consolidated output file is \`${ctx.findingsPath}\` — you already wrote it in Phase 2.`,
-    ctx.wantVerifier
-      ? `If — and ONLY if — you dispatched the verifier in Phase 3 and it returned findings, REWRITE \`${ctx.findingsPath}\` so its \`verifier\` entry carries them alongside the Phase 1 passes. Otherwise leave the Phase 2 file untouched.`
-      : `Leave the Phase 2 file untouched.`,
-    ``,
-    `Exact JSON shape (use Write or apply_patch tool — no shell redirection):`,
-    ``,
-    '```json',
-    `{`,
-    `  "reviewers": [`,
-    ...exampleRows,
-    `  ]`,
-    `}`,
-    '```',
-    ``,
-    `Critical rules:`,
-    `- Do NOT modify, re-rank, or summarize findings. Copy them verbatim from each subagent's output into the array under its reviewer name.`,
-    `- If a subagent returned non-JSON, store its raw output as a single finding with severity "LOW", title "Unparseable output from <name>", and body = the raw output.`,
-    `- Include EVERY pass that was dispatched, even ones with empty arrays.`,
-    `- Once \`${ctx.findingsPath}\` reflects all dispatched passes, reply with the single word \`DONE\`. Nothing else.`,
-  );
-
   return lines.join('\n');
 }
 
@@ -713,8 +927,10 @@ export interface SingleSessionResult {
   rawOrchestratorStderr: string;
   exitCode: number;
   durationMs: number;
-  /** True when the orchestrator produced no parseable findings file — the run flaked, it is NOT a clean PR. */
+  /** Compatibility gate: true whenever planned reviewer/verifier/Codex delivery is incomplete. */
   findingsUnavailable: boolean;
+  /** Structured accounting for schema-versioned runs. */
+  deliveryState?: DeliveryState;
 }
 
 /** Reviewer-output artifacts a run writes, in resume-preference order (final consolidation, then salvageable phase-1). */
@@ -815,6 +1031,643 @@ function warnIfVerifierMissing(outputs: ReviewerOutput[]): void {
   }
 }
 
+interface PlannedRunResult {
+  result: SingleSessionResult;
+  state: DeliveryState;
+}
+
+function timedOutFrom(result: SpawnResult): boolean {
+  return result.timedOut ?? result.stderr.includes('[timed out]');
+}
+
+function runtimeAttempt(
+  number: number,
+  kind: RuntimeAttemptState['kind'],
+  reviewers: string[],
+  startedAt: number,
+  endedAt: number,
+  result: SpawnResult,
+  timeoutMs: number,
+): RuntimeAttemptState {
+  return {
+    number,
+    kind,
+    reviewers,
+    startedAt: new Date(startedAt).toISOString(),
+    endedAt: new Date(endedAt).toISOString(),
+    exitCode: result.exitCode,
+    timedOut: timedOutFrom(result),
+    timeoutMs,
+    durationMs: endedAt - startedAt,
+  };
+}
+
+function statePaths(ctx: SessionContext): { mirror: string; authoritative?: string } {
+  if (!ctx.deliveryStatePath) throw new Error('planned session has no delivery-state path');
+  return { mirror: ctx.deliveryStatePath, authoritative: ctx.authoritativeDeliveryStatePath };
+}
+
+function persistState(ctx: SessionContext, state: DeliveryState): void {
+  const paths = statePaths(ctx);
+  writeDeliveryState(state, paths.mirror, paths.authoritative);
+}
+
+function plannedFiles(plan: DispatchPlan): Record<string, string> {
+  return Object.fromEntries(plan.reviewers.map((reviewer) => [reviewer.name, reviewer.canonicalOutputPath]));
+}
+
+function inspectPlan(plan: DispatchPlan, durationMs: number): DeliveryInventory {
+  return inspectReviewerDelivery(plannedFiles(plan), plan.model, durationMs);
+}
+
+function assertDeliveryArtifactsUnchanged(plan: DispatchPlan, state: DeliveryState): void {
+  const failures = validateDeliveryArtifacts(plan, state);
+  if (failures.length > 0) throw new Error(`delivery artifact integrity failure: ${failures.join('; ')}`);
+}
+
+function assertPlanIntegrity(ctx: SessionContext, plan: DispatchPlan): void {
+  if (!ctx.dispatchPlanPath) throw new Error('planned session has no dispatch-plan path');
+  if (ctx.authoritativeDispatchPlanPath) {
+    const persisted = assertDispatchPlanMirrors(ctx.dispatchPlanPath, ctx.authoritativeDispatchPlanPath);
+    if (persisted.fingerprint !== plan.fingerprint) {
+      throw new Error('persisted dispatch plan differs from the active in-memory plan');
+    }
+  }
+  const failures = validateDispatchArtifacts(plan);
+  if (failures.length > 0) throw new Error(failures.join('; '));
+}
+
+async function spawnPlannedBatch(
+  plan: DispatchPlan,
+  reviewers: DispatchReviewerPlan[],
+  attempt: number,
+  kind: 'initial' | 'automatic-recovery' | 'manual-recovery',
+  opts: SingleSessionOptions,
+  spawn: typeof spawnRuntime,
+): Promise<{ child: SpawnResult; attempt: RuntimeAttemptState }> {
+  for (const reviewer of reviewers) {
+    const attemptPath = resolve(reviewer.attemptsDir, `attempt-${attempt}.json`);
+    try {
+      if (existsSync(attemptPath)) unlinkSync(attemptPath);
+    } catch {
+      // A failed cleanup leaves a detectable invalid/colliding attempt; never clear canonical output here.
+    }
+  }
+  appendReviewerProgress(plan.runDir, {
+    kind: kind === 'initial' ? 'session-attempt-started' : 'recovery-started',
+    attempt,
+    detail: `${reviewers.length} reviewer(s)`,
+  });
+  const watcher = watchAttemptOutputs(
+    plan.runDir,
+    reviewers.map((reviewer) => ({
+      reviewer: reviewer.name,
+      attempt,
+      path: resolve(reviewer.attemptsDir, `attempt-${attempt}.json`),
+    })),
+  );
+  const startedAt = Date.now();
+  let child: SpawnResult;
+  try {
+    const promptBody = buildDispatchPrompt(plan, reviewers, () => attempt, kind === 'initial' ? 'initial' : 'recovery');
+    child = await spawn({
+      runtime: plan.runtime,
+      binary: plan.runtimeBinary,
+      model: plan.model,
+      promptBody,
+      timeoutMs: plan.timeoutMs,
+      addDir: plan.runDir,
+      disabledMcpServers: plan.disabledMcpServers,
+    });
+  } finally {
+    watcher.stop();
+  }
+  const endedAt = Date.now();
+  if (kind !== 'initial') {
+    appendReviewerProgress(plan.runDir, {
+      kind: 'recovery-completed',
+      attempt,
+      detail: `${reviewers.length} reviewer(s)`,
+    });
+  }
+  return {
+    child,
+    attempt: runtimeAttempt(attempt, kind, reviewers.map((reviewer) => reviewer.name), startedAt, endedAt, child, plan.timeoutMs),
+  };
+}
+
+function promoteBatch(
+  outDir: string,
+  reviewers: DispatchReviewerPlan[],
+  attempt: number,
+  model: string,
+  durationMs: number,
+): string[] {
+  const collisions: string[] = [];
+  for (const reviewer of reviewers) {
+    const promotion = promoteReviewerAttempt(reviewer, attempt, model, durationMs);
+    if (promotion.status === 'collision') collisions.push(reviewer.name);
+    const promoted = promotion.status === 'valid' ? describePromotedOutput(reviewer.canonicalOutputPath) : null;
+    appendReviewerProgress(outDir, {
+      kind: promoted ? 'output-promoted' : 'output-invalid',
+      reviewer: reviewer.name,
+      attempt,
+      bytes: promoted?.bytes,
+      findingCount: promoted?.findingCount,
+      digest: promoted?.digest,
+      detail: promoted ? undefined : promotion.error ?? promotion.status,
+    });
+  }
+  return collisions;
+}
+
+function readVerifierOutput(plan: DispatchPlan, durationMs: number): ReviewerOutput | undefined {
+  if (!plan.verifier.canonicalOutputPath) return undefined;
+  return inspectReviewerDelivery({ verifier: plan.verifier.canonicalOutputPath }, plan.model, durationMs).outputs[0];
+}
+
+function outputsFindingCount(outputs: readonly ReviewerOutput[], verifier?: ReviewerOutput): number {
+  return outputs.reduce((count, output) => count + output.findings.length, verifier?.findings.length ?? 0);
+}
+
+async function runDirectVerifier(
+  plan: DispatchPlan,
+  attemptNumber: number,
+  opts: SingleSessionOptions,
+  spawn: typeof spawnRuntime,
+): Promise<{ child: SpawnResult; attempt: RuntimeAttemptState; output?: ReviewerOutput; status: 'valid' | 'missing' | 'invalid' | 'collision' }> {
+  if (!plan.verifier.promptTemplate) throw new Error('verifier prompt is unavailable');
+  const outputPath = verifierAttemptOutputPath(plan.verifier, attemptNumber);
+  mkdirSync(dirname(outputPath), { recursive: true });
+  try {
+    if (existsSync(outputPath)) unlinkSync(outputPath);
+  } catch {
+    // Promotion will fail closed if the stale attempt cannot be replaced.
+  }
+  const startedAt = Date.now();
+  const child = await spawn({
+    runtime: plan.runtime,
+    binary: plan.runtimeBinary,
+    model: plan.model,
+    promptBody: renderAttemptPrompt(plan.verifier.promptTemplate, outputPath),
+    timeoutMs: plan.timeoutMs,
+    addDir: plan.runDir,
+    disabledMcpServers: plan.disabledMcpServers,
+  });
+  const endedAt = Date.now();
+  const promotion = promoteVerifierAttempt(plan.verifier, attemptNumber, plan.model, endedAt - startedAt);
+  return {
+    child,
+    attempt: runtimeAttempt(attemptNumber, 'verifier', ['verifier'], startedAt, endedAt, child, plan.timeoutMs),
+    output: promotion.status === 'valid' ? readVerifierOutput(plan, endedAt - startedAt) : undefined,
+    status: promotion.status,
+  };
+}
+
+async function runPlannedSession(
+  ctx: SessionContext,
+  opts: SingleSessionOptions,
+  spawn: typeof spawnRuntime,
+): Promise<PlannedRunResult> {
+  const plan = ctx.dispatchPlan!;
+  const start = Date.now();
+  for (const stale of [
+    plan.findingsPath,
+    plan.phase1Path,
+    ...plan.reviewers.map((reviewer) => reviewer.canonicalOutputPath),
+    ...(plan.verifier.canonicalOutputPath ? [plan.verifier.canonicalOutputPath] : []),
+  ]) {
+    try {
+      if (existsSync(stale)) unlinkSync(stale);
+    } catch {
+      // A stale canonical artifact must not be mistaken for this new dispatch.
+    }
+  }
+
+  let state = createDeliveryState(plan, inspectPlan(plan, 0));
+  state.kind = 'running';
+  for (const reviewer of plan.reviewers) state.reviewerAttempts[reviewer.name] = 1;
+  if (plan.codex.enabled) reserveCodexAttempt(plan, state);
+  persistState(ctx, state);
+
+  let latest = await spawnPlannedBatch(plan, plan.reviewers, 1, 'initial', opts, spawn);
+  state.runtimeAttempts.push(latest.attempt);
+  let collisions = promoteBatch(plan.runDir, plan.reviewers, 1, plan.model, latest.attempt.durationMs);
+  assertPlanIntegrity(ctx, plan);
+  assertDeliveryArtifactsUnchanged(plan, state);
+  let inventory = inspectPlan(plan, Date.now() - start);
+  state = createDeliveryState(plan, inventory, state);
+  if (collisions.length > 0) {
+    state.kind = 'terminal-incomplete';
+    state.reasonCodes.push('canonical-sidecar-collision');
+  }
+  persistState(ctx, state);
+
+  if (!inventory.complete && collisions.length === 0) {
+    const unresolvedNames = new Set([...inventory.missing, ...inventory.invalid]);
+    const unresolved = plan.reviewers.filter((reviewer) => unresolvedNames.has(reviewer.name));
+    process.stderr.write(
+      `[single-session] incomplete reviewer delivery: ${inventory.valid.length}/${inventory.planned.length} valid; ` +
+      `recovering ${unresolved.length} unresolved reviewer(s)\n`,
+    );
+    if (
+      inventory.valid.length === 0 &&
+      isTransientOrchestratorFailure(latest.child.stdout, latest.child.stderr) &&
+      ORCHESTRATOR_RETRY_BACKOFF_MS[0]
+    ) {
+      process.stderr.write(
+        `[single-session] zero-delivery transient failure — recovery after ${ORCHESTRATOR_RETRY_BACKOFF_MS[0]}ms\n`,
+      );
+      await new Promise<void>((resolveBackoff) => setTimeout(resolveBackoff, ORCHESTRATOR_RETRY_BACKOFF_MS[0]));
+    }
+    appendProgress(plan.runDir, 'recover', `automatic — ${unresolved.length} unresolved reviewer(s)`);
+    for (const reviewer of unresolved) state.reviewerAttempts[reviewer.name] = 2;
+    persistState(ctx, state);
+    latest = await spawnPlannedBatch(plan, unresolved, 2, 'automatic-recovery', opts, spawn);
+    state.runtimeAttempts.push(latest.attempt);
+    collisions = promoteBatch(plan.runDir, unresolved, 2, plan.model, latest.attempt.durationMs);
+    assertPlanIntegrity(ctx, plan);
+    assertDeliveryArtifactsUnchanged(plan, state);
+    inventory = inspectPlan(plan, Date.now() - start);
+    state = createDeliveryState(plan, inventory, state);
+    if (collisions.length > 0) {
+      state.kind = 'terminal-incomplete';
+      state.reasonCodes.push('canonical-sidecar-collision');
+    }
+    persistState(ctx, state);
+  }
+
+  if (!inventory.complete || collisions.length > 0) {
+    const durationMs = Date.now() - start;
+    process.stderr.write(
+      `[single-session] incomplete reviewer delivery: ${inventory.valid.length}/${inventory.planned.length} valid, ` +
+      `${inventory.missing.length} missing, ${inventory.invalid.length} invalid; ` +
+      `${inventory.recoveredFindingCount} findings recovered but not accepted as a completed review\n`,
+    );
+    return {
+      result: {
+        outputs: inventory.outputs,
+        rawOrchestratorOutput: latest.child.stdout,
+        rawOrchestratorStderr: latest.child.stderr,
+        exitCode: latest.child.exitCode,
+        durationMs,
+        findingsUnavailable: true,
+        deliveryState: state,
+      },
+      state,
+    };
+  }
+
+  assemblePhase1(plan.phase1Path, inventory);
+  appendReviewerProgress(plan.runDir, {
+    kind: 'phase1-assembled',
+    findingCount: inventory.recoveredFindingCount,
+    digest: sha256File(plan.phase1Path),
+  });
+  state.phase1 = 'valid';
+  const phase1Digest = sha256File(plan.phase1Path);
+  state.phase1Digest = phase1Digest;
+  let verifierOutput: ReviewerOutput | undefined;
+  if (!plan.verifier.enabled) {
+    state.verifier = { state: 'skipped-disabled', phase1Digest, attempts: 0 };
+    appendReviewerProgress(plan.runDir, { kind: 'verifier-decision', detail: 'skipped-disabled' });
+  } else if (!hasSevereFindings(inventory.outputs)) {
+    state.verifier = { state: 'skipped-no-severe', phase1Digest, attempts: 0 };
+    appendReviewerProgress(plan.runDir, { kind: 'verifier-decision', detail: 'skipped-no-severe' });
+  } else {
+    const verifierAttempt = state.verifier.attempts + 1;
+    state.verifier = { state: 'required', phase1Digest, attempts: verifierAttempt };
+    persistState(ctx, state);
+    appendProgress(plan.runDir, 'verify', `attempt ${verifierAttempt}`);
+    appendReviewerProgress(plan.runDir, { kind: 'verifier-started', reviewer: 'verifier', attempt: verifierAttempt });
+    const verifier = await runDirectVerifier(plan, verifierAttempt, opts, spawn);
+    assertDeliveryArtifactsUnchanged(plan, state);
+    state.runtimeAttempts.push(verifier.attempt);
+    state.verifier = {
+      state: verifier.status === 'valid' ? 'valid' : verifier.status === 'missing' ? 'missing' : 'invalid',
+      phase1Digest,
+      digest: verifier.output && plan.verifier.canonicalOutputPath ? sha256File(plan.verifier.canonicalOutputPath) : undefined,
+      attempts: verifierAttempt,
+    };
+    latest = { child: verifier.child, attempt: verifier.attempt };
+    verifierOutput = verifier.output;
+    appendReviewerProgress(plan.runDir, {
+      kind: 'verifier-completed',
+      reviewer: 'verifier',
+      attempt: verifierAttempt,
+      findingCount: verifierOutput?.findings.length,
+      digest: state.verifier.digest,
+      detail: state.verifier.state,
+    });
+    if (!verifierOutput) {
+      state.kind = state.verifier.attempts >= plan.verifier.maxAttempts ? 'terminal-incomplete' : 'recoverable-incomplete';
+      state.reasonCodes = ['verifier-delivery-incomplete'];
+      persistState(ctx, state);
+      return {
+        result: {
+          outputs: inventory.outputs,
+          rawOrchestratorOutput: latest.child.stdout,
+          rawOrchestratorStderr: latest.child.stderr,
+          exitCode: latest.child.exitCode,
+          durationMs: Date.now() - start,
+          findingsUnavailable: true,
+          deliveryState: state,
+        },
+        state,
+      };
+    }
+  }
+
+  assembleConsolidated(plan.findingsPath, inventory.outputs, verifierOutput);
+  appendReviewerProgress(plan.runDir, {
+    kind: 'consolidated-assembled',
+    findingCount: outputsFindingCount(inventory.outputs, verifierOutput),
+    digest: sha256File(plan.findingsPath),
+  });
+  state.consolidated = artifactState(plan.findingsPath);
+  state.consolidatedDigest = state.consolidated === 'valid' ? sha256File(plan.findingsPath) : undefined;
+  if (state.consolidated === 'valid') reconcileDeliveryCompletion(plan, state);
+  else {
+    state.kind = 'terminal-incomplete';
+    state.reasonCodes = ['consolidated-output-invalid'];
+  }
+  persistState(ctx, state);
+  const outputs = verifierOutput ? [...inventory.outputs, verifierOutput] : inventory.outputs;
+  return {
+    result: {
+      outputs,
+      rawOrchestratorOutput: latest.child.stdout,
+      rawOrchestratorStderr: latest.child.stderr,
+      exitCode: latest.child.exitCode,
+      durationMs: Date.now() - start,
+      findingsUnavailable: state.kind !== 'complete',
+      deliveryState: state,
+    },
+    state,
+  };
+}
+
+export async function resumePlannedSession(
+  plan: DispatchPlan,
+  statePath: string,
+  authoritativeStatePath: string,
+  spawn: typeof spawnRuntime = spawnRuntime,
+): Promise<SingleSessionResult> {
+  let state = repairDeliveryStateMirror(statePath, authoritativeStatePath, plan);
+  const ctx = {
+    findingsPath: plan.findingsPath,
+    phase1Path: plan.phase1Path,
+    deliveryStatePath: statePath,
+    authoritativeDeliveryStatePath: authoritativeStatePath,
+  } as SessionContext;
+  const start = Date.now();
+  assertPlanIntegrity({
+    ...ctx,
+    dispatchPlanPath: resolve(plan.runDir, 'dispatch-plan.json'),
+    authoritativeDispatchPlanPath: resolve(dirname(authoritativeStatePath), 'dispatch-plan.json'),
+  }, plan);
+  for (const reviewer of plan.reviewers) {
+    const authenticatedDigest = state.reviewerDigests[reviewer.name];
+    const recordedAttempt = state.reviewerAttempts[reviewer.name] ?? 0;
+    if (existsSync(reviewer.canonicalOutputPath)) {
+      if (!authenticatedDigest) {
+        if (recordedAttempt === 0) {
+          throw new Error(`delivery artifact integrity failure: unbound canonical reviewer output: ${reviewer.name}`);
+        }
+        const recovery = promoteReviewerAttempt(reviewer, recordedAttempt, plan.model, 0);
+        if (recovery.status !== 'valid') {
+          throw new Error(`delivery artifact integrity failure: unbound canonical reviewer output: ${reviewer.name}`);
+        }
+        continue;
+      }
+      if (sha256File(reviewer.canonicalOutputPath) !== authenticatedDigest) {
+        throw new Error(`delivery artifact integrity failure: canonical reviewer output changed: ${reviewer.name}`);
+      }
+      continue;
+    }
+    if (recordedAttempt > 0) promoteReviewerAttempt(reviewer, recordedAttempt, plan.model, 0);
+  }
+  if (
+    plan.verifier.enabled &&
+    plan.verifier.canonicalOutputPath &&
+    existsSync(plan.verifier.canonicalOutputPath) &&
+    state.verifier.attempts === 0
+  ) {
+    throw new Error('delivery artifact integrity failure: unbound canonical verifier output');
+  }
+  if (plan.verifier.enabled && plan.verifier.canonicalOutputPath && state.verifier.attempts > 0) {
+    if (existsSync(plan.verifier.canonicalOutputPath)) {
+      if (!state.verifier.digest || !state.verifier.phase1Digest) {
+        const recovery = promoteVerifierAttempt(plan.verifier, state.verifier.attempts, plan.model, 0);
+        if (recovery.status !== 'valid') {
+          throw new Error('delivery artifact integrity failure: unbound canonical verifier output');
+        }
+        if (state.verifier.phase1Digest) {
+          state.verifier = {
+            state: 'valid',
+            phase1Digest: state.verifier.phase1Digest,
+            digest: sha256File(plan.verifier.canonicalOutputPath),
+            attempts: state.verifier.attempts,
+          };
+        }
+      } else if (sha256File(plan.verifier.canonicalOutputPath) !== state.verifier.digest) {
+        throw new Error('delivery artifact integrity failure: canonical verifier output changed');
+      }
+    } else {
+      const recovery = promoteVerifierAttempt(plan.verifier, state.verifier.attempts, plan.model, 0);
+      if (recovery.status === 'valid' && state.verifier.phase1Digest) {
+        state.verifier = {
+          state: 'valid',
+          phase1Digest: state.verifier.phase1Digest,
+          digest: sha256File(plan.verifier.canonicalOutputPath),
+          attempts: state.verifier.attempts,
+        };
+      }
+    }
+  }
+  let inventory = inspectPlan(plan, 0);
+  state = createDeliveryState(plan, inventory, state);
+  const unresolvedNames = new Set([...inventory.missing, ...inventory.invalid]);
+  const unresolved = plan.reviewers.filter((reviewer) =>
+    unresolvedNames.has(reviewer.name) &&
+    (state!.reviewerAttempts[reviewer.name] ?? 0) < reviewer.maxAttempts);
+  if (!inventory.complete && unresolved.length === 0) {
+    state.kind = 'terminal-incomplete';
+    state.reasonCodes = ['attempts-exhausted'];
+    persistState(ctx, state);
+    return {
+      outputs: inventory.outputs,
+      rawOrchestratorOutput: '',
+      rawOrchestratorStderr: '',
+      exitCode: 2,
+      durationMs: 0,
+      findingsUnavailable: true,
+      deliveryState: state,
+    };
+  }
+
+  let latest: SpawnResult = { stdout: '', stderr: '', exitCode: 0, timedOut: false };
+  if (unresolved.length > 0) {
+    const attempts = new Set(unresolved.map((reviewer) => (state!.reviewerAttempts[reviewer.name] ?? 0) + 1));
+    if (attempts.size !== 1) throw new Error('unresolved reviewers have incompatible next attempt numbers');
+    const attemptNumber = [...attempts][0]!;
+    appendProgress(plan.runDir, 'recover', `manual — ${unresolved.length} unresolved reviewer(s)`);
+    for (const reviewer of unresolved) state.reviewerAttempts[reviewer.name] = attemptNumber;
+    persistState(ctx, state);
+    const batch = await spawnPlannedBatch(
+      plan,
+      unresolved,
+      attemptNumber,
+      'manual-recovery',
+      { outDir: plan.runDir, invokeCompanions: false, repoRoot: plan.repoRoot } as SingleSessionOptions,
+      spawn,
+    );
+    latest = batch.child;
+    state.runtimeAttempts.push(batch.attempt);
+    const collisions = promoteBatch(plan.runDir, unresolved, attemptNumber, plan.model, batch.attempt.durationMs);
+    assertPlanIntegrity({
+      ...ctx,
+      dispatchPlanPath: resolve(plan.runDir, 'dispatch-plan.json'),
+      authoritativeDispatchPlanPath: resolve(dirname(authoritativeStatePath), 'dispatch-plan.json'),
+    }, plan);
+    assertDeliveryArtifactsUnchanged(plan, state);
+    inventory = inspectPlan(plan, Date.now() - start);
+    state = createDeliveryState(plan, inventory, state);
+    if (collisions.length > 0) {
+      state.kind = 'terminal-incomplete';
+      state.reasonCodes.push('canonical-sidecar-collision');
+    }
+    persistState(ctx, state);
+  }
+
+  if (!inventory.complete) {
+    return {
+      outputs: inventory.outputs,
+      rawOrchestratorOutput: latest.stdout,
+      rawOrchestratorStderr: latest.stderr,
+      exitCode: latest.exitCode,
+      durationMs: Date.now() - start,
+      findingsUnavailable: true,
+      deliveryState: state,
+    };
+  }
+
+  assemblePhase1(plan.phase1Path, inventory);
+  appendReviewerProgress(plan.runDir, {
+    kind: 'phase1-assembled',
+    findingCount: inventory.recoveredFindingCount,
+    digest: sha256File(plan.phase1Path),
+  });
+  state.phase1 = 'valid';
+  const phase1Digest = sha256File(plan.phase1Path);
+  state.phase1Digest = phase1Digest;
+  const verifierBoundToPhase1 = state.verifier.state === 'valid' &&
+    state.verifier.phase1Digest === phase1Digest &&
+    !!state.verifier.digest &&
+    !!plan.verifier.canonicalOutputPath &&
+    existsSync(plan.verifier.canonicalOutputPath) &&
+    sha256File(plan.verifier.canonicalOutputPath) === state.verifier.digest;
+  let verifierOutput = verifierBoundToPhase1 ? readVerifierOutput(plan, Date.now() - start) : undefined;
+  if (!plan.verifier.enabled) {
+    state.verifier = { state: 'skipped-disabled', phase1Digest, attempts: state.verifier.attempts };
+    appendReviewerProgress(plan.runDir, { kind: 'verifier-decision', detail: 'skipped-disabled' });
+  } else if (!hasSevereFindings(inventory.outputs)) {
+    state.verifier = { state: 'skipped-no-severe', phase1Digest, attempts: state.verifier.attempts };
+    appendReviewerProgress(plan.runDir, { kind: 'verifier-decision', detail: 'skipped-no-severe' });
+  } else if (!verifierOutput) {
+    if (state.verifier.attempts >= plan.verifier.maxAttempts) {
+      state.kind = 'terminal-incomplete';
+      state.verifier.state = 'missing';
+      state.reasonCodes = ['verifier-attempts-exhausted'];
+      persistState(ctx, state);
+      return {
+        outputs: inventory.outputs,
+        rawOrchestratorOutput: latest.stdout,
+        rawOrchestratorStderr: latest.stderr,
+        exitCode: latest.exitCode,
+        durationMs: Date.now() - start,
+        findingsUnavailable: true,
+        deliveryState: state,
+      };
+    }
+    const verifierAttempt = state.verifier.attempts + 1;
+    state.verifier = { state: 'required', phase1Digest, attempts: verifierAttempt };
+    persistState(ctx, state);
+    appendProgress(plan.runDir, 'verify', `attempt ${verifierAttempt}`);
+    appendReviewerProgress(plan.runDir, { kind: 'verifier-started', reviewer: 'verifier', attempt: verifierAttempt });
+    const verifier = await runDirectVerifier(
+      plan,
+      verifierAttempt,
+      { outDir: plan.runDir, invokeCompanions: false, repoRoot: plan.repoRoot } as SingleSessionOptions,
+      spawn,
+    );
+    assertDeliveryArtifactsUnchanged(plan, state);
+    latest = verifier.child;
+    state.runtimeAttempts.push(verifier.attempt);
+    state.verifier = {
+      state: verifier.status === 'valid' ? 'valid' : verifier.status === 'missing' ? 'missing' : 'invalid',
+      phase1Digest,
+      digest: verifier.output && plan.verifier.canonicalOutputPath ? sha256File(plan.verifier.canonicalOutputPath) : undefined,
+      attempts: verifierAttempt,
+    };
+    verifierOutput = verifier.output;
+    appendReviewerProgress(plan.runDir, {
+      kind: 'verifier-completed',
+      reviewer: 'verifier',
+      attempt: verifierAttempt,
+      findingCount: verifierOutput?.findings.length,
+      digest: state.verifier.digest,
+      detail: state.verifier.state,
+    });
+    if (!verifierOutput) {
+      state.kind = state.verifier.attempts >= plan.verifier.maxAttempts ? 'terminal-incomplete' : 'recoverable-incomplete';
+      state.reasonCodes = ['verifier-delivery-incomplete'];
+      persistState(ctx, state);
+      return {
+        outputs: inventory.outputs,
+        rawOrchestratorOutput: latest.stdout,
+        rawOrchestratorStderr: latest.stderr,
+        exitCode: latest.exitCode,
+        durationMs: Date.now() - start,
+        findingsUnavailable: true,
+        deliveryState: state,
+      };
+    }
+  } else {
+    state.verifier = {
+      state: 'valid',
+      phase1Digest,
+      digest: plan.verifier.canonicalOutputPath ? sha256File(plan.verifier.canonicalOutputPath) : undefined,
+      attempts: state.verifier.attempts,
+    };
+    appendReviewerProgress(plan.runDir, { kind: 'verifier-decision', detail: 'already-valid' });
+  }
+
+  assembleConsolidated(plan.findingsPath, inventory.outputs, verifierOutput);
+  appendReviewerProgress(plan.runDir, {
+    kind: 'consolidated-assembled',
+    findingCount: outputsFindingCount(inventory.outputs, verifierOutput),
+    digest: sha256File(plan.findingsPath),
+  });
+  state.consolidated = artifactState(plan.findingsPath);
+  state.consolidatedDigest = state.consolidated === 'valid' ? sha256File(plan.findingsPath) : undefined;
+  if (state.consolidated === 'valid') reconcileDeliveryCompletion(plan, state);
+  else {
+    state.kind = 'terminal-incomplete';
+    state.reasonCodes = ['consolidated-output-invalid'];
+  }
+  persistState(ctx, state);
+  return {
+    outputs: verifierOutput ? [...inventory.outputs, verifierOutput] : inventory.outputs,
+    rawOrchestratorOutput: latest.stdout,
+    rawOrchestratorStderr: latest.stderr,
+    exitCode: latest.exitCode,
+    durationMs: Date.now() - start,
+    findingsUnavailable: state.kind !== 'complete',
+    deliveryState: state,
+  };
+}
+
 export async function runSingleSession(
   opts: SingleSessionOptions,
   prepared?: SessionContext,
@@ -822,6 +1675,14 @@ export async function runSingleSession(
   backoffMs: readonly number[] = ORCHESTRATOR_RETRY_BACKOFF_MS,
 ): Promise<SingleSessionResult> {
   const ctx = prepared ?? prepareSessionContext(opts);
+
+  if (ctx.dispatchPlan) {
+    process.stderr.write(
+      `[single-session] dispatching planned review (runtime=${ctx.dispatchPlan.runtime}, ` +
+      `${ctx.dispatchPlan.reviewers.length} Phase-1 reviewer(s), model=${ctx.dispatchPlan.model})\n`,
+    );
+    return (await runPlannedSession(ctx, opts, spawn)).result;
+  }
 
   const runtime = opts.runtime ?? 'copilot';
   const model = normalizeModel(runtime, opts.defaultModel ?? 'claude-opus-4.8');
@@ -880,6 +1741,7 @@ async function attemptOrchestrator(
     timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     addDir: opts.outDir,
     repoRoot: opts.repoRoot,
+    disabledMcpServers: [...new Set((opts.mcpServers ?? []).map((server) => server.name))].sort(),
   });
 
   const durationMs = Date.now() - start;
@@ -975,6 +1837,7 @@ interface SpawnResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  timedOut?: boolean;
 }
 
 function spawnRuntime(args: {
@@ -985,12 +1848,13 @@ function spawnRuntime(args: {
   timeoutMs: number;
   addDir: string;
   repoRoot?: string;
+  disabledMcpServers?: readonly string[];
 }): Promise<SpawnResult> {
   assertSafeArg('runtime binary', args.binary);
   assertSafeArg('model', args.model);
   assertSafeArg('add-dir', args.addDir);
   return new Promise((resolve) => {
-    const argv = runtimeSpawnArgs(args.runtime, args.model, args.addDir, args.repoRoot);
+    const argv = runtimeSpawnArgs(args.runtime, args.model, args.addDir, args.repoRoot, args.disabledMcpServers);
     const child = spawnCli(args.binary, argv, { stdio: ['pipe', 'pipe', 'pipe'], cwd: args.addDir });
 
     let stdout = '';
@@ -1031,7 +1895,7 @@ function spawnRuntime(args: {
     child.on('error', (err) => {
       clearTimeout(timer);
       clearInterval(heartbeat);
-      resolve({ stdout, stderr: stderr + '\n' + err.message, exitCode: -1 });
+      resolve({ stdout, stderr: stderr + '\n' + err.message, exitCode: -1, timedOut });
     });
     child.on('close', (code) => {
       clearTimeout(timer);
@@ -1040,6 +1904,7 @@ function spawnRuntime(args: {
         stdout,
         stderr: stderr + (timedOut ? '\n[timed out]' : ''),
         exitCode: code ?? -1,
+        timedOut,
       });
     });
   });

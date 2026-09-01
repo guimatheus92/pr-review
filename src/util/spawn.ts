@@ -3,7 +3,7 @@ import type { Readable, Writable } from 'node:stream';
 
 // shell:true is required on win32 to launch npm .cmd shims (claude/copilot/codex);
 // constrain the interpolated values so nothing shell-significant can ride along.
-export const SAFE_ARG_RE = /^[\w.\-:+\\\/ ~()]+$/;
+export const SAFE_ARG_RE = /^[\p{L}\p{N}\p{M}_.\-:+\\\/ ~()=,*]+$/u;
 
 export function assertSafeArg(name: string, value: string): void {
   if (!SAFE_ARG_RE.test(value)) {

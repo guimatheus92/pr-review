@@ -39,6 +39,7 @@ export interface IndexEntry {
   name: string;
   description: string;
   source: string;
+  body: string;
   tags: string[];
   pack?: string;
 }
@@ -132,6 +133,7 @@ function toIndexEntry(s: SkillDefinition): IndexEntry {
     name: s.name,
     description: (s.description ?? '').replace(/\s+/g, ' ').trim().slice(0, DESC_CAP),
     source: s.source,
+    body: s.body,
     tags: s.tags ?? [],
     pack: s.pack,
   };

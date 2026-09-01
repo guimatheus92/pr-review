@@ -1,14 +1,16 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { runReview } from '../src/commands/review.js';
 import type { PassSelection } from '../src/dispatch/pass-select.js';
 import type { Finding, GatherOutput, PrRef } from '../src/types.js';
 import type { PrProvider } from '../src/providers/types.js';
 import { companionReviewerNames } from '../src/plugins/companions.js';
+import { runStatus } from '../src/commands/status.js';
+import { RUNS_ROOT } from '../src/util/tmp.js';
 
 // Fresh-run pipeline without any network: gather comes from --from-gather, the
 // pass selection is injected, packs are disabled via a repo yaml in a temp cwd
@@ -63,11 +65,11 @@ function emptySelection(): PassSelection {
   return { passes: [], indexEntries: [], stackTags: ['elixir'], routes: [], missingBaseline: [] };
 }
 
-function setup(paths: string[]) {
+function setup(paths: string[], underRunsRoot = false) {
   const home = mkdtempSync(join(tmpdir(), 'pr-zero-home-'));
   const cwd = mkdtempSync(join(tmpdir(), 'pr-zero-cwd-'));
   writeFileSync(join(cwd, '.pr-review.yaml'), 'skill_packs: []\ncompanion_warn: false\n');
-  const runDir = mkdtempSync(join(tmpdir(), 'pr-zero-run-'));
+  const runDir = mkdtempSync(join(underRunsRoot ? RUNS_ROOT : tmpdir(), 'pr-zero-run-'));
   const gatherFile = join(runDir, 'input-gather.json');
   writeFileSync(gatherFile, JSON.stringify(gatherFixture(paths)), 'utf8');
   const prev = process.cwd();
@@ -150,7 +152,7 @@ test('invalid PR prerequisites — exit 2 with error.txt, never a done summary',
 });
 
 test('docs-only PR where triage removes every pass — benign exit 0 with an explanatory summary', async () => {
-  const s = setup(['README.md', 'docs/guide.md']);
+  const s = setup(['README.md', 'docs/guide.md'], true);
   try {
     const r = await runReview({
       ...BASE,
@@ -170,6 +172,11 @@ test('docs-only PR where triage removes every pass — benign exit 0 with an exp
     assert.match(r.summary, /docs-only PR with no doc-scoped review skill/);
     assert.ok(existsSync(join(s.runDir, 'pr-review-summary.md')), 'done-state summary written');
     assert.ok(!existsSync(join(s.runDir, 'error.txt')));
+    assert.ok(!existsSync(join(s.runDir, 'dispatch-plan.json')), 'no-dispatch run has no recovery plan');
+    const runId = basename(s.runDir);
+    assert.equal(join(RUNS_ROOT, runId), s.runDir);
+    rmSync(join(s.runDir, 'run.pid'), { force: true });
+    assert.equal(runStatus(runId).state, 'done');
   } finally {
     s.restore();
   }
@@ -212,6 +219,7 @@ test('--context-only with zero passes on a code PR — exit 2 and error.txt, nev
     assert.ok(existsSync(join(s.runDir, 'error.txt')), 'preview of a failed selection is error.txt');
     assert.ok(!existsSync(join(s.runDir, 'pr-review-summary.md')), 'no done-state artifact');
     assert.match(r.summary, /## Stack/);
+    assert.ok(!existsSync(join(s.runDir, 'dispatch-plan.json')), 'preview has no recovery plan');
   } finally {
     s.restore();
   }
@@ -262,6 +270,58 @@ test('runReview — stack detection uses the authoritative project hydrated into
     };
     assert.equal(stack.cwdIsPrRepo, true, 'the hydrated project completes the ADO checkout identity');
     assert.ok(stack.dependencies.includes('left-pad'), 'matching checkout manifests contribute stack evidence');
+  } finally {
+    process.chdir(previous);
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+    rmSync(runDir, { recursive: true, force: true });
+  }
+});
+
+test('runReview — pack URL credentials never enter run artifacts', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'pr-secret-cwd-'));
+  const home = mkdtempSync(join(tmpdir(), 'pr-secret-home-'));
+  const runDir = mkdtempSync(join(tmpdir(), 'pr-secret-run-'));
+  const previous = process.cwd();
+  try {
+    const packDir = join(home, '.pr-review', 'packs', 'private-pack');
+    mkdirSync(join(packDir, 'skills', 'review'), { recursive: true });
+    execFileSync('git', ['init', '-b', 'main'], { cwd: packDir, stdio: 'ignore' });
+    writeFileSync(join(packDir, 'skills', 'review', 'SKILL.md'), '---\nname: review\n---\nReview carefully.\n');
+    writeFileSync(
+      join(cwd, '.pr-review.yaml'),
+      'companion_warn: false\nskill_packs:\n  - name: private-pack\n    git: https://user:tok3n@example.test/private.git?access_token=query-secret#fragment-secret\n    include: [skills/*/SKILL.md]\n',
+    );
+    const gatherFile = join(runDir, 'input-gather.json');
+    writeFileSync(gatherFile, JSON.stringify(gatherFixture(['src/app.ts'])), 'utf8');
+    process.chdir(cwd);
+    await runReview({
+      ...BASE,
+      homeOverride: home,
+      runDir,
+      fromGather: gatherFile,
+      provider: fakeProvider(),
+      selectPassesFn: () => ({
+        passes: [{ name: 'p/generic', source: '/generic.md', body: 'review', matchedBy: 'baseline', matchedOn: [] }],
+        projectSkills: [], indexEntries: [], stackTags: ['typescript'],
+        routes: [{ name: 'p/generic', source: '/generic.md', matchedBy: 'baseline' }], missingBaseline: [],
+      }),
+      runSingleSessionFn: async () => ({
+        outputs: [{ reviewerName: 'p/generic', model: 'm', findings: [], rawOutput: '[]', durationMs: 1, exitCode: 0 }],
+        rawOrchestratorOutput: '', rawOrchestratorStderr: '', exitCode: 0, durationMs: 1,
+        findingsUnavailable: false,
+      }),
+    });
+    const artifactBodies = readdirSync(runDir, { recursive: true })
+      .map(String)
+      .filter((entry) => !entry.endsWith('\\') && existsSync(join(runDir, entry)))
+      .map((entry) => {
+        try { return readFileSync(join(runDir, entry), 'utf8'); } catch { return ''; }
+      });
+    assert.ok(artifactBodies.some((body) => body.includes('https://***@example.test/private.git')));
+    assert.ok(artifactBodies.every((body) => !body.includes('tok3n')));
+    assert.ok(artifactBodies.every((body) => !body.includes('query-secret')));
+    assert.ok(artifactBodies.every((body) => !body.includes('fragment-secret')));
   } finally {
     process.chdir(previous);
     rmSync(cwd, { recursive: true, force: true });

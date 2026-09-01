@@ -4,6 +4,20 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+### Added
+- **Node-owned resilient reviewer delivery:** description-bearing runtime calls write attempt-scoped exact `Finding[]` JSON; Node promotes write-once canonical sidecars, assembles Phase 1/final output, gates a direct verifier, and records reviewer-level progress. One automatic selective recovery retries only unresolved reviewers; `--resume` gets the bounded final targeted attempt.
+- Schema-v1 runs persist HMAC-authenticated plan, delivery, Codex, and posting authority under `~/.pr-review/control/`, with repairable diagnostic mirrors in the run dir. State binds PR/config/bundle/input hashes, attempts, canonical digests, and sticky dry-run/publish mode.
+
+### Changed
+- Reviewer runtimes are confined to materialized run artifacts: shell, built-in/ambient MCP tools, web posting, and checkout-supplied instructions are unavailable. On-demand skill bodies are copied into the run directory and large catalogs split into digest-bound index shards, with original-source provenance retained. Codex remains an OS-sandboxed read-only sibling with strict attempt-scoped output.
+- `status` reports planned/valid/missing/invalid reviewer and finding counts, distinguishes recoverable exit 21 from terminal exit 22, and trusts authenticated state over runtime-writable summaries/errors. Legacy Phase 1 output is dry-run diagnostic evidence and cannot be published.
+
+### Fixed
+- Runtime exit 0 before consolidation no longer discards completed work or falsely reports no parseable findings. Valid reviewer hashes remain unchanged through recovery; malformed/missing outputs and required verifier/Codex failures stay incomplete, and no partial finding reaches dedupe or posting.
+- Copilot/Claude task calls use JSON-safe arguments and mandatory descriptions. Windows launcher punctuation, reviewer filename aliases, atomic state replacement, canonical create-only promotion, and schema-v1 posting-marker authentication are covered by regressions.
+- Credential-bearing pack URLs are redacted before entering runtime-readable plans. Canonical reviewer output publishes only after complete fsynced bytes exist, control readers consume durable backup bytes without renames, and a crash-recoverable per-run lease serializes recovery and posting through authenticated finalization.
+- `status` emits an executable sticky-mode recovery command, while context-only and benign no-dispatch runs no longer leave half-created schema-v1 recovery control.
+
 ## [0.9.0] — 2026-08-27
 
 ### Added

@@ -109,6 +109,7 @@ test('detectStack — non-dependency package.json strings do not become framewor
 test('maskUrl — credentials embedded in origin URLs never print', async () => {
   const { maskUrl } = await import('../src/stack/detect.js');
   assert.equal(maskUrl('https://user:tok3n@github.com/o/r.git'), 'https://***@github.com/o/r.git');
+  assert.equal(maskUrl('https://github.com/o/r.git?token=tok3n#secret'), 'https://github.com/o/r.git?***#***');
   assert.equal(maskUrl('https://github.com/o/r.git'), 'https://github.com/o/r.git');
   assert.equal(maskUrl(null), null);
 });

@@ -34,7 +34,19 @@ export interface StackInfo {
 
 /** Origin URLs can embed credentials (https://user:token@host/…) — never log them raw. */
 export function maskUrl(u: string | null): string | null {
-  return u === null ? null : u.replace(/\/\/[^@/]+@/, '//***@');
+  if (u === null) return null;
+  if (/^https?:\/\//i.test(u)) {
+    try {
+      const parsed = new URL(u);
+      const authority = parsed.username || parsed.password
+        ? `${parsed.protocol}//***@${parsed.host}`
+        : `${parsed.protocol}//${parsed.host}`;
+      return `${authority}${parsed.pathname}${parsed.search ? '?***' : ''}${parsed.hash ? '#***' : ''}`;
+    } catch {
+      // Fall through to the conservative userinfo replacement for malformed URLs.
+    }
+  }
+  return u.replace(/\/\/[^@/]+@/, '//***@');
 }
 
 interface RemoteIdentity {

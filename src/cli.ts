@@ -171,7 +171,7 @@ program
       } catch (err) {
         // Detached child (--run-dir set): persist the failure so `status` can
         // say why — the parent is long gone and stdout goes to detached.log.
-        if (opts.runDir) {
+        if (opts.runDir && !(err as { preserveRunState?: boolean }).preserveRunState) {
           try {
             const { writeFileSync } = await import('node:fs');
             const { join } = await import('node:path');

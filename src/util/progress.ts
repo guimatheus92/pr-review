@@ -2,7 +2,17 @@ import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /** The closed set of run lifecycle phases. A typo here is a compile error, not a silently blank feed. */
-export type ProgressPhase = 'gather' | 'dispatch' | 'running' | 'dedupe' | 'post' | 'done' | 'error' | 'resume';
+export type ProgressPhase =
+  | 'gather'
+  | 'dispatch'
+  | 'running'
+  | 'recover'
+  | 'verify'
+  | 'dedupe'
+  | 'post'
+  | 'done'
+  | 'error'
+  | 'resume';
 
 /** One line of the run's live progress feed (~/.pr-review/runs/<id>/progress.ndjson). */
 export interface ProgressEvent {

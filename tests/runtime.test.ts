@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { normalizeModel, resolveRuntime, runtimeSpawnArgs, taskCall } from '../src/dispatch/runtime.js';
+import { normalizeModel, resolveRuntime, runtimeSpawnArgs, sanitizeTaskDescription, taskCall } from '../src/dispatch/runtime.js';
 
 test('normalizeModel — only the copilot-style default maps to opus under claude', () => {
   assert.equal(normalizeModel('claude', 'claude-opus-4.8'), 'opus');
@@ -21,14 +21,49 @@ test('resolveRuntime — a --copilot binary override implies the copilot runtime
 
 test('runtimeSpawnArgs — per-runtime argv shape', () => {
   assert.deepEqual(runtimeSpawnArgs('copilot', 'm1', '/dir'), [
-    '--model', 'm1', '--allow-all-tools', '--no-ask-user', '--add-dir', '/dir', '-s',
+    '--model', 'm1', '--allow-all-tools', '--deny-tool=shell', '--disable-builtin-mcps',
+    '--no-custom-instructions', '--no-ask-user', '--add-dir', '/dir', '-s',
   ]);
   assert.deepEqual(runtimeSpawnArgs('claude', 'opus', '/dir'), [
-    '-p', '--model', 'opus', '--dangerously-skip-permissions', '--add-dir', '/dir',
+    '-p', '--model', 'opus', '--permission-mode', 'dontAsk',
+    '--tools', 'Read,Write,Edit,Glob,Grep,Task,Agent',
+    '--allowedTools', 'Read,Write,Edit,Glob,Grep,Task,Agent',
+    '--disallowedTools', 'Bash,PowerShell,WebFetch,WebSearch,mcp__*',
+    '--setting-sources', 'user', '--add-dir', '/dir',
+  ]);
+  assert.deepEqual(runtimeSpawnArgs('copilot', 'm1', '/run', '/repo', ['ado', 'bicep']), [
+    '--model', 'm1', '--allow-all-tools', '--deny-tool=shell', '--disable-builtin-mcps',
+    '--no-custom-instructions', '--no-ask-user', '--add-dir', '/run', '--add-dir', '/repo',
+    '--disable-mcp-server', 'ado', '--disable-mcp-server', 'bicep', '-s',
   ]);
 });
 
 test('taskCall — tool vocabulary per runtime', () => {
-  assert.equal(taskCall('copilot', 'pr-review:security', 'go'), 'task(agent_type="pr-review:security", prompt="go")');
-  assert.equal(taskCall('claude', 'pr-review:security', 'go'), 'Task(subagent_type="pr-review:security", prompt="go")');
+  assert.equal(
+    taskCall('copilot', 'pr-review:security', 'go', 'Review security'),
+    'task(agent_type="pr-review:security", prompt="go", description="Review security")',
+  );
+  assert.equal(
+    taskCall('claude', 'pr-review:security', 'go', 'Review security'),
+    'Task(subagent_type="pr-review:security", prompt="go", description="Review security")',
+  );
+});
+
+test('taskCall — JSON-escapes every string argument exactly once', () => {
+  const call = taskCall(
+    'copilot',
+    'agent"type',
+    'Read C:\\work\\file.md\nThen say "done"\t`literal`',
+    'Réview\nsecurity "pass"',
+  );
+  assert.equal(
+    call,
+    'task(agent_type="agent\\"type", prompt="Read C:\\\\work\\\\file.md\\nThen say \\"done\\"\\t`literal`", description="Review security pass")',
+  );
+});
+
+test('sanitizeTaskDescription — trusted deterministic bounded label', () => {
+  assert.equal(sanitizeTaskDescription('  Réview\nawesome-copilot/security!!!  '), 'Review awesome-copilot/security');
+  assert.equal(sanitizeTaskDescription('\u0000☃'), 'Run review task');
+  assert.equal(sanitizeTaskDescription('x'.repeat(100)).length, 80);
 });

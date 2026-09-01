@@ -1,18 +1,24 @@
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { runGather } from './gather.js';
 import { commentKey, runPost, snapFindingsToDiff } from './post.js';
 import { loadAll } from '../plugins/loader.js';
 import { loadConfig, type ConfigOverrides } from '../config.js';
-import { parseFindingsFile, prepareSessionContext, REVIEWER_OUTPUT_FILES, runSingleSession } from '../dispatch/single-session.js';
+import {
+  parseFindingsFile,
+  prepareSessionContext,
+  resumePlannedSession,
+  REVIEWER_OUTPUT_FILES,
+  runSingleSession,
+} from '../dispatch/single-session.js';
 import { applyDiffExclusions } from '../dispatch/diff-filter.js';
 import { selectPasses, type PassRoute } from '../dispatch/pass-select.js';
 import { ensurePacks } from '../packs/sync.js';
 import { loadLinguist } from '../stack/linguist.js';
-import { detectStack } from '../stack/detect.js';
+import { detectStack, maskUrl } from '../stack/detect.js';
 import { resolveRuntime, type Runtime, type RuntimeChoice } from '../dispatch/runtime.js';
-import { detectCodex, runCodexReviewer } from '../dispatch/codex.js';
-import { ensureRunDir, ERROR_FILE, RUNS_ROOT, sanitizeForFilename } from '../util/tmp.js';
+import { detectCodex, mapCodexResult, runCodexReviewer } from '../dispatch/codex.js';
+import { controlDirForRun, ensureRunDir, ERROR_FILE, RUNS_ROOT, sanitizeForFilename } from '../util/tmp.js';
 import { appendProgress } from '../util/progress.js';
 import { readPostedMarker, writePostedMarker } from '../util/posted-marker.js';
 import { withRetry } from '../util/retry.js';
@@ -31,6 +37,21 @@ import { skillsAllowedForCheckout } from '../plugins/trust.js';
 import { canonicalPrAuthority } from '../providers/identity.js';
 import { gitTopLevel } from '../util/git.js';
 import { discoverMcpCapabilities } from '../plugins/installed.js';
+import { recoverAtomicFileSync, sha256File } from '../util/atomic-json.js';
+import { acquireFinalizationLease } from '../util/finalization-lease.js';
+import {
+  assertDispatchPlanMirrors,
+  readDeliveryState,
+  repairDeliveryStateMirror,
+  recordCodexResult,
+  reserveCodexAttempt,
+  validateDeliveryArtifacts,
+  validateDispatchArtifacts,
+  writeFinalizationRecord,
+  writeDeliveryState,
+  type DeliveryState,
+  type DispatchPlan,
+} from '../dispatch/delivery.js';
 
 interface ReviewCmdOptions {
   prUrl: string;
@@ -72,6 +93,8 @@ interface ReviewCmdOptions {
   /** Test seams — replace external companion discovery/session execution. */
   detectCompanionsFn?: typeof detectCompanions;
   runSingleSessionFn?: typeof runSingleSession;
+  resumePlannedSessionFn?: typeof resumePlannedSession;
+  runCodexReviewerFn?: typeof runCodexReviewer;
   /** Test seam — isolates config/packs/Linguist from the developer's real home dir. */
   homeOverride?: string;
 }
@@ -131,6 +154,78 @@ export function samePrIdentity(requested: PrRef, saved: PrRef): boolean {
   const requestedAuthority = canonicalPrAuthority(requested);
   const savedAuthority = canonicalPrAuthority(saved);
   return requestedAuthority === savedAuthority || (requestedAuthority === null && savedAuthority === null);
+}
+
+function requestedExecutionMode(opts: ReviewCmdOptions): { dryRun: boolean; publish: boolean } {
+  return { dryRun: !!opts.dryRun, publish: !!opts.publish };
+}
+
+function metadataMatchesPlan(live: GatherOutput['metadata'], plan: DispatchPlan): boolean {
+  return live.headSha === plan.metadata.headSha &&
+    live.baseSha === plan.metadata.baseSha &&
+    live.headBranch === plan.metadata.headBranch &&
+    live.baseBranch === plan.metadata.baseBranch &&
+    live.state === plan.metadata.state &&
+    live.isDraft === plan.metadata.isDraft;
+}
+
+async function validateRecoveryPreconditions(args: {
+  opts: ReviewCmdOptions;
+  outDir: string;
+  plan: DispatchPlan;
+  state: DeliveryState;
+  provider: PrProvider;
+  recoveryNeeded: boolean;
+}): Promise<{ promotingDryRunToPublish: boolean }> {
+  const requested = requestedExecutionMode(args.opts);
+  // Previewing with --dry-run and then posting what you saw is the point of a dry
+  // run, so dry-run → publish is allowed — but ONLY on a complete delivery, which
+  // keeps the real invariant ("partial findings never post") intact. The reverse
+  // (publish → dry-run) stays refused: that run may already have posted.
+  const promotingDryRunToPublish =
+    args.plan.execution.dryRun && !requested.dryRun && requested.publish;
+  if (promotingDryRunToPublish) {
+    if (args.recoveryNeeded) {
+      throw new Error(
+        'resume recovery refused [incomplete-promotion]: this dry-run delivery is incomplete — ' +
+        'finish it with --dry-run first, then resume without --dry-run to publish',
+      );
+    }
+  } else if (
+    requested.dryRun !== args.plan.execution.dryRun ||
+    requested.publish !== args.plan.execution.publish
+  ) {
+    throw new Error(
+      `resume recovery refused [mode-mismatch]: this run is sticky ` +
+      `${args.plan.execution.dryRun ? 'dry-run' : 'publish'} and cannot change execution mode`,
+    );
+  }
+  if (args.recoveryNeeded && readPostedMarker(args.outDir, args.opts.homeOverride) !== null) {
+    throw new Error('resume recovery refused [posted-marker-present]: reviewer recovery cannot be mixed with a prior post outcome');
+  }
+  const planFailures = validateDispatchArtifacts(args.plan);
+  if (planFailures.length > 0) {
+    throw new Error(`resume recovery refused [artifact-drift]: ${planFailures.join('; ')}`);
+  }
+  const stateFailures = validateDeliveryArtifacts(args.plan, args.state);
+  if (stateFailures.length > 0) {
+    throw new Error(`resume recovery refused [artifact-drift]: ${stateFailures.join('; ')}`);
+  }
+  const live = await args.provider.fetchMetadata(args.plan.pr);
+  if (!metadataMatchesPlan(live, args.plan)) {
+    throw new Error('resume recovery refused [stale-pr]: PR head/base/branches/state/draft no longer match the saved dispatch plan');
+  }
+  // Only a *posting* resume needs the PR still open. Requiring it unconditionally
+  // killed dry-run resume on every merged/closed PR — including the merged-PR
+  // dogfood flow — and reported it as "stale" even when every field matched.
+  if (requested.publish && live.state !== 'open') {
+    throw new Error(`resume recovery refused [pr-not-open]: cannot publish to a ${live.state} PR`);
+  }
+  const recoverablePendingCodex = args.state.codex?.state === 'pending' && args.state.codex.attempts > 0;
+  if (args.recoveryNeeded && args.state.kind === 'terminal-incomplete' && !recoverablePendingCodex) {
+    throw new Error(`resume recovery refused [attempts-exhausted]: ${args.state.reasonCodes.join(', ') || 'delivery is terminal'}`);
+  }
+  return { promotingDryRunToPublish };
 }
 
 export interface CapabilityUsage {
@@ -360,10 +455,8 @@ export async function finalizeReview(a: {
   dryRun?: boolean;
   failOn?: Severity;
   /**
-   * The orchestrator's primary contract failed (no parseable findings from the
-   * session). True can coexist with non-empty `outputs` — the Codex sibling's
-   * findings still dedupe and post — but the run is a pipeline failure (exit 2)
-   * and must never mint the done-state summary.
+  * Planned delivery is incomplete. True can coexist with parseable reviewer or
+  * Codex findings, but no partial output may reach dedupe/post or mint done state.
    */
   findingsUnavailable: boolean;
   /** Re-read the PR's comments before deduping (set by --resume; a fresh run just gathered them). */
@@ -376,14 +469,63 @@ export async function finalizeReview(a: {
   degraded?: string[];
   /** Parseable review completed, but a required operational contract failed. */
   operationalFailures?: string[];
+  /** Node-owned reviewer accounting for schema-versioned runs. */
+  deliveryState?: DeliveryState;
+  /** Control-store root override used by tests and isolated installations. */
+  homeOverride?: string;
+  /** The caller already owns this run's recovery/finalization lease. */
+  finalizationLeaseHeld?: boolean;
 }): Promise<ReviewResult> {
+  if (a.findingsUnavailable) {
+    const state = a.deliveryState;
+    const lastAttempt = state?.runtimeAttempts.at(-1);
+    const runtimeLine = lastAttempt
+      ? `Runtime exited ${lastAttempt.exitCode} after ${(lastAttempt.durationMs / 60_000).toFixed(1)}m; timeout=${lastAttempt.timedOut}. ` +
+        `Consolidated=${state!.consolidated}; phase1=${state!.phase1}; verifier=${state!.verifier.state}.`
+      : undefined;
+    const missingLine = state?.missing.length ? `Missing: ${state.missing.map((name) => safeSummaryValue(name)).join(', ')}.` : undefined;
+    const invalidLine = state?.invalid.length ? `Invalid: ${state.invalid.map((name) => safeSummaryValue(name)).join(', ')}.` : undefined;
+    const coverageLine = state?.codex.state === 'pending' || state?.codex.state === 'failed'
+      ? `Codex coverage=${state.codex.state} (attempts=${state.codex.attempts}).`
+      : state?.verifier.state === 'required' || state?.verifier.state === 'missing' || state?.verifier.state === 'invalid'
+        ? `Verifier coverage=${state.verifier.state} (attempts=${state.verifier.attempts}).`
+        : undefined;
+    const nextStep = state?.kind === 'terminal-incomplete'
+      ? 'No findings were posted; recovery attempts are exhausted, so start a fresh review.'
+      : `No findings were posted; use --resume ${safeSummaryValue(a.outDir.split(/[\\/]/).pop())} to recover only incomplete coverage.`;
+    const summary = state
+      ? [
+          `Incomplete reviewer delivery: ${state.valid.length}/${state.planned.length} valid, ${state.missing.length} missing, ${state.invalid.length} invalid; ` +
+            `${state.recoveredFindingCount} findings recovered but not accepted as a completed review.`,
+          runtimeLine,
+          missingLine,
+          invalidLine,
+          coverageLine,
+          nextStep,
+        ].filter((line): line is string => !!line).join('\n')
+      : 'pipeline failure: the orchestrator produced no parseable findings — this is NOT a clean PR.\n' +
+        'Details: orchestrator-failure.log in this run dir.\n' +
+        '--resume cannot recover this run (no loadable reviewer output); re-run the review.';
+    try {
+      writeFileSync(join(a.outDir, ERROR_FILE), summary + '\n', 'utf8');
+    } catch (err) {
+      process.stderr.write(`[review] could not write ${ERROR_FILE}: ${(err as Error).message}\n`);
+    }
+    appendProgress(a.outDir, 'error', state
+      ? `${state.valid.length}/${state.planned.length} reviewers delivered; incomplete`
+      : 'orchestrator produced no parseable findings');
+    return { outputs: a.outputs, summary, exitCode: 2 };
+  }
+
+  const releaseFinalizationLease = !a.finalizationLeaseHeld && (a.publish || a.deliveryState)
+    ? acquireFinalizationLease(controlDirForRun(a.outDir, a.homeOverride))
+    : () => {};
+  try {
+
   for (const out of a.outputs) {
     try {
-      writeFileSync(
-        join(a.outDir, `raw-${sanitizeForFilename(out.reviewerName)}.json`),
-        JSON.stringify(out.findings, null, 2),
-        'utf8',
-      );
+      const rawPath = join(a.outDir, `raw-${sanitizeForFilename(out.reviewerName)}.json`);
+      if (!existsSync(rawPath)) writeFileSync(rawPath, JSON.stringify(out.findings, null, 2), 'utf8');
     } catch (err) {
       process.stderr.write(`[review] could not write raw-${out.reviewerName}.json: ${(err as Error).message}\n`);
     }
@@ -488,7 +630,7 @@ export async function finalizeReview(a: {
 
   let postResult: Awaited<ReturnType<typeof runPost>> | undefined;
   if (a.publish) {
-    const marker = readPostedMarker(a.outDir);
+    const marker = readPostedMarker(a.outDir, a.homeOverride);
     // Refuse re-posting when we KNOW the prior post fully succeeded, when the
     // marker is corrupt, or when the prior run could not verify its writes —
     // all three are "cannot rule out a completed post", so all three fail
@@ -532,7 +674,7 @@ export async function finalizeReview(a: {
         posted: postResult.posted,
         attempted: postResult.attempted,
         verified: postResult.verified,
-      });
+      }, a.homeOverride);
       appendProgress(a.outDir, 'post', `${postResult.posted} posted${postResult.verified ? '' : ' (unverified)'}`);
     }
   } else if (a.dryRun) {
@@ -546,64 +688,68 @@ export async function finalizeReview(a: {
   }
   const hasOperationalFailure = operationalFailures.length > 0;
 
-  let summary: string;
-  if (a.findingsUnavailable) {
-    // A failed pipeline must never mint the done-state artifacts: `status`
-    // treats pr-review-summary.md as "done, exit 0" the moment it exists.
-    summary =
-      'pipeline failure: the orchestrator produced no parseable findings — this is NOT a clean PR.\n' +
-      'Details: orchestrator-failure.log in this run dir.\n' +
-      '--resume cannot recover this run (no loadable reviewer output); re-run the review.';
-    try {
-      writeFileSync(join(a.outDir, ERROR_FILE), summary + '\n', 'utf8');
-    } catch (err) {
-      // status degrades to the detached.log pointer — but say why on stderr
-      process.stderr.write(`[review] could not write ${ERROR_FILE}: ${(err as Error).message}\n`);
-    }
-    appendProgress(a.outDir, 'error', 'orchestrator produced no parseable findings');
+  const summary = renderSummary(
+    a.prUrl,
+    a.outputs,
+    finalFindings,
+    droppedCount,
+    Date.now() - a.overallStart,
+    postResult,
+    a.passRouting,
+    [...(a.degraded ?? []), ...operationalFailures],
+  );
+  if (hasOperationalFailure) {
+    const operationalError = ['operational review failure:', ...operationalFailures.map((failure) => `- ${failure}`)].join('\n');
+    writeFileSync(join(a.outDir, ERROR_FILE), operationalError + '\n', 'utf8');
   } else {
-    summary = renderSummary(
-      a.prUrl,
-      a.outputs,
-      finalFindings,
-      droppedCount,
-      Date.now() - a.overallStart,
-      postResult,
-      a.passRouting,
-      [...(a.degraded ?? []), ...operationalFailures],
-    );
-    writeFileSync(join(a.outDir, 'pr-review-summary.md'), summary, 'utf8');
-    writeFileSync(
-      join(a.outDir, 'pr-review-findings.json'),
-      JSON.stringify(
-        {
-          reviewers: a.outputs.map((o) => ({ reviewer: o.reviewerName, findings: o.findings })),
-          finalFindings,
-          droppedCount,
-        },
-        null,
-        2,
-      ),
-      'utf8',
-    );
-    process.stderr.write(`[review] wrote summary to ${join(a.outDir, 'pr-review-summary.md')}\n`);
-    if (hasOperationalFailure) {
-      const operationalError = ['operational review failure:', ...operationalFailures.map((failure) => `- ${failure}`)].join('\n');
-      writeFileSync(join(a.outDir, ERROR_FILE), operationalError + '\n', 'utf8');
-      appendProgress(a.outDir, 'error', `${operationalFailures.length} operational failure(s)`);
-    } else {
-      try {
-        unlinkSync(join(a.outDir, ERROR_FILE));
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-          throw new Error(`could not clear stale ${ERROR_FILE}: ${(error as Error).message}`);
-        }
+    try {
+      unlinkSync(join(a.outDir, ERROR_FILE));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new Error(`could not clear stale ${ERROR_FILE}: ${(error as Error).message}`);
       }
-      appendProgress(a.outDir, 'done', `${postResult?.posted ?? 0} posted, ${finalFindings.length} findings`);
     }
+  }
+  writeFileSync(join(a.outDir, 'pr-review-summary.md'), summary, 'utf8');
+  writeFileSync(
+    join(a.outDir, 'pr-review-findings.json'),
+    JSON.stringify(
+      {
+        reviewers: a.outputs.map((o) => ({ reviewer: o.reviewerName, findings: o.findings })),
+        finalFindings,
+        droppedCount,
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+  process.stderr.write(`[review] wrote summary to ${join(a.outDir, 'pr-review-summary.md')}\n`);
+  if (hasOperationalFailure) {
+    appendProgress(a.outDir, 'error', `${operationalFailures.length} operational failure(s)`);
+  } else {
+    appendProgress(a.outDir, 'done', `${postResult?.posted ?? 0} posted, ${finalFindings.length} findings`);
   }
 
   const exitCode = decideExitCode(a.findingsUnavailable || hasOperationalFailure, finalFindings, a.failOn);
+  if (a.deliveryState) {
+    const plan = assertDispatchPlanMirrors(
+      join(a.outDir, 'dispatch-plan.json'),
+      join(controlDirForRun(a.outDir, a.homeOverride), 'dispatch-plan.json'),
+    );
+    const summaryPath = join(a.outDir, 'pr-review-summary.md');
+    const findingsPath = join(a.outDir, 'pr-review-findings.json');
+    writeFinalizationRecord(a.outDir, a.homeOverride, {
+      schemaVersion: 1,
+      planFingerprint: plan.fingerprint,
+      completedAt: new Date().toISOString(),
+      exitCode,
+      summaryPath,
+      summaryDigest: sha256File(summaryPath),
+      findingsPath,
+      findingsDigest: sha256File(findingsPath),
+    });
+  }
   if (exitCode === 1) {
     process.stderr.write(`[review] --fail-on ${a.failOn}: findings at/above threshold\n`);
   } else if (exitCode === 2 && hasOperationalFailure) {
@@ -614,6 +760,9 @@ export async function finalizeReview(a: {
     );
   }
   return { outputs: a.outputs, summary, exitCode };
+  } finally {
+    releaseFinalizationLease();
+  }
 }
 
 /**
@@ -630,6 +779,10 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   if (!existsSync(gatherPath)) {
     throw new Error(`resume: run ${runId} has no pr-review-gather.json — cannot resume`);
   }
+  const controlDir = controlDirForRun(outDir, opts.homeOverride);
+  const releaseResumeLease = acquireFinalizationLease(controlDir);
+  try {
+    writeFileSync(join(outDir, 'run.pid'), String(process.pid), 'utf8');
   let gather = JSON.parse(readFileSync(gatherPath, 'utf8')) as GatherOutput;
   const invocationCwd = process.cwd();
   const repoRoot = gitTopLevel(invocationCwd) ?? invocationCwd;
@@ -645,12 +798,134 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     gather = { ...gather, pr: { ...gather.pr, project: requestedRef.project } };
   }
 
+  const planMirrorPath = join(outDir, 'dispatch-plan.json');
+  const authoritativePlanPath = join(controlDir, 'dispatch-plan.json');
+  const stateMirrorPath = join(outDir, 'delivery-state.json');
+  const authoritativeStatePath = join(controlDir, 'delivery-state.json');
+  const existsOrBackup = (path: string) =>
+    existsSync(path) || existsSync(join(dirname(path), `.${basename(path)}.bak`));
+  const hasAnyPlannedArtifact = [planMirrorPath, authoritativePlanPath, stateMirrorPath, authoritativeStatePath]
+    .some(existsOrBackup);
+  if (hasAnyPlannedArtifact) {
+    recoverAtomicFileSync(authoritativePlanPath);
+    recoverAtomicFileSync(authoritativeStatePath);
+    if (!existsSync(authoritativePlanPath) || !existsSync(authoritativeStatePath)) {
+      throw new Error('resume recovery refused [control-record-incomplete]: authoritative dispatch plan and delivery state are required');
+    }
+    const plan = assertDispatchPlanMirrors(planMirrorPath, authoritativePlanPath);
+    if (!samePrIdentity(requestedRef, plan.pr) || resolve(plan.runDir) !== resolve(outDir)) {
+      throw new Error('resume recovery refused [identity-mismatch]: saved plan does not belong to this PR/run directory');
+    }
+    const state = repairDeliveryStateMirror(stateMirrorPath, authoritativeStatePath, plan);
+    const recoveryNeeded = state.kind !== 'complete';
+    const { promotingDryRunToPublish } = await validateRecoveryPreconditions({
+      opts, outDir, plan, state, provider, recoveryNeeded,
+    });
+    process.stderr.write(
+      recoveryNeeded
+        ? `[review] resume: ${state.valid.length}/${state.planned.length} reviewers delivered; re-dispatching unresolved only\n`
+        : `[review] resume: planned delivery is complete; replaying saved consolidated findings\n`,
+    );
+    appendProgress(outDir, 'resume', recoveryNeeded ? 'selective reviewer recovery' : 'complete planned replay');
+    const session = recoveryNeeded
+      ? await (opts.resumePlannedSessionFn ?? resumePlannedSession)(plan, stateMirrorPath, authoritativeStatePath)
+      : {
+          outputs: parseFindingsFile(plan.findingsPath, '(resumed)', 0),
+          rawOrchestratorOutput: '',
+          rawOrchestratorStderr: '',
+          exitCode: 0,
+          durationMs: 0,
+          findingsUnavailable: false,
+          deliveryState: state,
+        };
+    if (plan.codex.enabled && session.deliveryState && session.deliveryState.codex.state !== 'valid') {
+      let recoveredExistingCodex = false;
+      const existingAttemptPath = session.deliveryState.codex.attempts > 0
+        ? join(plan.codex.attemptsDir, `attempt-${session.deliveryState.codex.attempts}.json`)
+        : undefined;
+      if (
+        session.deliveryState.codex.state === 'pending' &&
+        existingAttemptPath &&
+        existsSync(existingAttemptPath)
+      ) {
+        const recoveredCodex = mapCodexResult({
+          exitCode: 0,
+          timedOut: false,
+          raw: readFileSync(existingAttemptPath, 'utf8'),
+          durationMs: 0,
+        });
+        recordCodexResult(plan, session.deliveryState, recoveredCodex);
+        writeDeliveryState(session.deliveryState, stateMirrorPath, authoritativeStatePath);
+        recoveredExistingCodex = !recoveredCodex.error;
+      }
+      if (recoveredExistingCodex) {
+        // Recovered the completed attempt written before the parent process stopped.
+      } else if (session.deliveryState.codex.attempts >= plan.codex.maxAttempts) {
+        session.deliveryState.kind = 'terminal-incomplete';
+        session.deliveryState.reasonCodes = ['codex-attempts-exhausted'];
+        session.findingsUnavailable = true;
+      } else if (session.deliveryState.valid.length === session.deliveryState.planned.length) {
+        reserveCodexAttempt(plan, session.deliveryState);
+        writeDeliveryState(session.deliveryState, stateMirrorPath, authoritativeStatePath);
+        const codexOut = await (opts.runCodexReviewerFn ?? runCodexReviewer)({
+          contextPath: plan.codex.contextPath,
+          skillsPath: plan.codex.skillsPath,
+          outDir,
+          outputPath: join(plan.codex.attemptsDir, `attempt-${session.deliveryState.codex.attempts}.json`),
+        });
+        recordCodexResult(plan, session.deliveryState, codexOut);
+        writeDeliveryState(session.deliveryState, stateMirrorPath, authoritativeStatePath);
+      }
+    }
+    if (plan.codex.enabled && session.deliveryState?.codex.state === 'valid' && session.deliveryState.codex.output) {
+      if (!session.outputs.some((output) => output.reviewerName === 'codex')) {
+        session.outputs.push(session.deliveryState.codex.output);
+      }
+    }
+    if (session.deliveryState) session.findingsUnavailable = session.deliveryState.kind !== 'complete';
+    let passRouting: PassRoute[] | undefined;
+    const routingPath = join(outDir, 'passes.json');
+    if (existsSync(routingPath)) {
+      try {
+        const parsed: unknown = JSON.parse(readFileSync(routingPath, 'utf8'));
+        if (Array.isArray(parsed) && parsed.every((route) => route && typeof route.name === 'string' && typeof route.matchedBy === 'string')) {
+          passRouting = parsed as PassRoute[];
+        }
+      } catch {
+        // Display-only routing metadata never weakens recovery safety.
+      }
+    }
+    return await finalizeReview({
+      prUrl: opts.prUrl,
+      outDir,
+      gather,
+      outputs: session.outputs,
+      refreshExisting: true,
+      dedupeMode: plan.execution.dedupeMode,
+      // The saved mode is authoritative EXCEPT for the one transition the guard
+      // above admits: a complete dry-run the caller asked to publish.
+      publish: promotingDryRunToPublish || plan.execution.publish,
+      dryRun: promotingDryRunToPublish ? false : plan.execution.dryRun,
+      failOn: plan.execution.failOn,
+      findingsUnavailable: session.findingsUnavailable,
+      deliveryState: session.deliveryState,
+      forcePost: opts.forcePost,
+      overallStart,
+      provider,
+      passRouting,
+      homeOverride: opts.homeOverride,
+      finalizationLeaseHeld: true,
+    });
+  }
+
   let outputs: ReviewerOutput[] | null = null;
+  let loadedLegacyOutput: (typeof REVIEWER_OUTPUT_FILES)[number] | null = null;
   for (const f of REVIEWER_OUTPUT_FILES) {
     const p = join(outDir, f);
     if (!existsSync(p)) continue;
     try {
       outputs = parseFindingsFile(p, '(resumed)', 0);
+      loadedLegacyOutput = f;
       process.stderr.write(`[review] resume: loaded reviewer outputs from ${f}\n`);
       break;
     } catch (err) {
@@ -658,8 +933,33 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     }
   }
   if (!outputs) {
+    const rawSidecars = readdirSync(outDir).filter((name) => /^raw-.*\.json$/i.test(name));
+    if (rawSidecars.length > 0) {
+      throw new Error(
+        `resume: run ${runId} is a legacy partial run with ${rawSidecars.length} raw reviewer sidecar(s) but no schema-v1 dispatch plan — ` +
+        `selective recovery is unsupported; preserve this run as evidence and start a fresh review`,
+      );
+    }
     throw new Error(
       `resume: run ${runId} has no reviewer output (single-session-findings.json / phase1-findings.json) — nothing to resume`,
+    );
+  }
+  if (loadedLegacyOutput === 'phase1-findings.json' && opts.publish) {
+    throw new Error(
+      `resume: legacy phase1-findings.json is diagnostic evidence, not authenticated complete delivery — ` +
+      `refusing to publish it; start a fresh publishing review`,
+    );
+  }
+  if (
+    loadedLegacyOutput === 'single-session-findings.json' &&
+    opts.publish &&
+    outputs.some((output) => output.reviewerName !== 'verifier' && output.findings.some(
+      (finding) => finding.severity === 'CRITICAL' || finding.severity === 'HIGH',
+    )) &&
+    !outputs.some((output) => output.reviewerName === 'verifier')
+  ) {
+    throw new Error(
+      'resume: severe legacy consolidated findings have no verifier evidence — refusing to publish unauthenticated incomplete coverage; start a fresh publishing review',
     );
   }
 
@@ -687,7 +987,7 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
       process.stderr.write(`[review] resume: passes.json unreadable (${(err as Error).message}) — Skills section omitted\n`);
     }
   }
-  return finalizeReview({
+  return await finalizeReview({
     prUrl: opts.prUrl,
     outDir,
     gather,
@@ -705,7 +1005,18 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     overallStart,
     provider,
     passRouting,
+    homeOverride: opts.homeOverride,
+    finalizationLeaseHeld: true,
   });
+  } finally {
+    try {
+      const pidPath = join(outDir, 'run.pid');
+      if (existsSync(pidPath) && readFileSync(pidPath, 'utf8').trim() === String(process.pid)) unlinkSync(pidPath);
+    } catch {
+      // Best-effort; a stale pid is harmless once this process exits.
+    }
+    releaseResumeLease();
+  }
 }
 
 export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
@@ -981,6 +1292,37 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     repoRoot: cwd,
     mcpServers: mcpCapabilities.servers,
     trustedMcpConfig: mcpCapabilities.trustedRepoConfig,
+    controlDir: controlDirForRun(outDir, opts.homeOverride),
+    persistRecoveryControl: !opts.contextOnly,
+    execution: {
+      dryRun: !!opts.dryRun,
+      publish: !!opts.publish,
+      dedupeMode: config.dedupeMode,
+      failOn: opts.failOn,
+    },
+    configProjection: {
+      defaultModel: config.defaultModel,
+      runtime,
+      dedupeMode: config.dedupeMode,
+      diffExcludes: [...config.diffExcludes],
+      skipReviewers: [...effectiveSkip],
+      invokeCompanions: config.invokeCompanions,
+      invokeCodex: includeCodex,
+      language: config.language,
+      skillPacks: config.skillPacks.map((pack) => ({
+        name: pack.name,
+        git: maskUrl(pack.git) ?? pack.git,
+        ref: pack.ref,
+        include: [...pack.include],
+        exclude: [...pack.exclude],
+        mode: pack.mode,
+        baseline: [...pack.baseline],
+      })),
+      installedCompanions: [...installedCompanions],
+      installedPlugins: loaded.installedPlugins.map((plugin) => ({ id: plugin.id, version: plugin.version })),
+      mcpServers: mcpCapabilities.servers,
+    },
+    cliArtifactPath: process.argv[1],
   };
 
   if (opts.contextOnly) {
@@ -1077,15 +1419,22 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   // here is what routes the failure through codex-failure.log instead of
   // leaving one stderr line behind.
   let codexPromise: Promise<ReviewerOutput> | null = null;
-  if (includeCodex) {
-    codexPromise = runCodexReviewer({
+  const sessionPromise = (opts.runSingleSessionFn ?? runSingleSession)(sessionOpts, sessionCtx);
+  if (includeCodex && sessionCtx.dispatchPlan && sessionCtx.deliveryStatePath && sessionCtx.authoritativeDeliveryStatePath) {
+    const codexState = repairDeliveryStateMirror(
+      sessionCtx.deliveryStatePath,
+      sessionCtx.authoritativeDeliveryStatePath,
+      sessionCtx.dispatchPlan,
+    );
+    codexPromise = (opts.runCodexReviewerFn ?? runCodexReviewer)({
       contextPath: sessionCtx.contextPath,
       skillsPath: sessionCtx.skillsFiles['project'] ?? sessionCtx.skillsFiles['all'],
       outDir,
+      outputPath: join(sessionCtx.dispatchPlan.codex.attemptsDir, `attempt-${codexState.codex.attempts}.json`),
     });
   }
 
-  const session = await (opts.runSingleSessionFn ?? runSingleSession)(sessionOpts, sessionCtx);
+  const session = await sessionPromise;
 
   const outputs = session.outputs;
   const capabilityAudit = readCapabilityUsage(sessionCtx.capabilityFiles);
@@ -1125,6 +1474,21 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   if (codexPromise) {
     const codexOut = await codexPromise;
     outputs.push(codexOut);
+    if (sessionCtx.dispatchPlan && session.deliveryState && sessionCtx.deliveryStatePath) {
+      const persistedCodex = repairDeliveryStateMirror(
+        sessionCtx.deliveryStatePath,
+        sessionCtx.authoritativeDeliveryStatePath!,
+        sessionCtx.dispatchPlan,
+      ).codex;
+      session.deliveryState.codex = persistedCodex;
+      recordCodexResult(sessionCtx.dispatchPlan, session.deliveryState, codexOut);
+      writeDeliveryState(
+        session.deliveryState,
+        sessionCtx.deliveryStatePath,
+        sessionCtx.authoritativeDeliveryStatePath,
+      );
+      session.findingsUnavailable = session.deliveryState.kind !== 'complete';
+    }
   }
   writeCompanionArtifact(completedCompanionReviewers);
   appendProgress(outDir, 'dispatch', `done — ${outputs.reduce((n, o) => n + o.findings.length, 0)} raw findings`);
@@ -1139,20 +1503,22 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     dryRun: opts.dryRun,
     failOn: opts.failOn,
     findingsUnavailable: session.findingsUnavailable,
+    deliveryState: session.deliveryState,
     operationalFailures: [...passOperationalFailures, ...companionOperationalFailures],
     forcePost: opts.forcePost,
     degraded,
     overallStart,
     provider,
     passRouting: sessionCtx.routing,
+    homeOverride: opts.homeOverride,
   });
 
   if (session.findingsUnavailable) {
     const codexNote = outputs.some((o) => o.reviewerName === 'codex' && o.findings.length > 0)
-      ? ' Codex second-opinion findings were still collected/posted, but a lone sibling pass is not a complete review.'
+      ? ' Codex second-opinion findings were retained locally, but partial coverage is never posted.'
       : '';
     process.stderr.write(
-      `[review] pipeline failure: the orchestrator produced no parseable findings (this is NOT a clean PR).${codexNote}\n`,
+      `[review] pipeline failure: reviewer delivery is incomplete (this is NOT a clean PR).${codexNote}\n`,
     );
     writeOrchestratorFailureLog(outDir, session.exitCode, session.rawOrchestratorOutput, session.rawOrchestratorStderr);
   }

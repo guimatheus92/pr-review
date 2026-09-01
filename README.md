@@ -103,7 +103,7 @@ npm install && npm run build
 /pr-review <pr-url> --no-codex         # skip the Codex second-opinion reviewer
 ```
 
-Exit codes: `0` clean, `1` findings at/above `--fail-on`, `2` pipeline error (including an orchestrator run that produced no parseable findings).
+Exit codes: `0` complete with no finding at/above `--fail-on`, `1` findings at/above `--fail-on`, `2` incomplete delivery or another operational failure. Partial findings never post.
 
 ## Posting guarantees
 
@@ -125,7 +125,7 @@ your-repo/
         └── team-style-guide.md
 ```
 
-Every matched repo skill is injected into **every review pass** as an authoritative project rule (`skills-project.md` — it overrides generic judgement), keeping its plain name (`our-auth-conventions`). Rules are discovered from `.claude/skills`, `.claude/rules`, `.copilot/skills`, `.github/skills`, `.github/instructions`, and `.agents/skills`; `applies_to`/`applyTo` and Claude's `paths` are equivalent scopes. A targeted skill matches exactly when an in-scope changed file matches; a skill without targeting goes through the `name` + `description` relevance heuristic against the changed file paths and the diff. **Every** match injects — there is no numeric cap — and skill bodies are inlined whole, never truncated. Skills that don't match land in `skills-index.md`, an on-demand **index** every pass can read when relevant. (With `skill_packs: []`, your skills run as the passes themselves — up to 10 as passes, with overflow still injected whole as context.)
+Every matched repo skill is injected into **every review pass** as an authoritative project rule (`skills-project.md` — it overrides generic judgement), keeping its plain name (`our-auth-conventions`). Rules are discovered from `.claude/skills`, `.claude/rules`, `.copilot/skills`, `.github/skills`, `.github/instructions`, and `.agents/skills`; `applies_to`/`applyTo` and Claude's `paths` are equivalent scopes. A targeted skill matches exactly when an in-scope changed file matches; a skill without targeting goes through the `name` + `description` relevance heuristic against the changed file paths and the diff. **Every** match injects — there is no numeric cap — and skill bodies are inlined whole, never truncated. Skills that don't match land in `skills-index.md`, an on-demand **index** every pass can read when relevant; large indexes split into digest-bound shards, every body is materialized inside the isolated run directory, and each entry retains its original source for provenance. (With `skill_packs: []`, your skills run as the passes themselves — up to 10 as passes, with overflow still injected whole as context.)
 
 Rule files added or modified by the PR under review are untrusted input: they are excluded before same-name dedupe from authoritative context and the on-demand index, and the summary names the skipped coverage. This includes in-repo files supplied through `--skill`; `--force-skill` is the explicit trust override. Linked rule sources that resolve outside the checkout fail closed. Unchanged rules from the checkout remain authoritative.
 
@@ -147,9 +147,11 @@ Three packs are pre-configured:
 
 Your own skills are CONTEXT, not lenses: every matched repo/explicit/forced skill is injected into EVERY pass as authoritative project rules. Pack passes are selected from evidence tiers: specific path glob, dependency/framework token, language-consistent type/manifest glob, then generic tag; at most six stack passes run, plus EVERY baseline pointer. A product guide cannot qualify merely because the PR touches its language or a generic manifest. Stack detection emits canonical Linguist names (aliases are lookup metadata), reads shallow root manifests plus manifests owning changed files, and separates language, ecosystem, dependency name, and dependency-token evidence. Legacy and canonical Azure DevOps remotes normalize to the same checkout identity. Docs-only PRs run only glob/forced passes; a code PR that matches zero passes exits with a `packs suggest` hint.
 
-Installed plugins — from Copilot CLI or Claude Code alike — provide an additional generic capability source. The CLI reads their manifests, namespaces their skills as `<plugin>/<skill>`, and can select up to two review-oriented plugin passes from exact repository identity, plugin/path identity, or direct `appliesTo` evidence. It also inventories MCP server names from trusted repository config, user config, and plugin manifests in `capabilities.json`. Installed-plugin passes record which servers were available, attempted, and successfully used; repository MCP config is ignored when it changed in the PR, when the checkout is not the PR repository, or when a server would launch code from the reviewed checkout itself (an untouched `.mcp.json` pointing at a script the PR rewrote would otherwise execute branch-authored code); servers that launch external tooling still load. Declared skill paths and symlinks cannot escape an installed plugin's root.
+Installed plugins — from Copilot CLI or Claude Code alike — provide an additional generic capability source. The CLI reads their manifests, namespaces their skills as `<plugin>/<skill>`, and can select up to two review-oriented plugin passes from exact repository identity, plugin/path identity, or direct `appliesTo` evidence. It inventories MCP server names from trusted repository config, user config, and plugin manifests in `capabilities.json`; repository MCP config is ignored when it changed in the PR, when the checkout is not the PR repository, or when a server would launch code from the reviewed checkout itself. Review runtimes disable ambient, built-in, and inventoried MCP servers so a pass cannot bypass the CLI's posting boundary; capability sidecars record them as unavailable. Declared skill paths and symlinks cannot escape an installed plugin's root.
 
-Each dispatched pass and companion writes an independent `raw-<reviewer>.json` result. The orchestrator still produces the normal consolidated file, but if its turn ends after all tasks return, the CLI can recover from the complete set of sidecars. Missing or invalid sidecars remain an operational failure rather than being interpreted as a clean review.
+Each task call carries the runtime-required `description` and writes exact `Finding[]` JSON to `reviewer-attempts/<reviewer>/attempt-N.json`. Node validates and promotes it to a collision-resistant, write-once `raw-<reviewer>.json`; the LLM orchestrator only dispatches tasks and never aggregates results. If the initial session delivers only part of the planned set, Node preserves every valid sidecar and runs one automatic recovery session containing only missing/invalid reviewers. A still-incomplete run exits 2 and `--resume <run-id>` gets the bounded final targeted attempt. Partial findings are diagnostic evidence only: they are never deduped or posted.
+
+After complete Phase 1 delivery, Node writes `phase1-findings.json`, decides whether HIGH/CRITICAL findings require reconciliation, runs the verifier as a separate direct session, and writes `single-session-findings.json`. The run plan, attempts, artifact hashes, verifier/Codex state, execution mode, and posting marker are mirrored in the run directory and authenticated under `~/.pr-review/control/`. `status` reports counts such as `reviewers 18/22 · 14 findings · 4 missing` and prints `--dry-run` in the recovery command for a dry-run run. A complete dry run can be promoted to publishing — resume it without `--dry-run` and the previewed findings post; an incomplete one is refused (`incomplete-promotion`), and publish can never be demoted to dry-run. Previews and benign no-dispatch runs do not create recovery control. Legacy consolidated runs retain replay support; legacy Phase 1 is dry-run diagnostic evidence only.
 
 Manage packs from the CLI:
 
@@ -168,7 +170,7 @@ Configure packs with the `skill_packs:` yaml key. Unlike every other list key (w
 
 Skip any pass with `--skip <names>` (full `awesome-copilot/go` or bare `go`; also `verifier`, `codex`). The **verifier** remains a pipeline step: dispatched as a generic agent to reconcile across passes when phase 1 produces a CRITICAL/HIGH finding.
 
-When the `codex` CLI is installed, an optional `codex` second-opinion reviewer also runs — as a sibling process in parallel with the agent session, reading the same PR context and the union of pass skills (`skills-all.md`). A different model family catches what the primary model misses. Its findings merge into the normal dedupe/post pipeline. Opt out with `--no-codex`, `invoke_codex: false`, `PR_REVIEW_NO_CODEX=1`, or `--skip codex`.
+When the `codex` CLI is installed, an optional `codex` second-opinion reviewer also runs as a read-only sibling process in parallel with the agent session. Each attempt writes strict `Finding[]` JSON under `codex-attempts/`; authenticated state reserves the attempt before launch, so a parent-process crash can reuse completed output without silently dropping or rerunning it. Opt out with `--no-codex`, `invoke_codex: false`, `PR_REVIEW_NO_CODEX=1`, or `--skip codex`.
 
 ## CLI reference
 
@@ -183,6 +185,8 @@ pr-review review <pr-url> [flags]            # full pipeline
 #   --runtime <name>        copilot|claude|auto — which agent CLI hosts the session
 #                           (yaml: runtime, env: PR_REVIEW_RUNTIME; default auto)
 #   --no-codex              skip the Codex second-opinion reviewer
+#   --resume <run-id>       reuse complete authenticated output, or make the
+#                           final targeted attempt for incomplete coverage
 #   --skill <file...>       include files while respecting applyTo/paths
 #   --force-skill <file...> include files regardless of applyTo/paths
 #   --copilot <path>        path to the copilot binary (implies --runtime copilot unless --runtime given)

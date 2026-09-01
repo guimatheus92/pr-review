@@ -14,6 +14,35 @@ import type { GatherOutput, ReviewerOutput, Severity } from './types.js';
 // Injected by scripts/bundle.mjs from package.json; dev runs via tsx see the fallback.
 declare const __PR_REVIEW_VERSION__: string | undefined;
 
+/** Grace period before a failing command stops waiting for stragglers. */
+const FATAL_EXIT_GRACE_MS = 3000;
+
+/**
+ * Exit a failed command without either of the two traps a bare `process.exit()`
+ * or a bare `process.exitCode` falls into.
+ *
+ * `process.exit()` aborts the process on Windows when undici's keep-alive handle
+ * is still closing — `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING),
+ * src\win\async.c` — turning a clean exit 2 into exit 127 and a C-level crash
+ * message. Both `review` and `post` reach their catch straight after a live
+ * provider read, so both hit it.
+ *
+ * Plain `process.exitCode` avoids that but waits for every ref'd handle, and the
+ * pipeline can leave one behind: if the review throws after the Codex sibling was
+ * spawned, that child and its 15-minute SIGKILL timer are never awaited, so the
+ * CLI would sit there for a quarter of an hour — and, worse, a detached run's
+ * `run.pid` stays alive, so `status` keeps reporting `running` instead of the
+ * failure it already wrote to error.txt.
+ *
+ * So: set the code, let the loop drain normally (the fast, clean path), and keep
+ * an unref'd backstop that forces the exit if something is still holding on. By
+ * then the socket that caused the assertion is long closed.
+ */
+function fatalExit(code: number): void {
+  process.exitCode = code;
+  setTimeout(() => process.exit(code), FATAL_EXIT_GRACE_MS).unref();
+}
+
 const program = new Command();
 
 program
@@ -171,7 +200,7 @@ program
       } catch (err) {
         // Detached child (--run-dir set): persist the failure so `status` can
         // say why — the parent is long gone and stdout goes to detached.log.
-        if (opts.runDir) {
+        if (opts.runDir && !(err as { preserveRunState?: boolean }).preserveRunState) {
           try {
             const { writeFileSync } = await import('node:fs');
             const { join } = await import('node:path');
@@ -182,7 +211,7 @@ program
           }
         }
         console.error((err as Error).message);
-        process.exit(2);
+        fatalExit(2);
       }
     },
   );
@@ -240,7 +269,7 @@ program
       await runPost({ prUrl, outputs, publish: !opts.dryRun, gather });
     } catch (err) {
       console.error((err as Error).message);
-      process.exit(1);
+      fatalExit(1);
     }
   });
 

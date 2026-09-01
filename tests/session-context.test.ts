@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MAX_TOTAL_PASSES, prepareSessionContext } from '../src/dispatch/single-session.js';
+import { readDispatchPlan } from '../src/dispatch/delivery.js';
 import { selectPasses, type IndexEntry, type ReviewPass } from '../src/dispatch/pass-select.js';
 import type { GatherOutput, SkillDefinition } from '../src/types.js';
 
@@ -73,7 +74,7 @@ test('passes — one pass-*.md per pass (rules + ONE body), union has all, promp
     ];
     const ctx = prepareSessionContext(baseOpts(outDir, ['src/main.go'], passes));
 
-    const goFile = join(outDir, 'pass-awesome-copilot_go.md');
+    const goFile = ctx.skillsFiles['awesome-copilot/go']!;
     assert.ok(existsSync(goFile), 'pass file exists with sanitized name');
     const goBody = readFileSync(goFile, 'utf8');
     assert.ok(goBody.includes('# Review pass: awesome-copilot/go'));
@@ -86,8 +87,13 @@ test('passes — one pass-*.md per pass (rules + ONE body), union has all, promp
 
     assert.ok(ctx.orchestratorPrompt.includes('record as reviewer name `awesome-copilot/go`'));
     assert.ok(ctx.orchestratorPrompt.includes('record as reviewer name `owasp/error-handling`'));
-    assert.ok(ctx.orchestratorPrompt.includes('phase1-findings.json'));
-    assert.ok(ctx.orchestratorPrompt.includes('CRITICAL or HIGH'), 'verifier dispatch is conditional');
+    assert.ok(!ctx.orchestratorPrompt.includes('phase1-findings.json'), 'Node, not the orchestrator, assembles Phase 1');
+    assert.ok(!ctx.orchestratorPrompt.includes('record as reviewer name `verifier`'), 'Node gates the verifier separately');
+    assert.ok(ctx.dispatchPlanPath && existsSync(ctx.dispatchPlanPath));
+    assert.deepEqual(ctx.dispatchPlan?.reviewers.map((reviewer) => reviewer.name), passes.map((reviewer) => reviewer.name));
+    assert.deepEqual(readDispatchPlan(ctx.dispatchPlanPath!).reviewers.map((reviewer) => reviewer.name), passes.map((reviewer) => reviewer.name));
+    assert.ok(ctx.dispatchPlan?.verifier.enabled);
+    assert.ok(ctx.dispatchPlan?.verifier.promptTemplate?.includes('phase1-findings.json'));
 
     const contextBody = readFileSync(ctx.contextPath, 'utf8');
     assert.ok(!contextBody.includes('BODY_OF_'), 'skill bodies never live in the shared context file');
@@ -117,20 +123,22 @@ test('no-posting directive — reaches the orchestrator and EVERY dispatch line,
     const prompt = ctx.orchestratorPrompt;
     const directive = 'do NOT post, comment, review, approve, or write ANYTHING to the pull request';
     const dispatchLines = prompt.split('\n').filter((l) => /^- .*(task|Task)\(/.test(l));
-    // 2 passes + 6 companion agents + 1 companion slash + 1 verifier — a lost line is a failure too.
-    assert.equal(dispatchLines.length, 10, `expected exactly 10 dispatch lines, got ${dispatchLines.length}`);
+    // 2 passes + 6 companion agents + 1 companion slash. The verifier runs in a separate Node-gated session.
+    assert.equal(dispatchLines.length, 9, `expected exactly 9 Phase-1 dispatch lines, got ${dispatchLines.length}`);
     // Every task-call in the prompt must BE one of those bullet lines — a dispatch
     // added as prose or a multi-line prompt would escape the per-line assertions.
     const totalCalls = (prompt.match(/task\(agent_type=|Task\(subagent_type=/g) ?? []).length;
     assert.equal(totalCalls, dispatchLines.length, 'a task call exists outside the audited dispatch bullets');
     for (const line of dispatchLines) {
       assert.ok(line.includes(directive), `dispatch line missing the no-posting directive: ${line.slice(0, 120)}…`);
+      assert.equal((line.match(/description=/g) ?? []).length, 1, 'every dispatch has exactly one description');
     }
     const slashLine = dispatchLines.find((l) => l.includes('/code-review:code-review'));
     assert.ok(slashLine, 'code-review companion slash line present');
     assert.ok(slashLine.includes('analysis-only'), 'slash companions run analysis-only');
     assert.ok(slashLine.includes('SKIP that step'), 'posting steps in the command are explicitly skipped');
     assert.ok(prompt.includes(`${directive}`) && prompt.includes('This binds you AND every subagent'), 'orchestrator-level rule present');
+    assert.ok(ctx.dispatchPlan?.verifier.promptTemplate?.includes(directive), 'direct verifier keeps the no-posting directive');
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
@@ -149,7 +157,7 @@ test('triage — docs-only PR dispatches only file-scoped (glob/forced) passes, 
     assert.deepEqual(ctx.passes.map((p) => p.name), ['p/markdown', 'repo/forced-one']);
     assert.deepEqual(ctx.triageSkipped, ['p/tagged', 'p/generic']);
     assert.ok(!ctx.orchestratorPrompt.includes('record as reviewer name `p/generic`'));
-    assert.ok(ctx.orchestratorPrompt.includes('only touches documentation files'));
+    assert.deepEqual(ctx.dispatchPlan?.reviewers.map((reviewer) => reviewer.name), ['p/markdown', 'repo/forced-one']);
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
@@ -251,20 +259,25 @@ test('codex + companions — both read the union file skills-all.md', () => {
       .find((l) => l.includes('agent_type="code-reviewer"'));
     assert.ok(companionLine, 'companion agents dispatched');
     assert.ok(companionLine.includes('skills-all.md'), 'companions read the union');
-    assert.ok(companionLine.includes('raw-companion_pr-review-toolkit_code-reviewer.json'));
+    assert.ok(companionLine.includes('reviewer-attempts'));
+    assert.ok(companionLine.includes('attempt-1.json'));
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
 });
 
-test('verifier — pipeline step: verifier.md written, generic-agent line in a conditional phase; --skip verifier removes both', () => {
+test('verifier — Node-owned plan carries a direct conditional verifier; --skip removes it', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
     const ctx = prepareSessionContext(baseOpts(outDir, ['src/app.ts'], [pass('p/one')]));
     assert.ok(ctx.verifierPath && existsSync(ctx.verifierPath));
     assert.ok(readFileSync(ctx.verifierPath!, 'utf8').includes('Cross-cutting issues'));
-    assert.ok(ctx.orchestratorPrompt.includes('verifier.md'));
-    assert.ok(ctx.orchestratorPrompt.includes('record as reviewer name `verifier`'));
+    assert.ok(!ctx.orchestratorPrompt.includes('verifier.md'));
+    assert.ok(!ctx.orchestratorPrompt.includes('record as reviewer name `verifier`'));
+    assert.equal(ctx.dispatchPlan?.verifier.enabled, true);
+    assert.ok(ctx.dispatchPlan?.verifier.promptTemplate?.includes('verifier.md'));
+    assert.ok(ctx.dispatchPlan?.verifier.promptTemplate?.includes('{{PR_REVIEW_OUTPUT_PATH}}'));
+    assert.ok(ctx.dispatchPlan?.verifier.canonicalOutputPath?.endsWith('raw-verifier.json'));
 
     const outDir2 = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
     try {
@@ -274,6 +287,7 @@ test('verifier — pipeline step: verifier.md written, generic-agent line in a c
       });
       assert.equal(skipped.verifierPath, undefined);
       assert.ok(!skipped.orchestratorPrompt.includes('record as reviewer name `verifier`'));
+      assert.equal(skipped.dispatchPlan?.verifier.enabled, false);
     } finally {
       rmSync(outDir2, { recursive: true, force: true });
     }
@@ -363,7 +377,7 @@ test('stack + index — pr-context carries ## Stack and points at skills-index.m
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
     const indexEntries: IndexEntry[] = [
-      { name: 'anthropic-cybersecurity/detecting-x', description: 'detects x', source: '/packs/a/x.md', tags: ['x'] },
+      { name: 'anthropic-cybersecurity/detecting-x', description: 'detects x', source: '/packs/a/x.md', body: 'DETECT-X-BODY', tags: ['x'] },
     ];
     const ctx = prepareSessionContext({
       ...baseOpts(outDir, ['src/app.ts'], [pass('p/one')], indexEntries),
@@ -376,6 +390,13 @@ test('stack + index — pr-context carries ## Stack and points at skills-index.m
     assert.ok(contextBody.includes('skills-index.md'));
     const index = readFileSync(join(outDir, 'skills-index.md'), 'utf8');
     assert.ok(index.includes('**anthropic-cybersecurity/detecting-x** — detects x'));
+    const indexedSkill = readdirSync(outDir).find((name) => name.startsWith('indexed-skill-'));
+    assert.ok(indexedSkill);
+    assert.ok(index.includes(join(outDir, indexedSkill)));
+    assert.ok(readFileSync(join(outDir, indexedSkill), 'utf8').includes('DETECT-X-BODY'));
+    assert.ok(!index.includes('DETECT-X-BODY'), 'index points to the materialized body without inlining it');
+    assert.ok(ctx.dispatchPlan?.artifacts.some((artifact) => artifact.path === join(outDir, 'skills-index.md')));
+    assert.ok(ctx.dispatchPlan?.artifacts.some((artifact) => artifact.path === join(outDir, indexedSkill)));
     // Index bodies never leak into pass files.
     for (const f of readdirSync(outDir).filter((n) => n.startsWith('pass-'))) {
       assert.ok(!readFileSync(join(outDir, f), 'utf8').includes('detecting-x'));
@@ -391,6 +412,47 @@ test('stack + index — pr-context carries ## Stack and points at skills-index.m
     } finally {
       rmSync(outDir2, { recursive: true, force: true });
     }
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('index — shards every exposed entry and keeps duplicate names distinct', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const indexEntries: IndexEntry[] = [
+      { name: 'duplicate', description: 'first', source: '/one.md', body: 'FIRST-BODY', tags: [] },
+      { name: 'duplicate', description: 'second', source: '/two.md', body: 'SECOND-BODY', tags: [] },
+      ...Array.from({ length: 1_000 }, (_, index) => ({
+        name: `pack/skill-${index}`,
+        description: `description-${index}-${'x'.repeat(180)}`,
+        source: `/packs/skill-${index}.md`,
+        body: `BODY-${index}`,
+        tags: [],
+      })),
+    ];
+    const ctx = prepareSessionContext(baseOpts(outDir, ['src/app.ts'], [pass('p/one')], indexEntries));
+    const index = readFileSync(join(outDir, 'skills-index.md'), 'utf8');
+    const materialized = readdirSync(outDir).filter((name) => name.startsWith('indexed-skill-'));
+    const shards = readdirSync(outDir).filter((name) => /^skills-index-\d+\.md$/.test(name));
+    assert.match(index, /split across \d+ index shards/);
+    assert.ok(shards.length > 1);
+    assert.equal(materialized.length, indexEntries.length, 'every counted entry has a readable body file');
+    const shardBodies = shards.map((name) => readFileSync(join(outDir, name), 'utf8')).join('\n');
+    assert.ok(indexEntries.every((entry) => shardBodies.includes(`**${entry.name}**`)));
+    const duplicates = materialized.filter((name) => name.includes('duplicate'));
+    assert.equal(duplicates.length, 2);
+    assert.notEqual(duplicates[0], duplicates[1]);
+    const duplicateBodies = duplicates.map((name) => readFileSync(join(outDir, name), 'utf8'));
+    assert.ok(duplicateBodies.some((body) => body.includes('FIRST-BODY')));
+    assert.ok(duplicateBodies.some((body) => body.includes('SECOND-BODY')));
+    const artifactPaths = new Set(ctx.dispatchPlan?.artifacts.map((artifact) => artifact.path));
+    assert.equal(
+      [...artifactPaths].filter((path) => path.includes('indexed-skill-')).length,
+      materialized.length,
+      'every exposed body is digest-bound',
+    );
+    assert.ok(shards.every((name) => artifactPaths.has(join(outDir, name))), 'every index shard is digest-bound');
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
@@ -414,8 +476,8 @@ test('MCP capabilities — context lists names/provenance and copies only the tr
     assert.match(context, /modelInspector \(plugin:model-tools\)/);
     assert.match(context, /bicep \(repo\)/);
     assert.ok(existsSync(join(outDir, '.mcp.json')));
-    assert.ok(ctx.capabilityFiles['plugin/model-review']?.endsWith('capability-plugin_model-review.json'));
-    assert.match(ctx.orchestratorPrompt, /"available":\["server-name"\],"attempted":\["server-name"\],"used":\["server-name"\]/);
+    assert.match(ctx.capabilityFiles['plugin/model-review'] ?? '', /capability-plugin_model-review--[0-9a-f]{12}\.json$/);
+    assert.ok(ctx.orchestratorPrompt.includes('\\"available\\":[\\"server-name\\"],\\"attempted\\":[\\"server-name\\"],\\"used\\":[\\"server-name\\"]'));
     assert.match(ctx.orchestratorPrompt, /MUST be arrays of server-name strings, never booleans/);
     assert.match(ctx.orchestratorPrompt, /modelInspector/);
     assert.deepEqual(JSON.parse(readFileSync(join(outDir, '.mcp.json'), 'utf8')), trustedMcpConfig);
@@ -448,8 +510,7 @@ test('project rules — skills-project.md injected into every pass line, compani
     for (const l of passLines) assert.ok(l.includes('skills-project.md'), 'every pass reads the project rules');
     const companionLine = prompt.split('\n').find((l) => l.includes('agent_type="code-reviewer"'))!;
     assert.ok(companionLine.includes('skills-project.md'), 'companions get the authoritative rules');
-    const verifierLine = prompt.split('\n').find((l) => l.includes('record as reviewer name `verifier`'))!;
-    assert.ok(verifierLine.includes('skills-project.md'), 'verifier gets the authoritative rules');
+    assert.ok(ctx.dispatchPlan?.verifier.promptTemplate?.includes('skills-project.md'), 'verifier gets the authoritative rules');
 
     assert.equal(ctx.routing.find((r) => r.name === 'pp-regras-plano')?.matchedBy, 'context');
     // --skip drops a project rule from the context file too.
@@ -498,7 +559,7 @@ test('project rules — large skill bodies land WHOLE: no byte cap, no truncatio
 test('passes.json — persisted at dispatch time, equal to ctx.routing (for --resume)', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
-    const indexEntries: IndexEntry[] = [{ name: 'p/indexed', description: '', source: '/x.md', tags: [] }];
+    const indexEntries: IndexEntry[] = [{ name: 'p/indexed', description: '', source: '/x.md', body: 'indexed rules', tags: [] }];
     const ctx = prepareSessionContext(baseOpts(outDir, ['src/app.ts'], [pass('p/one', { matchedBy: 'glob' })], indexEntries));
     const persisted = JSON.parse(readFileSync(join(outDir, 'passes.json'), 'utf8'));
     assert.deepEqual(persisted, ctx.routing);

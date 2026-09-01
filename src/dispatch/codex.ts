@@ -1,13 +1,35 @@
 import { exec } from 'node:child_process';
 import { spawnCli } from '../util/spawn.js';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ReviewerOutput } from '../types.js';
 import { parseReviewerOutput } from './parsers.js';
-import { OUTPUT_SHAPE, skillsRulesSentence } from './single-session.js';
+import { NO_POSTING_DIRECTIVE, OUTPUT_SHAPE, skillsRulesSentence } from './single-session.js';
+import type { Finding, Severity } from '../types.js';
 
 const CODEX_TIMEOUT_MS = 15 * 60 * 1000;
 export const CODEX_FAILURE_LOG = 'codex-failure.log';
+const CODEX_SEVERITIES: readonly Severity[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'NIT'];
+
+function parseExactCodexFindings(raw: string): Finding[] | null {
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (!Array.isArray(value)) return null;
+    if (!value.every((entry) => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+      const finding = entry as Record<string, unknown>;
+      return CODEX_SEVERITIES.includes(finding.severity as Severity) &&
+        typeof finding.title === 'string' &&
+        typeof finding.body === 'string' &&
+        (finding.file === undefined || typeof finding.file === 'string') &&
+        (finding.line === undefined || (Number.isInteger(finding.line) && (finding.line as number) > 0)) &&
+        (finding.endLine === undefined || (Number.isInteger(finding.endLine) && (finding.endLine as number) > 0));
+    })) return null;
+    return value as Finding[];
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Head/tail kept from each captured stream. `codex exec` streams its reasoning
@@ -63,6 +85,7 @@ export interface CodexReviewOptions {
   contextPath: string;
   skillsPath?: string;
   outDir: string;
+  outputPath?: string;
   timeoutMs?: number;
 }
 
@@ -87,7 +110,8 @@ export function mapCodexResult(args: {
   /** Why the output file could not be read, when it could not. */
   readError?: string;
 }): ReviewerOutput {
-  const findings = args.raw ? parseReviewerOutput(args.raw, 'json') : [];
+  const exactFindings = args.raw.trim() ? parseExactCodexFindings(args.raw) : null;
+  const findings = exactFindings ?? (args.raw ? parseReviewerOutput(args.raw, 'json') : []);
   const base: ReviewerOutput = {
     reviewerName: 'codex',
     model: 'codex',
@@ -97,7 +121,10 @@ export function mapCodexResult(args: {
     exitCode: args.exitCode,
   };
   if (args.exitCode === 0 && !args.timedOut) {
-    if (args.raw.trim()) return base;
+    if (exactFindings) return base;
+    if (args.raw.trim()) {
+      return { ...base, error: 'codex exec exited 0 but wrote invalid Finding[] JSON' };
+    }
     return {
       ...base,
       error: `codex exec exited 0 but wrote no output${args.readError ? ` (${args.readError})` : ''}`,
@@ -153,11 +180,22 @@ export function formatCodexFailureLog(a: {
  */
 export async function runCodexReviewer(opts: CodexReviewOptions): Promise<ReviewerOutput> {
   const start = Date.now();
-  const outFile = resolve(opts.outDir, 'codex-output.txt');
+  const outFile = opts.outputPath ? resolve(opts.outputPath) : resolve(opts.outDir, 'codex-output.txt');
+  try {
+    if (existsSync(outFile)) unlinkSync(outFile);
+  } catch (error) {
+    return mapCodexResult({
+      exitCode: -1,
+      timedOut: false,
+      raw: '',
+      durationMs: Date.now() - start,
+      readError: `could not clear stale output: ${(error as Error).message}`,
+    });
+  }
   const prompt =
     `You are an adversarial second-opinion code reviewer. Read the PR review context at \`${opts.contextPath}\` (metadata, existing comments, diff).${skillsRulesSentence(opts.skillsPath)} ` +
     `Hunt for real bugs, security issues, and broken edge cases the diff introduces — assume other reviewers already caught the obvious; look for what they would miss. Do not restate existing comments. ` +
-    `Output ONLY a JSON array of findings using the shape: ${OUTPUT_SHAPE}. If you find nothing, output []. No prose. No fences.`;
+    `Output ONLY a JSON array of findings using the shape: ${OUTPUT_SHAPE}. If you find nothing, output []. No prose. No fences. ${NO_POSTING_DIRECTIVE}`;
 
   const binary = opts.binary ?? 'codex';
   const argv = [...CODEX_SANDBOX_ARGS, '-C', opts.outDir, '-o', outFile, '-'];

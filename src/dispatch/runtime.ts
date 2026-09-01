@@ -40,12 +40,39 @@ export function runtimeBinary(runtime: Runtime, binaryOverride?: string): string
 }
 
 /** Non-interactive spawn argv for the orchestrator session (prompt goes on stdin). */
-export function runtimeSpawnArgs(runtime: Runtime, model: string, addDir: string, repoRoot?: string): string[] {
+export function runtimeSpawnArgs(
+  runtime: Runtime,
+  model: string,
+  addDir: string,
+  repoRoot?: string,
+  disabledMcpServers: readonly string[] = [],
+): string[] {
   const repoArg = repoRoot && repoRoot !== addDir ? ['--add-dir', repoRoot] : [];
   if (runtime === 'claude') {
-    return ['-p', '--model', model, '--dangerously-skip-permissions', '--add-dir', addDir, ...repoArg];
+    return [
+      '-p',
+      '--model', model,
+      '--permission-mode', 'dontAsk',
+      '--tools', 'Read,Write,Edit,Glob,Grep,Task,Agent',
+      '--allowedTools', 'Read,Write,Edit,Glob,Grep,Task,Agent',
+      '--disallowedTools', 'Bash,PowerShell,WebFetch,WebSearch,mcp__*',
+      '--setting-sources', 'user',
+      '--add-dir', addDir,
+      ...repoArg,
+    ];
   }
-  return ['--model', model, '--allow-all-tools', '--no-ask-user', '--add-dir', addDir, ...repoArg, '-s'];
+  return [
+    '--model', model,
+    '--allow-all-tools',
+    '--deny-tool=shell',
+    '--disable-builtin-mcps',
+    '--no-custom-instructions',
+    '--no-ask-user',
+    '--add-dir', addDir,
+    ...repoArg,
+    ...disabledMcpServers.flatMap((server) => ['--disable-mcp-server', server]),
+    '-s',
+  ];
 }
 
 /**
@@ -55,12 +82,31 @@ export function runtimeSpawnArgs(runtime: Runtime, model: string, addDir: string
  */
 export const GENERIC_AGENT = 'general-purpose';
 
+const TASK_DESCRIPTION_MAX = 80;
+
+/** Keep task-tool chrome short, deterministic, and independent of branch-authored descriptions. */
+export function sanitizeTaskDescription(description: string): string {
+  const sanitized = description
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\x20-\x7e]/g, ' ')
+    .replace(/[^A-Za-z0-9 _/.:-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, TASK_DESCRIPTION_MAX)
+    .trimEnd();
+  return sanitized || 'Run review task';
+}
+
 /** How the runtime spells its subagent-dispatch tool. */
-export function taskCall(runtime: Runtime, agentType: string, prompt: string): string {
+export function taskCall(runtime: Runtime, agentType: string, prompt: string, description: string): string {
+  const agent = JSON.stringify(agentType);
+  const body = JSON.stringify(prompt);
+  const label = JSON.stringify(sanitizeTaskDescription(description));
   if (runtime === 'claude') {
-    return `Task(subagent_type="${agentType}", prompt="${prompt}")`;
+    return `Task(subagent_type=${agent}, prompt=${body}, description=${label})`;
   }
-  return `task(agent_type="${agentType}", prompt="${prompt}")`;
+  return `task(agent_type=${agent}, prompt=${body}, description=${label})`;
 }
 
 export function taskToolName(runtime: Runtime): string {

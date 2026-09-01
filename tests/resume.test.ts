@@ -1,14 +1,35 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runReview } from '../src/commands/review.js';
 import { writePostedMarker } from '../src/util/posted-marker.js';
-import type { Finding, PrRef } from '../src/types.js';
+import { controlDirForRun, RUNS_ROOT } from '../src/util/tmp.js';
+import { prepareSessionContext, resumePlannedSession } from '../src/dispatch/single-session.js';
+import {
+  artifactState,
+  assembleConsolidated,
+  assemblePhase1,
+  attemptOutputPath,
+  createDeliveryState,
+  inspectReviewerDelivery,
+  reconcileDeliveryCompletion,
+  writeDeliveryState,
+} from '../src/dispatch/delivery.js';
+import { sha256File } from '../src/util/atomic-json.js';
+import type { Finding, GatherOutput, PrRef } from '../src/types.js';
 import type { BatchComment, PrProvider } from '../src/providers/types.js';
+import { runStatus } from '../src/commands/status.js';
 
 const PATCH = ['@@ -10,4 +10,5 @@', ' c10', '-old11', '+new11', '+new12', ' c13'].join('\n');
+const INDEX_ENTRY = {
+  name: 'pack/on-demand',
+  description: 'advisory rules',
+  source: '/on-demand.md',
+  body: 'review on-demand concerns',
+  tags: ['typescript'],
+};
 
 function gatherFixture() {
   return {
@@ -56,8 +77,126 @@ function seedRun(reviewers: Array<{ name: string; findings: Finding[] }>): strin
   return dir;
 }
 
-const ONE: Array<{ name: string; findings: Finding[] }> = [
+function seedPlannedPartialRun(
+  underRunsRoot = false,
+  execution: { dryRun: boolean; publish: boolean; dedupeMode: 'strict' | 'loose' | 'off' } =
+    { dryRun: true, publish: false, dedupeMode: 'strict' },
+  metadataState: GatherOutput['metadata']['state'] = 'open',
+) {
+  if (underRunsRoot) mkdirSync(RUNS_ROOT, { recursive: true });
+  const dir = mkdtempSync(join(underRunsRoot ? RUNS_ROOT : tmpdir(), 'pr-resume-planned-'));
+  const gather = gatherFixture();
+  // A PR that was ALREADY merged when the run was gathered: plan and live agree,
+  // so nothing is stale — only publishing should care that it is closed.
+  gather.metadata = { ...gather.metadata, state: metadataState };
+  writeFileSync(join(dir, 'pr-review-gather.json'), JSON.stringify(gather), 'utf8');
+  const controlDir = controlDirForRun(dir, TEST_HOME);
+  const ctx = prepareSessionContext({
+    prUrl: gather.pr.url,
+    gather,
+    passes: [
+      { name: 'pack/valid', source: '/valid.md', body: 'review', matchedBy: 'baseline', matchedOn: [], baseline: true },
+      { name: 'pack/missing', source: '/missing.md', body: 'review', matchedBy: 'baseline', matchedOn: [], baseline: true },
+    ],
+    indexEntries: [INDEX_ENTRY],
+    stackTags: ['typescript'],
+    installedCompanions: [],
+    skipReviewers: [],
+    outDir: dir,
+    controlDir,
+    invokeCompanions: false,
+    runtime: 'copilot',
+    execution,
+  });
+  const plan = ctx.dispatchPlan!;
+  writeFileSync(plan.reviewers[0]!.canonicalOutputPath, '[]', 'utf8');
+  const inventory = inspectReviewerDelivery(
+    Object.fromEntries(plan.reviewers.map((reviewer) => [reviewer.name, reviewer.canonicalOutputPath])),
+    plan.model,
+    0,
+  );
+  const state = createDeliveryState(plan, inventory);
+  state.reviewerAttempts['pack/valid'] = 1;
+  state.reviewerAttempts['pack/missing'] = 2;
+  writeDeliveryState(state, ctx.deliveryStatePath!, ctx.authoritativeDeliveryStatePath!);
+  return {
+    dir,
+    gather,
+    plan,
+    cleanup: () => {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(controlDir, { recursive: true, force: true });
+    },
+  };
+}
+
+/** Turn a seeded partial run into a COMPLETE one: every planned reviewer valid. */
+function completeSeededDelivery(seeded: ReturnType<typeof seedPlannedPartialRun>): void {
+  const { plan } = seeded;
+  writeFileSync(
+    plan.reviewers[1]!.canonicalOutputPath,
+    JSON.stringify([{ severity: 'MEDIUM', title: 'promoted', body: 'a preview finding worth posting', file: 'src/a.ts', line: 11 }]),
+    'utf8',
+  );
+  const inventory = inspectReviewerDelivery(
+    Object.fromEntries(plan.reviewers.map((reviewer) => [reviewer.name, reviewer.canonicalOutputPath])),
+    plan.model,
+    0,
+  );
+  const state = createDeliveryState(plan, inventory);
+  state.reviewerAttempts['pack/valid'] = 1;
+  state.reviewerAttempts['pack/missing'] = 1;
+  // Same finishing sequence the live path runs, so state.kind really is 'complete'
+  // rather than a hand-set flag that the guard would be right to distrust.
+  assemblePhase1(plan.phase1Path, inventory);
+  state.phase1 = 'valid';
+  state.phase1Digest = sha256File(plan.phase1Path);
+  state.verifier = { state: 'skipped-no-severe', phase1Digest: state.phase1Digest, attempts: 0 };
+  assembleConsolidated(plan.findingsPath, inventory.outputs, undefined);
+  state.consolidated = artifactState(plan.findingsPath);
+  state.consolidatedDigest = sha256File(plan.findingsPath);
+  reconcileDeliveryCompletion(plan, state);
+  assert.equal(state.kind, 'complete', 'the seed must be a genuinely complete delivery');
+  writeDeliveryState(
+    state,
+    join(seeded.dir, 'delivery-state.json'),
+    join(controlDirForRun(seeded.dir, TEST_HOME), 'delivery-state.json'),
+  );
+}
+
+function enableCodexOnSeed(seeded: ReturnType<typeof seedPlannedPartialRun>) {
+  const ctx = prepareSessionContext({
+    prUrl: seeded.gather.pr.url,
+    gather: seeded.gather,
+    passes: [
+      { name: 'pack/valid', source: '/valid.md', body: 'review', matchedBy: 'baseline', matchedOn: [], baseline: true },
+      { name: 'pack/missing', source: '/missing.md', body: 'review', matchedBy: 'baseline', matchedOn: [], baseline: true },
+    ],
+    indexEntries: [INDEX_ENTRY], stackTags: ['typescript'], installedCompanions: [], skipReviewers: [],
+    outDir: seeded.dir, controlDir: controlDirForRun(seeded.dir, TEST_HOME), invokeCompanions: false,
+    includeCodex: true, runtime: 'copilot', execution: { dryRun: true, publish: false, dedupeMode: 'strict' },
+  });
+  const plan = ctx.dispatchPlan!;
+  writeFileSync(plan.reviewers[0]!.canonicalOutputPath, '[]', 'utf8');
+  const inventory = inspectReviewerDelivery(
+    Object.fromEntries(plan.reviewers.map((reviewer) => [reviewer.name, reviewer.canonicalOutputPath])),
+    plan.model,
+    0,
+  );
+  const state = createDeliveryState(plan, inventory);
+  state.reviewerAttempts['pack/valid'] = 1;
+  state.reviewerAttempts['pack/missing'] = 2;
+  state.codex = { state: 'pending', attempts: 1 };
+  writeDeliveryState(state, ctx.deliveryStatePath!, ctx.authoritativeDeliveryStatePath!);
+  return { plan, state };
+}
+
+const SEVERE_NO_VERIFIER: Array<{ name: string; findings: Finding[] }> = [
   { name: 'security', findings: [{ severity: 'HIGH', title: 'x', body: 'a real finding body', file: 'src/a.ts', line: 11 }] },
+];
+const ONE: Array<{ name: string; findings: Finding[] }> = [
+  ...SEVERE_NO_VERIFIER,
+  { name: 'verifier', findings: [] },
 ];
 
 test('resume — reuses on-disk reviewer outputs, posts them, and writes posted.marker (no session spawn)', async () => {
@@ -69,6 +208,20 @@ test('resume — reuses on-disk reviewer outputs, posts them, and writes posted.
     assert.equal(calls.batches[0].length, 1);
     assert.ok(existsSync(join(dir, 'posted.marker')), 'marker written after a successful post');
     assert.match(r.summary, /PR Review Summary/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resume — severe legacy consolidated output without verifier evidence cannot publish', async () => {
+  const dir = seedRun(SEVERE_NO_VERIFIER);
+  try {
+    const { provider, calls } = fakeProvider();
+    await assert.rejects(
+      runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider }),
+      /severe legacy consolidated findings have no verifier evidence/,
+    );
+    assert.equal(calls.batches.length + calls.singles.length, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -122,7 +275,7 @@ test('resume — dedupe off still reconciles an exact comment from the interrupt
     findings: [{
       severity: 'HIGH' as const, title: 'x', body: 'a real finding body', file: 'src/a.ts', line: 3787,
     }],
-  }];
+  }, { name: 'verifier', findings: [] as Finding[] }];
   const dir = seedRun(reviewers);
   try {
     const { provider, calls } = fakeProvider();
@@ -286,14 +439,19 @@ test('resume — a second resume refuses to re-post while the marker exists; --f
   }
 });
 
-test('resume — falls back to phase1-findings.json when the final consolidation file is absent', async () => {
+test('resume — legacy phase1-findings.json is dry-run diagnostic evidence and never publishable', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pr-resume-'));
   try {
     writeFileSync(join(dir, 'pr-review-gather.json'), JSON.stringify(gatherFixture()), 'utf8');
     writeFileSync(join(dir, 'phase1-findings.json'), JSON.stringify({ reviewers: ONE }), 'utf8');
     const { provider, calls } = fakeProvider();
-    await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider });
-    assert.equal(calls.batches.length, 1, 'salvaged findings from phase1 and posted');
+    await assert.rejects(
+      runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: true, provider }),
+      /diagnostic evidence.*refusing to publish/,
+    );
+    assert.equal(calls.batches.length, 0);
+    const preview = await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: false, dryRun: true, provider });
+    assert.match(preview.summary, /PR Review Summary/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -379,5 +537,349 @@ test('resume — missing gather and missing reviewer output each error clearly',
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resume — legacy partial raw sidecars are explicit evidence, never selectively recovered', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-resume-legacy-partial-'));
+  try {
+    writeFileSync(join(dir, 'pr-review-gather.json'), JSON.stringify(gatherFixture()), 'utf8');
+    writeFileSync(join(dir, 'raw-quality.json'), '[]', 'utf8');
+    await assert.rejects(
+      runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, dryRun: true, provider: fakeProvider().provider }),
+      /legacy partial run.*selective recovery is unsupported/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resume — schema-v1 partial run dispatches only unresolved reviewer at attempt 3 and remains dry-run', async () => {
+  const seeded = seedPlannedPartialRun();
+  try {
+    const { provider, calls } = fakeProvider();
+    const prompts: string[] = [];
+    const result = await runReview({
+      homeOverride: TEST_HOME,
+      prUrl: 'u',
+      resumeRunId: 'x',
+      runDir: seeded.dir,
+      publish: false,
+      dryRun: true,
+      provider,
+      resumePlannedSessionFn: (plan, statePath, authoritativeStatePath) =>
+        resumePlannedSession(plan, statePath, authoritativeStatePath, async (args) => {
+          prompts.push(args.promptBody);
+          assert.ok(args.promptBody.includes('record as reviewer name `pack/missing`'));
+          assert.ok(!args.promptBody.includes('record as reviewer name `pack/valid`'));
+          writeFileSync(attemptOutputPath(plan.reviewers[1]!, 3), '[]', 'utf8');
+          return { stdout: 'DONE', stderr: '', exitCode: 0, timedOut: false };
+        }),
+    });
+    assert.equal(prompts.length, 1);
+    assert.equal(result.exitCode, 0);
+    assert.equal(calls.batches.length + calls.singles.length, 0, 'sticky dry-run never posts');
+    assert.ok(existsSync(seeded.plan.findingsPath));
+    assert.ok(!existsSync(join(seeded.dir, 'posted.marker')));
+  } finally {
+    seeded.cleanup();
+  }
+});
+
+test('resume — concurrent schema-v1 recovery admits one owner and status reports it running', async () => {
+  const seeded = seedPlannedPartialRun(true);
+  let releaseRecovery!: () => void;
+  const recoveryMayFinish = new Promise<void>((resolve) => { releaseRecovery = resolve; });
+  let recoveryStarted!: () => void;
+  const recoveryDidStart = new Promise<void>((resolve) => { recoveryStarted = resolve; });
+  let firstCalls = 0;
+  let contenderCalls = 0;
+  try {
+    const first = runReview({
+      homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: seeded.dir,
+      publish: false, dryRun: true, provider: fakeProvider().provider,
+      resumePlannedSessionFn: async (plan, statePath, authorityPath) => {
+        firstCalls++;
+        recoveryStarted();
+        await recoveryMayFinish;
+        return resumePlannedSession(plan, statePath, authorityPath, async () => {
+          writeFileSync(attemptOutputPath(plan.reviewers[1]!, 3), '[]');
+          return { stdout: 'DONE', stderr: '', exitCode: 0 };
+        });
+      },
+    });
+    await recoveryDidStart;
+    assert.equal(runStatus(seeded.dir.split(/[\\/]/).pop()!).state, 'running');
+    assert.equal(readFileSync(join(seeded.dir, 'run.pid'), 'utf8').trim(), String(process.pid));
+    await assert.rejects(
+      runReview({
+        homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: seeded.dir,
+        publish: false, dryRun: true, provider: fakeProvider().provider,
+        resumePlannedSessionFn: async () => {
+          contenderCalls++;
+          throw new Error('contender must not reach recovery');
+        },
+      }),
+      /finalization is already in progress.*refusing concurrent posting/,
+    );
+    assert.equal(contenderCalls, 0);
+    assert.equal(firstCalls, 1);
+    releaseRecovery();
+    assert.equal((await first).exitCode, 0);
+    assert.equal(existsSync(join(seeded.dir, 'run.pid')), false);
+  } finally {
+    releaseRecovery?.();
+    seeded.cleanup();
+  }
+});
+
+test('resume — completed Codex attempt survives parent crash without rerunning Codex', async () => {
+  const seeded = seedPlannedPartialRun();
+  try {
+    const { plan } = enableCodexOnSeed(seeded);
+    writeFileSync(join(plan.codex.attemptsDir, 'attempt-1.json'), JSON.stringify([
+      { severity: 'LOW', title: 'codex', body: 'second opinion', file: 'src/a.ts', line: 11 },
+    ]));
+    let codexCalls = 0;
+    const result = await runReview({
+      homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: seeded.dir,
+      publish: false, dryRun: true, provider: fakeProvider().provider,
+      resumePlannedSessionFn: (savedPlan, statePath, authorityPath) =>
+        resumePlannedSession(savedPlan, statePath, authorityPath, async () => {
+          writeFileSync(attemptOutputPath(savedPlan.reviewers[1]!, 3), '[]');
+          return { stdout: 'DONE', stderr: '', exitCode: 0 };
+        }),
+      runCodexReviewerFn: async () => {
+        codexCalls++;
+        throw new Error('Codex must not rerun');
+      },
+    });
+    assert.equal(result.exitCode, 0);
+    assert.equal(codexCalls, 0);
+    assert.ok(result.outputs.some((output) => output.reviewerName === 'codex'));
+  } finally {
+    seeded.cleanup();
+  }
+});
+
+test('resume — authenticated failed Codex attempt is retried, never upgraded from its old output', async () => {
+  const seeded = seedPlannedPartialRun();
+  try {
+    const { plan, state } = enableCodexOnSeed(seeded);
+    const partial = [{ severity: 'LOW', title: 'partial', body: 'incomplete', file: 'src/a.ts', line: 11 }];
+    writeFileSync(join(plan.codex.attemptsDir, 'attempt-1.json'), JSON.stringify(partial));
+    state.codex = {
+      state: 'failed', attempts: 1,
+      output: { reviewerName: 'codex', model: 'codex', findings: partial as Finding[], rawOutput: JSON.stringify(partial), durationMs: 1, exitCode: 137, error: 'exited 137' },
+    };
+    writeDeliveryState(state, join(seeded.dir, 'delivery-state.json'), join(controlDirForRun(seeded.dir, TEST_HOME), 'delivery-state.json'));
+    let codexCalls = 0;
+    const result = await runReview({
+      homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: seeded.dir,
+      publish: false, dryRun: true, provider: fakeProvider().provider,
+      resumePlannedSessionFn: (savedPlan, statePath, authorityPath) =>
+        resumePlannedSession(savedPlan, statePath, authorityPath, async () => {
+          writeFileSync(attemptOutputPath(savedPlan.reviewers[1]!, 3), '[]');
+          return { stdout: 'DONE', stderr: '', exitCode: 0 };
+        }),
+      runCodexReviewerFn: async (options) => {
+        codexCalls++;
+        assert.ok(options.outputPath?.endsWith('attempt-2.json'));
+        return { reviewerName: 'codex', model: 'codex', findings: [], rawOutput: '[]', durationMs: 1, exitCode: 0 };
+      },
+    });
+    assert.equal(codexCalls, 1);
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.outputs.find((output) => output.reviewerName === 'codex')?.findings.length, 0);
+  } finally {
+    seeded.cleanup();
+  }
+});
+
+test('resume — pending final Codex attempt is adopted before terminal exhaustion gate', async () => {
+  const seeded = seedPlannedPartialRun();
+  try {
+    const { plan, state } = enableCodexOnSeed(seeded);
+    const final = [{ severity: 'LOW', title: 'final', body: 'complete', file: 'src/a.ts', line: 11 }];
+    state.codex = { state: 'pending', attempts: plan.codex.maxAttempts };
+    state.kind = 'terminal-incomplete';
+    state.reasonCodes = ['codex-delivery-incomplete'];
+    writeDeliveryState(state, join(seeded.dir, 'delivery-state.json'), join(controlDirForRun(seeded.dir, TEST_HOME), 'delivery-state.json'));
+    writeFileSync(join(plan.codex.attemptsDir, `attempt-${plan.codex.maxAttempts}.json`), JSON.stringify(final));
+    let codexCalls = 0;
+    const result = await runReview({
+      homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: seeded.dir,
+      publish: false, dryRun: true, provider: fakeProvider().provider,
+      resumePlannedSessionFn: (savedPlan, statePath, authorityPath) =>
+        resumePlannedSession(savedPlan, statePath, authorityPath, async () => {
+          writeFileSync(attemptOutputPath(savedPlan.reviewers[1]!, 3), '[]');
+          return { stdout: 'DONE', stderr: '', exitCode: 0 };
+        }),
+      runCodexReviewerFn: async () => {
+        codexCalls++;
+        throw new Error('pending final attempt must be adopted');
+      },
+    });
+    assert.equal(codexCalls, 0);
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.outputs.find((output) => output.reviewerName === 'codex')?.findings[0]?.title, 'final');
+  } finally {
+    seeded.cleanup();
+  }
+});
+
+for (const scenario of [
+  {
+    // dry-run → publish is allowed, but not while delivery is still incomplete:
+    // that is the "partial findings never post" invariant, and it survives.
+    name: 'an INCOMPLETE dry-run is promoted to publish',
+    expected: /incomplete-promotion/,
+    mutate: (_seeded: ReturnType<typeof seedPlannedPartialRun>, _provider: PrProvider) => ({ dryRun: false, publish: true }),
+  },
+  {
+    name: 'the PR head changes',
+    expected: /stale-pr/,
+    mutate: (_seeded: ReturnType<typeof seedPlannedPartialRun>, provider: PrProvider) => {
+      provider.fetchMetadata = async () => ({ ...gatherFixture().metadata, headSha: 'force-pushed' });
+      return { dryRun: true, publish: false };
+    },
+  },
+  {
+    name: 'an immutable pass file changes',
+    expected: /artifact-drift/,
+    mutate: (seeded: ReturnType<typeof seedPlannedPartialRun>, _provider: PrProvider) => {
+      writeFileSync(seeded.plan.artifacts.find((artifact) => artifact.path.includes('pass-pack_valid--'))!.path, 'changed', 'utf8');
+      return { dryRun: true, publish: false };
+    },
+  },
+  {
+    name: 'a materialized on-demand skill changes',
+    expected: /artifact-drift/,
+    mutate: (seeded: ReturnType<typeof seedPlannedPartialRun>, _provider: PrProvider) => {
+      const indexedSkill = seeded.plan.artifacts.find((artifact) => artifact.path.includes('indexed-skill-'));
+      assert.ok(indexedSkill, 'seeded plan includes a materialized on-demand skill');
+      writeFileSync(indexedSkill.path, 'changed', 'utf8');
+      return { dryRun: true, publish: false };
+    },
+  },
+  {
+    name: 'a posting marker exists',
+    expected: /posted-marker-present/,
+    mutate: (seeded: ReturnType<typeof seedPlannedPartialRun>, _provider: PrProvider) => {
+      writePostedMarker(seeded.dir, { posted: 0, attempted: 0, verified: true }, TEST_HOME);
+      return { dryRun: true, publish: false };
+    },
+  },
+] as const) {
+  test(`resume — schema-v1 recovery refuses before spawn when ${scenario.name}`, async () => {
+    const seeded = seedPlannedPartialRun();
+    try {
+      const { provider, calls } = fakeProvider();
+      const mode = scenario.mutate(seeded, provider);
+      let spawns = 0;
+      await assert.rejects(
+        runReview({
+          homeOverride: TEST_HOME,
+          prUrl: 'u',
+          resumeRunId: 'x',
+          runDir: seeded.dir,
+          provider,
+          ...mode,
+          resumePlannedSessionFn: async () => {
+            spawns++;
+            throw new Error('must not spawn');
+          },
+        }),
+        scenario.expected,
+      );
+      assert.equal(spawns, 0);
+      assert.equal(calls.batches.length + calls.singles.length, 0);
+    } finally {
+      seeded.cleanup();
+    }
+  });
+}
+
+test('resume — a COMPLETE dry-run is promoted to publish and actually posts', async () => {
+  const seeded = seedPlannedPartialRun();
+  completeSeededDelivery(seeded);
+  try {
+    const { provider, calls } = fakeProvider();
+    let spawns = 0;
+    const result = await runReview({
+      homeOverride: TEST_HOME,
+      prUrl: 'u',
+      resumeRunId: 'x',
+      runDir: seeded.dir,
+      dryRun: false,
+      publish: true,
+      provider,
+      resumePlannedSessionFn: async () => {
+        spawns++;
+        throw new Error('a complete delivery must not re-dispatch');
+      },
+    });
+    assert.equal(spawns, 0, 'promotion replays saved output; it never re-reviews');
+    assert.equal(result.exitCode, 0);
+    assert.ok(calls.batches.length + calls.singles.length > 0, 'the previewed finding is posted');
+    assert.ok(existsSync(join(seeded.dir, 'posted.marker')), 'a publish attempt always writes the marker');
+  } finally {
+    seeded.cleanup();
+  }
+});
+
+test('resume — publish can never be demoted to dry-run', async () => {
+  const seeded = seedPlannedPartialRun(false, { dryRun: false, publish: true, dedupeMode: 'strict' });
+  completeSeededDelivery(seeded);
+  try {
+    await assert.rejects(
+      runReview({
+        homeOverride: TEST_HOME,
+        prUrl: 'u',
+        resumeRunId: 'x',
+        runDir: seeded.dir,
+        dryRun: true,
+        publish: false,
+        provider: fakeProvider().provider,
+      }),
+      /mode-mismatch/,
+    );
+  } finally {
+    seeded.cleanup();
+  }
+});
+
+test('resume — a dry-run resume works on an already-merged PR; only publishing requires it open', async () => {
+  const seeded = seedPlannedPartialRun(false, { dryRun: true, publish: false, dedupeMode: 'strict' }, 'merged');
+  completeSeededDelivery(seeded);
+  const merged = seeded.gather.metadata;
+  try {
+    const dryRunProvider = fakeProvider().provider;
+    dryRunProvider.fetchMetadata = async () => merged;
+    const result = await runReview({
+      homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: seeded.dir,
+      dryRun: true, publish: false, provider: dryRunProvider,
+    });
+    assert.equal(result.exitCode, 0, 'nothing is stale — a merged PR is fine to re-summarize');
+  } finally {
+    seeded.cleanup();
+  }
+});
+
+test('resume — promoting to publish on a merged PR is refused as not-open, not as stale', async () => {
+  const seeded = seedPlannedPartialRun(false, { dryRun: true, publish: false, dedupeMode: 'strict' }, 'merged');
+  completeSeededDelivery(seeded);
+  try {
+    const provider = fakeProvider().provider;
+    provider.fetchMetadata = async () => seeded.gather.metadata;
+    await assert.rejects(
+      runReview({
+        homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: seeded.dir,
+        dryRun: false, publish: true, provider,
+      }),
+      /pr-not-open/,
+    );
+  } finally {
+    seeded.cleanup();
   }
 });

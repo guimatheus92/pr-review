@@ -12,7 +12,7 @@ The tool runs in CI the same way it runs locally: install an agent runtime (Copi
 |---|---|
 | `0` | Clean — no findings at/above the threshold |
 | `1` | Findings at/above the `--fail-on` severity survived dedupe |
-| `2` | Pipeline error — the orchestrator produced no parseable findings |
+| `2` | Incomplete reviewer/verifier/Codex delivery or another operational failure; partial findings were not posted |
 
 To gate a pipeline on serious findings, add `--fail-on <severity>` (`critical`\|`high`\|`medium`\|`low`\|`nit`):
 
@@ -24,7 +24,7 @@ The step fails (exit 1) when any CRITICAL or HIGH finding survives dedupe.
 
 **Always configure `--fail-on` when the exit code gates a merge.** Without it, exit 0 means the pipeline completed — findings may still have been retained and posted, and the CLI says how many. Only `--fail-on` turns a finding into a non-zero status.
 
-Treat exit 2 as an infrastructure failure, not a review verdict. It covers a pipeline failure (no parseable findings; "nothing to review with" — no skills matched the PR and no baseline is configured, so run `pr-review packs suggest` or check `skill_packs`) **and** an operational failure of an otherwise parseable review: a failed review prerequisite, a planned pass or companion that delivered no output or two, or a post that failed or could not be verified. The summary's Degraded block names which one, and `error.txt` in the run dir carries the detail.
+Treat exit 2 as an infrastructure failure, not a review verdict. It covers a pipeline failure (no parseable findings; "nothing to review with" — no skills matched the PR and no baseline is configured, so run `pr-review packs suggest` or check `skill_packs`), incomplete planned reviewer/verifier/Codex delivery, **and** an operational failure of an otherwise parseable review: a failed review prerequisite, a planned pass or companion that delivered no output or two, or a post that failed or could not be verified. The summary's Degraded block names which one, and `error.txt` in the run dir carries the detail. A detached schema-v1 run may expose status exit 21; its printed resume command preserves the original dry-run/publish mode and retries only incomplete coverage.
 
 ## GitHub Actions (official path)
 

@@ -4,6 +4,26 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-09-01
+
+### Added
+- **Node-owned resilient reviewer delivery:** description-bearing runtime calls write attempt-scoped exact `Finding[]` JSON; Node promotes write-once canonical sidecars, assembles Phase 1/final output, gates a direct verifier, and records reviewer-level progress. One automatic selective recovery retries only unresolved reviewers; `--resume` gets the bounded final targeted attempt.
+- Schema-v1 runs persist HMAC-authenticated plan, delivery, Codex, and posting authority under `~/.pr-review/control/`, with repairable diagnostic mirrors in the run dir. State binds PR/config/bundle/input hashes, attempts, canonical digests, and sticky dry-run/publish mode.
+
+### Changed
+- Reviewer runtimes lose the tools that let a dispatched agent act outside the CLI: shell (`Bash`/`PowerShell`), web (`WebFetch`/`WebSearch`), and built-in/ambient MCP servers are denied, and the session runs from the run directory under user-only setting sources, so checkout-supplied instructions are not auto-loaded. This closes the vector that once let a companion post its own PR comment. **Read-only file access is deliberately unchanged** — reviewers still open the checkout, which is what keeps findings grounded in the surrounding code. On-demand skill bodies are copied into the run directory and large catalogs split into digest-bound index shards, with original-source provenance retained. Codex remains an OS-sandboxed read-only sibling with strict attempt-scoped output.
+- `status` reports planned/valid/missing/invalid reviewer and finding counts, distinguishes recoverable exit 21 from terminal exit 22, and trusts authenticated state over runtime-writable summaries/errors. Legacy Phase 1 output is dry-run diagnostic evidence and cannot be published.
+- **Dry-run is no longer a one-way door.** Previewing with `--dry-run` and then posting what you saw is the point of a dry run, so `--resume` now accepts the dry-run → publish transition. It is admitted ONLY on a complete delivery, which keeps the real invariant — partial findings never post — fully intact; an incomplete run is refused as `incomplete-promotion`, and publish → dry-run stays refused as `mode-mismatch` because that run may already have posted.
+
+### Fixed
+- Runtime exit 0 before consolidation no longer discards completed work or falsely reports no parseable findings. Valid reviewer hashes remain unchanged through recovery; malformed/missing outputs and required verifier/Codex failures stay incomplete, and no partial finding reaches dedupe or posting.
+- Copilot/Claude task calls use JSON-safe arguments and mandatory descriptions. Windows launcher punctuation, reviewer filename aliases, atomic state replacement, canonical create-only promotion, and schema-v1 posting-marker authentication are covered by regressions.
+- Credential-bearing pack URLs are redacted before entering runtime-readable plans. Canonical reviewer output publishes only after complete fsynced bytes exist, control readers consume durable backup bytes without renames, and a crash-recoverable per-run lease serializes recovery and posting through authenticated finalization.
+- `status` emits an executable sticky-mode recovery command, while context-only and benign no-dispatch runs no longer leave half-created schema-v1 recovery control.
+- A failed `review`/`post` no longer aborts the process on Windows. `validateRecoveryPreconditions` reads the PR back before deciding, and the command's `catch` ended in `process.exit()` — a hard exit while undici's keep-alive handle is still closing trips `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), src\win\async.c`, replacing a clean exit 2 with exit 127 and a C-level abort message. Both commands now set `process.exitCode` and let the loop drain. Reproducible in six lines: `await fetch(url); process.exit(2)`.
+- Only a *publishing* resume requires the PR to still be open. `metadataMatchesPlan` also asserted `live.state === 'open'`, so any run gathered against a merged or closed PR could never be resumed — not even `--dry-run` — and the refusal claimed the PR "no longer matches the saved dispatch plan" while every field matched. Refusal is now `pr-not-open` and only on publish.
+- `tests/finalize-failure.test.ts` no longer finalizes against the developer's real home: the two posting-failure scenarios ran without `homeOverride`, so every `npm run test` left an empty directory behind under `~/.pr-review/control/`. Still outstanding: `tests/status.test.ts` writes authenticated control records to the real home (and so mints `~/.pr-review/control/control.key`) because `runStatus` resolves `RUNS_ROOT` itself and has no home seam.
+
 ## [0.9.0] — 2026-08-27
 
 ### Added

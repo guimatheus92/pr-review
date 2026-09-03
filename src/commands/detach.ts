@@ -1,7 +1,9 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import { closeSync, openSync } from 'node:fs';
 import { basename, join } from 'node:path';
+import { loadConfig } from '../config.js';
 import { resolvePr } from '../providers/index.js';
+import { gitTopLevel } from '../util/git.js';
 import { ensureRunDir } from '../util/tmp.js';
 
 export interface DetachResult {
@@ -27,6 +29,7 @@ export function detachReview(
   argv: string[],
   spawnFn: typeof nodeSpawn = nodeSpawn,
   resolveAuthEnv?: (url: string) => Record<string, string>,
+  homeOverride?: string,
 ): DetachResult {
   // Parse the URL first, in the foreground: a bad URL must fail the launch
   // here — not hand back a run-id whose detached child dies on it minutes
@@ -34,7 +37,15 @@ export function detachReview(
   // fallbacks (`gh auth token`, `az account get-access-token`) can flake in a
   // detached child. Both are ordered before the run-dir mint so a failed
   // pre-flight leaves nothing behind.
-  const { provider, ref } = resolvePr(prUrl);
+  const invocationCwd = process.cwd();
+  const repoRoot = gitTopLevel(invocationCwd) ?? invocationCwd;
+  const trustedConfig = loadConfig({
+    cwd: invocationCwd,
+    repoRoot,
+    homeOverride,
+    includeRepoConfig: false,
+  }).config;
+  const { provider, ref } = resolvePr(prUrl, trustedConfig.hosts);
   const authEnv = resolveAuthEnv ? resolveAuthEnv(prUrl) : provider.authEnv(ref);
   const outDir = ensureRunDir(ref);
   const childArgs = argv.filter((a) => a !== '--detach').concat('--run-dir', outDir);

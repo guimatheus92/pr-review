@@ -9,7 +9,11 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ### Changed
 - The posting guarantee now states exactly what each provider does: GitLab findings post as inline discussions; re-anchoring of unanchorable findings applies on GitHub and GitLab, while Azure DevOps threads post at the reported `file:line` as-is and a location-less finding lands as a resolvable PR-level thread. README and AGENTS.md said "re-anchored" universally; the code (`reanchor` in `src/commands/post.ts`) never did that on ADO.
-- Reference docs agree on the pass ceiling (6 stack + up to 2 installed-plugin + every baseline; 10 only when no pack passes exist), the `## Skills` totals line, and GitLab in `SECURITY.md`'s scope.
+- Reference docs agree on the pass ceiling (6 stack + up to 2 installed-plugin + every baseline under the 16-pass materialization ceiling; 10 only when no pack passes exist), the `## Skills` totals line, and GitLab in `SECURITY.md`'s scope.
+- Reference docs now correctly describe post-gather setup, parallel Codex review, conditional verification, post-selection shared context (`skills-project.md` vs the budgeted `skills-all.md` fallback), and direct-agent versus slash-command companions. Materialized pass files now label skill source paths as provenance instead of claiming inaccessible sibling references resolve inside the confined runtime.
+
+### Fixed
+- Foreground reviews now pass the provider resolved from pre-gather trusted configuration into gather, and detached preflight uses the same trusted host map. A changed repository `.pr-review.yaml` can no longer remap a self-hosted host before that branch-authored configuration is rejected as untrusted.
 
 ### Removed
 - Stray `patch5.py` at the repo root — a one-off patch script whose edits had already landed in `src/commands/packs.ts`.

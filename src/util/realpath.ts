@@ -24,3 +24,15 @@ export function realpathCanonical(path: string): string {
     return realpathSync(path);
   }
 }
+
+/**
+ * One spelling for every path comparison against a PR's changed paths: forward
+ * slashes, NFC, lowercase — on EVERY platform. Folding only on win32 left a hole on
+ * macOS, whose default filesystem is case-insensitive too: a PR could commit a link
+ * at `.Agents/skills`, have the fixed lowercase discovery root find it, and never
+ * match the case-sensitive comparison. A false positive here fails closed; a false
+ * negative is a hole.
+ */
+export function foldPath(path: string): string {
+  return path.replace(/\\/g, '/').normalize('NFC').toLowerCase();
+}

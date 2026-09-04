@@ -12,7 +12,7 @@ Any `.md` file of review knowledge — a cheat sheet, a style guide, a team conv
 
 - **Skill packs** — git repos cloned to `~/.pr-review/packs/<name>/` (defaults: `awesome-copilot`, `owasp`, plus the index-only `anthropic-cybersecurity`). Pack skill names are `<pack>/<skill>`, e.g. `awesome-copilot/go`, `owasp/nodejs-security`.
 - **Repo/personal skill dirs** — `.claude/skills/`, `.claude/rules/`, `.copilot/skills/`, `.github/skills/`, `.github/instructions/`, `.agents/skills/` (per-repo), or conventional skill dirs under `~/`. These keep their plain name.
-- **Explicit sources** — `--skill` preserves `applies_to`/`applyTo`/`paths`; `--force-skill`, `extra_skills_dirs`, `--skills-dir`, and `PR_REVIEW_SKILLS_DIR` bypass scope.
+- **Explicit sources** — `--skill` and `--skills-dir` / `extra_skills_dirs` / `PR_REVIEW_SKILLS_DIR` preserve `applies_to`/`applyTo`/`paths` and are trust-checked; `--force-skill <file|dir>` bypasses scope, relevance and trust.
 
 ## Pass
 
@@ -22,7 +22,7 @@ Each pass gets a `pass-<name>.md` file in the run dir (`~/.pr-review/runs/<id>/`
 
 ## How passes are selected
 
-Selection separates LENSES from CONTEXT. Your own skills (repo dirs, forced dirs) are CONTEXT: every matched one is injected into EVERY pass as authoritative project rules (`skills-project.md`) - they override generic judgement and never consume pass slots. There is no numeric cap on matched project skills and their bodies are inlined whole (no byte truncation) - the review pays the token cost by design rather than silently losing a business rule. The PASSES are pack skills: stack hits (glob/tag, capped at `MAX_STACK_PASSES = 6`) plus EVERY baseline pointer (the generic lenses always run on a code PR). With no pack passes at all (`skill_packs: []`), your skills become the passes themselves — up to 10 as passes (bodies never truncated; only third-party pack bodies cap), overflow injected whole as context.
+Selection separates LENSES from CONTEXT. Your own skills (repo dirs, configured dirs, forced files/dirs) are CONTEXT: every matched one is injected into EVERY pass as authoritative project rules (`skills-project.md`) - they override generic judgement and never consume pass slots. There is no numeric cap on matched project skills and their bodies are inlined whole (no byte truncation) - the review pays the token cost by design rather than silently losing a business rule. The PASSES are pack skills: stack hits (glob/tag, capped at `MAX_STACK_PASSES = 6`) plus EVERY baseline pointer (the generic lenses always run on a code PR). With no pack passes at all (`skill_packs: []`), your skills become the passes themselves — up to 10 as passes (bodies never truncated; only third-party pack bodies cap), overflow injected whole as context.
 
 Pass selection within the packs:
 

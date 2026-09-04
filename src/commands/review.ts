@@ -1182,7 +1182,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   const untrustedProjectRules = loaded.skippedProjectSkills;
   if (untrustedProjectRules.length > 0) {
     process.stderr.write(
-      `[skills] skipped ${untrustedProjectRules.length} project rule(s) changed by this PR — branch-authored instructions are untrusted input\n`,
+      `[skills] skipped ${untrustedProjectRules.length} project rule(s) — changed by this PR, reached through a link it changed, or not committed in their home repository (see [skills] lines above)\n`,
     );
   }
   process.stderr.write(
@@ -1204,12 +1204,13 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
 
   // The checkout's skills carry authority ONLY when the checkout IS the PR's
   // repo — reviewing repo A from inside repo B must not inject B's rules.
-  // Explicitly forced dirs (--skills-dir / extra_skills_dirs) always apply.
+  // Configured (--skills-dir / extra_skills_dirs) and forced dirs are the
+  // reviewer's own choice and always apply.
   const skillsForSelection = skillsAllowedForCheckout(loaded.skills, projectEligible);
-  const catalogForSelection = projectEligible ? loaded.catalog : [];
-  if (!projectEligible && (loaded.skills.some((s) => s.origin !== 'forced') || loaded.catalog.length > 0)) {
+  const catalogForSelection = skillsAllowedForCheckout(loaded.catalog, projectEligible);
+  if (skillsForSelection.length + catalogForSelection.length < loaded.skills.length + loaded.catalog.length) {
     process.stderr.write(
-      `[skills] cwd is not the PR's repo — its skills are not used as project rules (forced dirs still apply)\n`,
+      `[skills] cwd is not the PR's repo — its skills are not used as project rules (configured and forced dirs still apply)\n`,
     );
   }
 

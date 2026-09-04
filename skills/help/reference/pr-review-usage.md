@@ -63,7 +63,7 @@ Exit codes: `0` pipeline completed with no finding at/above a configured thresho
 
 ## Add or remove review content
 
-Drop `.md` files in `.claude/skills`, `.claude/rules`, `.copilot/skills`, `.github/skills`, `.github/instructions`, or `.agents/skills`. `applies_to`, `applyTo`, and `paths` pin routing to file globs; unmatched rules go to the index. Standalone reviewer files are not loaded.
+Drop `.md` files in `.claude/skills`, `.claude/rules`, `.copilot/skills`, `.github/skills`, `.github/instructions`, or `.agents/skills`. `applies_to`, `applyTo`, and `paths` pin routing to file globs; unmatched rules go to the index. Under a `skills/` dir a subdirectory is a skill only through its `SKILL.md` (loose `.md` rules nest only under `rules/` or `instructions/`); linked directories (symlinks, junctions) are followed one hop. Standalone reviewer files are not loaded.
 
 Most review knowledge comes from skill packs (git repos under `~/.pr-review/packs/`): `pr-review packs list` shows the configured packs, `pr-review packs sync` clones/pulls them all (run it now and then — >30 days without a sync warns on every review), `pr-review packs add <owner/repo|url>` installs another, and `pr-review packs suggest <tags…|pr-url>` searches the skills.sh directory for candidates (suggestion only — it never installs). Full lifecycle (list, add, remove) in the `adding-your-own-md` skill; skill packs and configuration in [README.md](../../README.md).
 
@@ -82,15 +82,15 @@ Most review knowledge comes from skill packs (git repos under `~/.pr-review/pack
 | `--skip <names>` | Comma-separated pass names to skip — full (`awesome-copilot/go`) or bare suffix (`go`); also `verifier`, `codex` |
 | `--no-cache` | Bypass the gather cache |
 | `--skill <file>` | Include a specific .md file while preserving its `applyTo`/`paths` scope |
-| `--force-skill <file>` | Include a specific .md file regardless of its declared scope |
-| `--skills-dir <path>` | Include a directory of .md skills |
+| `--force-skill <file\|dir>` | Include .md skill(s) in every pass regardless of scope, relevance or rule trust (per run, the only bypass) |
+| `--skills-dir <path>` | Include a directory of .md skills, selected like a repo skill dir |
 | `--plugin-dir <path>` | Include a packaged plugin (has its own plugin.yaml) |
 | `--no-autodiscover` | Disable scanning the standard skill dirs (`.claude/.copilot/.github/.agents` under `skills/`, repo + home) |
 
 ## Configure once
 
 ```bash
-pr-review configure ~/my-review-skills   # one-line: appends to extra_skills_dirs globally (each skill there runs as a forced pass)
+pr-review configure ~/my-review-skills   # one-line: appends to extra_skills_dirs globally (selected like repo skill dirs)
 # OR
 pr-review configure                      # interactive prompts
 ```

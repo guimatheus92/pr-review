@@ -36,7 +36,7 @@ export function runConfigureQuick(path: string, opts: { force?: boolean } = {}):
   const resolved = resolve(path.replace(/^~/, homedir()));
   const cfg = readOrEmpty();
   // The review path loads skills only — reviewer dirs are never dispatched, so
-  // the quick path writes extra_skills_dirs (every skill there runs as a forced pass).
+  // the quick path writes extra_skills_dirs (selected like repo skill dirs; --force-skill <dir> is the per-run bypass).
   cfg.extra_skills_dirs = cfg.extra_skills_dirs ?? [];
   if (!cfg.extra_skills_dirs.includes(resolved)) {
     cfg.extra_skills_dirs.push(resolved);

@@ -1,5 +1,4 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 import type { ReviewerDefinition, SkillDefinition } from '../types.js';
 
@@ -147,42 +146,8 @@ function inferNameFromPath(filePath: string): string {
     .toLowerCase();
 }
 
-function walkSkillDirs(root: string): string[] {
-  const out: string[] = [];
-  let entries: string[];
-  try {
-    entries = readdirSync(root);
-  } catch {
-    return out;
-  }
-  for (const entry of entries) {
-    const full = join(root, entry);
-    const stat = statSync(full);
-    if (stat.isDirectory()) {
-      const skillFile = join(full, 'SKILL.md');
-      try {
-        if (statSync(skillFile).isFile()) {
-          out.push(skillFile);
-          continue;
-        }
-      } catch {
-        // not a skill dir; recurse
-      }
-      out.push(...walkSkillDirs(full));
-    } else if (entry.toLowerCase().endsWith('.md')) {
-      out.push(full);
-    }
-  }
-  return out;
-}
-
 export function loadBuiltInReviewers(): ReviewerDefinition[] {
   // There are no built-in reviewers: every review pass is a skill selected at
   // review time (packs + repo skills). Kept only until the loader drops it.
   return [];
-}
-
-export function loadFromDir(dirPath: string, type: 'reviewer' | 'skill'): (ReviewerDefinition | SkillDefinition)[] {
-  const files = walkSkillDirs(dirPath);
-  return files.map((f) => (type === 'reviewer' ? loadReviewerFile(f) : loadSkillFile(f)));
 }

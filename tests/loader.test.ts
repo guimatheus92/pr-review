@@ -67,48 +67,6 @@ function tmpRepoWithSkills(): { cwd: string; home: string } {
   return { cwd, home };
 }
 
-test('loadAll — discovers flat .md and SKILL.md dirs, parses targeting frontmatter', () => {
-  const { cwd, home } = tmpRepoWithSkills();
-  try {
-    // autodiscover off so the developer's real ~/.claude/skills don't leak into the test
-    const { config } = loadConfig({
-      cwd,
-      homeOverride: home,
-      cliOverrides: { autodiscover: false, skillsDirs: [join(cwd, 'team-skills')] },
-    });
-    const { skills } = loadAll({ cwd, config, skillsOnly: true });
-    const names = skills.map((s) => s.name).sort();
-    assert.deepEqual(names, ['domain-glossary', 'team-rules']);
-    const team = skills.find((s) => s.name === 'team-rules')!;
-    assert.deepEqual(team.appliesTo, ['**/*.ts']);
-    assert.ok(!skills.some((s) => s.name === 'ignored'), 'files under a SKILL.md dir are not loaded');
-  } finally {
-    rmSync(cwd, { recursive: true, force: true });
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test('loadAll — skill name collision: later wins', () => {
-  const { cwd, home } = tmpRepoWithSkills();
-  try {
-    const extraDir = join(cwd, 'extra-skills');
-    mkdirSync(extraDir, { recursive: true });
-    writeFileSync(join(extraDir, 'team-rules.md'), 'Overriding body.\n');
-    const { config } = loadConfig({
-      cwd,
-      homeOverride: home,
-      cliOverrides: { autodiscover: false, skillsDirs: [join(cwd, 'team-skills'), extraDir] },
-    });
-    const { skills } = loadAll({ cwd, config, skillsOnly: true });
-    const team = skills.filter((s) => s.name === 'team-rules');
-    assert.equal(team.length, 1);
-    assert.ok(team[0]!.body.includes('Overriding body'));
-  } finally {
-    rmSync(cwd, { recursive: true, force: true });
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
 test('loadAll — equivalent mirrored rules dedupe without a collision warning', () => {
   const cwd = mkdtempSync(join(tmpdir(), 'pr-review-loader-'));
   const home = mkdtempSync(join(tmpdir(), 'pr-review-loader-home-'));
@@ -342,34 +300,6 @@ test('discovery — a symlinked mirror dir does not double-count skills (realpat
   }
 });
 
-test('autodiscovery — linked rule directories are rejected before skill content is read', (context) => {
-  const cwd = mkdtempSync(join(tmpdir(), 'pr-review-loader-root-'));
-  const home = mkdtempSync(join(tmpdir(), 'pr-review-loader-home-'));
-  const outside = mkdtempSync(join(tmpdir(), 'pr-review-loader-outside-'));
-  try {
-    writeFileSync(join(outside, 'outside.md'), '---\napplies_to: ["src/**"]\n---\nOutside content.\n');
-    mkdirSync(join(cwd, '.github'), { recursive: true });
-    try {
-      symlinkSync(outside, join(cwd, '.github', 'instructions'), process.platform === 'win32' ? 'junction' : 'dir');
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === 'EPERM' || code === 'EACCES' || code === 'ENOSYS') {
-        context.skip(`directory links unavailable: ${code}`);
-        return;
-      }
-      throw error;
-    }
-    const { config } = loadConfig({ cwd, homeOverride: home });
-    const set = loadAll({ cwd, config, skillsOnly: true, home });
-    assert.ok(!set.skills.some((entry) => entry.name === 'outside'));
-    assert.ok(!set.catalog.some((entry) => entry.name === 'outside'));
-  } finally {
-    rmSync(cwd, { recursive: true, force: true });
-    rmSync(home, { recursive: true, force: true });
-    rmSync(outside, { recursive: true, force: true });
-  }
-});
-
 test('loadAll — skills carry their origin; packSkills load from the home packs root', () => {
   const { cwd, home } = tmpRepoWithSkills();
   try {
@@ -391,20 +321,6 @@ test('loadAll — skills carry their origin; packSkills load from the home packs
     assert.deepEqual(set.packSkills.map((s) => s.name), ['tiny/aa']);
     assert.equal(set.packSkills[0]!.origin, 'pack');
     assert.equal(set.packSkills[0]!.pack, 'tiny');
-  } finally {
-    rmSync(cwd, { recursive: true, force: true });
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test('loadAll — extra_skills_dirs skills carry origin forced', () => {
-  const { cwd, home } = tmpRepoWithSkills();
-  try {
-    const { config } = loadConfig({ cwd, homeOverride: home });
-    config.skillsDirs.push(join(cwd, 'team-skills'));
-    const set = loadAll({ cwd, config, skillsOnly: true, home });
-    const forced = set.skills.find((s) => s.name === 'team-rules');
-    assert.equal(forced?.origin, 'forced');
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });

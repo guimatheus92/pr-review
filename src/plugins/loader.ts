@@ -1,5 +1,5 @@
-import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import type { ReviewerDefinition, SkillDefinition } from '../types.js';
 import type { Config } from '../config.js';
@@ -7,7 +7,7 @@ import { autodiscoveryPaths } from '../config.js';
 import { loadReviewerFile, loadSkillFile, loadBuiltInReviewers } from './builtin.js';
 import { loadPackSkills } from '../packs/load.js';
 import type { PluginManifest, PluginReviewerEntry, PluginSkillEntry } from './types.js';
-import { partitionTrustedProjectSkills } from './trust.js';
+import { changedPathSet, normalizedRelative, partitionTrustedProjectSkills, prAuthoredPath } from './trust.js';
 import { gitTopLevel } from '../util/git.js';
 import { discoverInstalledPlugins, type InstalledPlugin } from './installed.js';
 import { realpathCanonical } from '../util/realpath.js';
@@ -21,37 +21,121 @@ export interface LoadedSet {
   skills: SkillDefinition[];
 }
 
-function walkMdFiles(root: string): string[] {
-  const out: string[] = [];
-  if (!existsSync(root)) return out;
+interface WalkOptions {
+  /** True when a link at this lexical path was added or changed by the PR — it must not be followed, nor read. */
+  refuseLink?: (absPath: string) => boolean;
+  /** Links refused above, reported as degraded coverage. */
+  skippedLinks?: string[];
+  /** Checkout root: a link anywhere between it and a discovery root spends the single hop. */
+  top?: string;
+}
+
+function hasMdEntry(dir: string): boolean {
+  try {
+    return readdirSync(dir).some((entry) => entry.toLowerCase().endsWith('.md'));
+  } catch {
+    return false;
+  }
+}
+
+/** Is any directory strictly between `top` and `path` a link? */
+function linkAbove(path: string, top: string): boolean {
+  for (let dir = dirname(path); dir !== resolve(top) && normalizedRelative(top, dir) !== null; dir = dirname(dir)) {
+    try {
+      if (lstatSync(dir).isSymbolicLink()) return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+/**
+ * Directory links (symlinks, NTFS junctions) are followed ONE hop: a workspace
+ * shares one rule set across sibling checkouts by linking a discovery dir at it.
+ * A link the PR itself added or changed is refused BEFORE anything behind it is
+ * read (its target is attacker-chosen); links met inside the linked directory are
+ * not followed, so the trust boundary is the reviewer's own link, not every repo
+ * a chain of links happens to reach. trust.ts decides what the content may do.
+ */
+function walkMdFiles(root: string, opts: WalkOptions = {}): string[] {
+  if (opts.refuseLink?.(root)) {
+    opts.skippedLinks?.push(root);
+    return [];
+  }
   let stats;
   try {
     stats = lstatSync(root);
   } catch {
+    return [];
+  }
+  let followLinks = true;
+  if (stats.isSymbolicLink()) {
+    followLinks = false;
+    try {
+      stats = statSync(root);
+    } catch {
+      return []; // dangling link
+    }
+  } else if (opts.top && linkAbove(root, opts.top)) {
+    followLinks = false;
+  }
+  // An explicit file path is honored by name — README.md included.
+  if (stats.isFile()) return root.toLowerCase().endsWith('.md') ? [root] : [];
+  if (!stats.isDirectory()) return [];
+  // Under a `skills` root a subdirectory is a skill only through its SKILL.md
+  // (the convention every agent tool shares); loose rules nest only under
+  // rules/ or instructions/ roots.
+  return walkDir(root, opts, /^skills$/i.test(basename(root)), followLinks);
+}
+
+function walkDir(dir: string, opts: WalkOptions, strict: boolean, followLinks: boolean): string[] {
+  const out: string[] = [];
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
     return out;
   }
-  if (stats.isSymbolicLink()) return out;
-  if (stats.isFile() && root.toLowerCase().endsWith('.md')) {
-    return [root];
-  }
-  if (!stats.isDirectory()) return out;
-  for (const entry of readdirSync(root)) {
-    const full = join(root, entry);
+  for (const entry of entries) {
+    const full = join(dir, entry);
     let s;
     try {
       s = lstatSync(full);
     } catch {
       continue;
     }
-    if (s.isSymbolicLink()) continue;
+    let childFollow = followLinks;
+    if (s.isSymbolicLink()) {
+      if (!followLinks) {
+        process.stderr.write(`[skills] not following ${full}: a link inside a linked directory (one hop only)\n`);
+        continue;
+      }
+      if (opts.refuseLink?.(full)) {
+        opts.skippedLinks?.push(full);
+        continue;
+      }
+      childFollow = false;
+      try {
+        s = statSync(full);
+      } catch {
+        continue; // dangling link
+      }
+    }
     if (s.isDirectory()) {
       const skillFile = join(full, 'SKILL.md');
       if (existsSync(skillFile)) {
         out.push(skillFile);
+      } else if (strict) {
+        if (hasMdEntry(full)) {
+          process.stderr.write(
+            `[skills] warning: ${full} has no SKILL.md — its .md files are not loaded as skills (loose .md rules nest only under rules/ or instructions/)\n`,
+          );
+        }
       } else {
-        out.push(...walkMdFiles(full));
+        out.push(...walkDir(full, opts, strict, childFollow));
       }
-    } else if (entry.toLowerCase().endsWith('.md')) {
+    } else if (s.isFile() && entry.toLowerCase().endsWith('.md') && entry.toLowerCase() !== 'readme.md') {
       out.push(full);
     }
   }
@@ -81,9 +165,13 @@ function pathsInsideRoot(paths: string[], root: string): string[] {
   });
 }
 
-function loadFromPaths(paths: string[], kind: 'reviewer' | 'skill'): (ReviewerDefinition | SkillDefinition)[] {
+function loadFromPaths(
+  paths: string[],
+  kind: 'reviewer' | 'skill',
+  walk: WalkOptions = {},
+): (ReviewerDefinition | SkillDefinition)[] {
   const files: string[] = [];
-  for (const p of paths) files.push(...walkMdFiles(p));
+  for (const p of paths) files.push(...walkMdFiles(p, walk));
   const seen = new Set<string>();
   const unique = files.filter((f) => {
     const norm = realpathSafe(f);
@@ -214,6 +302,20 @@ export function loadAll(
     skippedProjectSkills.push(...partition.skipped);
     return partition.trusted;
   };
+  // A link the PR added or changed is refused at the walk, before its target is
+  // read. Without changedPaths (`plugins list`) every link is the reviewer's own.
+  const changed = opts.changedPaths ? changedPathSet(opts.changedPaths) : null;
+  const skippedLinks: string[] = [];
+  const walk: WalkOptions = {
+    top: cwd,
+    skippedLinks,
+    refuseLink: changed
+      ? (absPath) => {
+          const rel = normalizedRelative(cwd, absPath);
+          return rel !== null && prAuthoredPath(changed, rel);
+        }
+      : undefined,
+  };
 
   if (includeBuiltIn && !skillsOnly) {
     reviewers.push(...loadBuiltInReviewers());
@@ -232,7 +334,7 @@ export function loadAll(
     // against the changed files and injects the relevant ones (see skill-match),
     // leaving the tail available on-demand. Untargeted HOME skills are personal
     // general-purpose helpers (video/design) — not review content — so skipped.
-    const repoGeneric = trust(withOrigin(loadFromPaths(paths.repoSkills, 'skill') as SkillDefinition[], 'repo'));
+    const repoGeneric = trust(withOrigin(loadFromPaths(paths.repoSkills, 'skill', walk) as SkillDefinition[], 'repo'));
     skills.push(...repoGeneric.filter(hasReviewTargeting));
     const repoUntargeted = repoGeneric.filter((s) => !hasReviewTargeting(s));
     catalog.push(...repoUntargeted);
@@ -242,7 +344,7 @@ export function loadAll(
       );
     }
 
-    const personalGeneric = trust(withOrigin(loadFromPaths(paths.personalSkills, 'skill') as SkillDefinition[], 'home'));
+    const personalGeneric = trust(withOrigin(loadFromPaths(paths.personalSkills, 'skill', walk) as SkillDefinition[], 'home'));
     skills.push(...personalGeneric.filter(hasReviewTargeting));
     const personalSkipped = personalGeneric.filter((s) => !hasReviewTargeting(s)).length;
     if (personalSkipped > 0) {
@@ -260,13 +362,30 @@ export function loadAll(
   }
 
   const explicitSkills = trust(
-    withOrigin(loadFromPaths(pathsInsideRoot(config.skills, cwd), 'skill') as SkillDefinition[], 'explicit'),
+    withOrigin(loadFromPaths(pathsInsideRoot(config.skills, cwd), 'skill', walk) as SkillDefinition[], 'explicit'),
   );
   skills.push(...explicitSkills);
-  const forceSkills = withOrigin(loadFromPaths(config.forceSkills, 'skill') as SkillDefinition[], 'forced');
+  // --force-skill takes a file OR a directory: injected whole, no scope, no trust
+  // check, per run only — the deliberate bypass.
+  const forceSkills = withOrigin(loadFromPaths(config.forceSkills, 'skill', { top: cwd }) as SkillDefinition[], 'forced');
   skills.push(...forceSkills);
-  const explicitSkillsDirs = withOrigin(loadFromPaths(config.skillsDirs, 'skill') as SkillDefinition[], 'forced');
-  skills.push(...explicitSkillsDirs);
+  // --skills-dir / extra_skills_dirs / PR_REVIEW_SKILLS_DIR: the same treatment as
+  // a repo skill dir (targeted → scoped rule, untargeted → relevance heuristic,
+  // unmatched → index), subject to rule trust, kept when cwd is not the PR repo.
+  const configured = trust(withOrigin(loadFromPaths(config.skillsDirs, 'skill', walk) as SkillDefinition[], 'configured'));
+  skills.push(...configured.filter(hasReviewTargeting));
+  catalog.push(...configured.filter((s) => !hasReviewTargeting(s)));
+  if (configured.length > 0) {
+    process.stderr.write(
+      `[skills] ${configured.length} skill(s) from configured dirs (--skills-dir / extra_skills_dirs / PR_REVIEW_SKILLS_DIR) — selected like repo skills; --force-skill <dir> injects a directory whole\n`,
+    );
+  }
+
+  for (const link of new Set(skippedLinks)) {
+    const rel = normalizedRelative(cwd, link) ?? link;
+    process.stderr.write(`[skills] skipped link ${rel}: added or changed by this PR — not followed\n`);
+    skippedProjectSkills.push({ name: rel, source: link, body: '', appliesTo: [] });
+  }
 
   for (const dir of config.pluginDirs) {
     const set = loadPlugin(dir);

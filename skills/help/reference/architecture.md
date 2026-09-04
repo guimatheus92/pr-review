@@ -36,7 +36,7 @@ Node CLI (deterministic plumbing)
 
 A single agent session (Copilot CLI or Claude Code, selected by `--runtime` / `runtime:` / `PR_REVIEW_RUNTIME`, default `auto`) dispatches every Phase 1 pass and companion through `task` / `Task`. Every call has a deterministic `description` and an attempt-scoped output path. The orchestrator is dispatch-only: it cannot create Phase 1, decide the verifier, or write consolidated findings. Node validates exact `Finding[]`, promotes write-once canonical sidecars, preserves valid work, and dispatches only the unresolved delta in one automatic recovery session. A schema-v1 `--resume` gets the bounded final targeted attempt under one per-run lease that remains held through finalization.
 
-**Untrusted input.** Anything the branch under review authored cannot instruct its own review: a rule file the PR added or modified is dropped from both the authoritative context and the on-demand index (and named as degraded coverage), a changed `.pr-review.yaml` is ignored in favour of the trusted config, and changed repository MCP configuration is refused. `--force-skill` is the explicit per-file override; directory-level forced sources (`--skills-dir`, `extra_skills_dirs`, `PR_REVIEW_SKILLS_DIR`) bypass it too.
+**Untrusted input.** Anything the branch under review authored cannot instruct its own review: a rule file the PR added or modified is dropped from both the authoritative context and the on-demand index (and named as degraded coverage), a changed `.pr-review.yaml` is ignored in favour of the trusted config, and changed repository MCP configuration is refused. Configured skill dirs (`--skills-dir`, `extra_skills_dirs`, `PR_REVIEW_SKILLS_DIR`) are selected like repo skill dirs and go through the same trust check; `--force-skill <file|dir>` is the only bypass — per run, CLI only, with deliberately no yaml or env equivalent, so a committed config can never pre-authorize branch-authored content. Linked skill directories (symlinks, NTFS junctions) are followed one hop: a link the PR added or changed is refused before anything behind it is read and named as degraded coverage, and content outside the checkout is trusted by authorship, not location — it must be committed and clean in its home git repository (a directory under no repository at all is trusted as the reviewer's local configuration).
 
 Node assembles Phase 1 in plan order only at complete delivery. HIGH/CRITICAL findings trigger a separate direct verifier runtime that reads the digest-bound Phase 1 file; otherwise state records `skipped-no-severe`. Only after required verifier and optional Codex coverage are valid does Node assemble `single-session-findings.json` and call dedupe/post. Runtime exit 0 alone is never completion, and partial findings never post.
 
@@ -93,9 +93,9 @@ src/
 │   ├── parsers.ts           # JSON / bracketed-markdown / section-header parsers
 │   └── diff-filter.ts       # strip lockfiles, generated code, vendor dirs
 ├── plugins/
-│   ├── loader.ts            # resolve skills from all sources (loadAll has a skillsOnly option, used by review)
+│   ├── loader.ts            # resolve skills from all sources (loadAll has a skillsOnly option, used by review); follows linked dirs one hop; skills roots are SKILL.md-owned
 │   ├── builtin.ts           # parse skill .md files: frontmatter + body, name normalization
-│   ├── trust.ts             # rule files the PR changed are untrusted; only --force-skill overrides
+│   ├── trust.ts             # rule files the PR changed are untrusted; linked dirs trusted by authorship + commit-and-clean gate; only --force-skill overrides
 │   ├── installed.ts         # host-agnostic plugin discovery (Copilot CLI + Claude Code) + the MCP capability inventory
 │   ├── companions.ts        # detect pr-review-toolkit / code-review installs (copilot plugin list | installed_plugins.json); companionReviewerNames = the planned dispatch list
 │   └── types.ts             # PluginManifest, PluginReviewerEntry, PluginSkillEntry

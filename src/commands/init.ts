@@ -41,7 +41,9 @@ const CONFIG_TEMPLATE = `# .pr-review.yaml — per-repo config (committed; share
 #   - github/awesome-copilot
 #   - OWASP/CheatSheetSeries
 
-# Extra directories to load skills from (every skill in them runs as a forced pass).
+# Extra directories to load skills from. Selected like repo skill dirs
+# (targeting + relevance apply); files the PR changed are ignored. Nothing in
+# yaml forces a skill — that is --force-skill <dir>, per run.
 # extra_skills_dirs:
 #   - ./docs/conventions
 

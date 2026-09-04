@@ -4,6 +4,16 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+### Added
+- Brand icon (`assets/icon.svg`) and a branded README: centered header, badges, highlights, a mermaid pipeline diagram, a table of contents, and the verbose reference material folded into collapsible sections. Docs only — nothing ships differently.
+
+### Changed
+- The posting guarantee now states exactly what each provider does: GitLab findings post as inline discussions; re-anchoring of unanchorable findings applies on GitHub and GitLab, while Azure DevOps threads post at the reported `file:line` as-is and a location-less finding lands as a resolvable PR-level thread. README and AGENTS.md said "re-anchored" universally; the code (`reanchor` in `src/commands/post.ts`) never did that on ADO.
+- Reference docs agree on the pass ceiling (6 stack + up to 2 installed-plugin + every baseline; 10 only when no pack passes exist), the `## Skills` totals line, and GitLab in `SECURITY.md`'s scope.
+
+### Removed
+- Stray `patch5.py` at the repo root — a one-off patch script whose edits had already landed in `src/commands/packs.ts`.
+
 ## [0.10.0] — 2026-09-01
 
 ### Added

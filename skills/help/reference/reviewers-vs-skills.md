@@ -33,7 +33,7 @@ Pass selection within the packs:
 
 Linguist contributes canonical language names, not aliases as independent technologies. Generic files such as `package.json` or `*.csproj` prove an ecosystem, not Azure Functions, MCP, Copilot SDK, or another product by themselves.
 
-**Cap:** at most `MAX_STACK_PASSES = 6` stack passes dispatch; baselines ride on top (typically 7, so <=13 passes). Overflow, unmatched skills, and index-mode packs land in `skills-index.md` — an on-demand list every pass can read from when an entry is relevant. Indexed skills are surfaced, not ignored.
+**Cap:** at most `MAX_STACK_PASSES = 6` stack passes dispatch, plus up to `MAX_PLUGIN_PASSES = 2` installed-plugin passes; baselines ride on top (typically 7, so <=15 passes). Overflow, unmatched skills, and index-mode packs land in `skills-index.md` — an on-demand list every pass can read from when an entry is relevant. Indexed skills are surfaced, not ignored.
 
 Docs-only PRs run only glob/forced passes (never baseline). Zero passes on a code PR is exit 2 with a `packs suggest` hint; on a docs-only PR it's a clean exit 0.
 
@@ -78,7 +78,7 @@ Prints a `## Stack` section (languages, dependencies, notes) and a `## Passes` t
 
 ## Skills in the run summary
 
-The `pr-review-summary.md` carries a `## Skills` section: `**Passes:** N · **On-demand (index):** K` plus a `| Pass | Matched by |` table. The progress feed shows the same brief (`N pass(es) · K on-demand`), surfaced by `pr-review status`. A `--resume` reproduces the section from the `passes.json` the live run persisted (old runs without it: section omitted, findings still replay).
+The `pr-review-summary.md` carries a `## Skills` section: `**Passes:** N · **Project rules (in every pass):** M · **On-demand (index):** K` (the project-rules segment appears when at least one matched; `· **Skipped:** S` is appended when any pass was skipped) plus a `| Pass | Matched by |` table. The progress feed shows the same brief (`N pass(es) · M project rule(s) · K on-demand`), surfaced by `pr-review status`. A `--resume` reproduces the section from the `passes.json` the live run persisted (old runs without it: section omitted, findings still replay).
 
 ## Common confusion to avoid
 

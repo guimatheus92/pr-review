@@ -80,8 +80,8 @@ program
   .option('--reviewer <path...>', 'Include a specific .md file as a reviewer (repeatable)')
   .option('--reviewers-dir <path...>', 'Include a directory of reviewer .md files (repeatable)')
   .option('--skill <path...>', 'Include a specific .md skill; its applyTo/paths scope still applies (repeatable)')
-  .option('--force-skill <path...>', 'Include a specific .md skill regardless of its applyTo/paths scope (repeatable)')
-  .option('--skills-dir <path...>', 'Include a directory of skill .md files (repeatable)')
+  .option('--force-skill <path...>', 'Include a .md skill file, or every rule the loader recognizes under a directory, in every pass regardless of scope, relevance or rule trust (repeatable; the only bypass, per run)')
+  .option('--skills-dir <path...>', 'Include a directory of skill .md files, selected like a repo skill dir: targeting and relevance apply, PR-changed files are skipped (repeatable)')
   .option('--plugin <name...>', 'Named plugin to include (resolves from node_modules)')
   .option('--plugin-dir <path...>', 'Packaged plugin directory (has plugin.yaml)')
   .option('--no-autodiscover', 'Disable scanning the standard skill dirs (.claude/.copilot/.github/.agents under skills/, repo + home)')
@@ -315,7 +315,7 @@ program
 
 program
   .command('configure [path]')
-  .description('Write ~/.pr-review/config.yaml. With a path, adds it to extra_skills_dirs (forced review passes); without, runs interactive prompts.')
+  .description('Write ~/.pr-review/config.yaml. With a path, adds it to extra_skills_dirs (selected like repo skill dirs); without, runs interactive prompts.')
   .option('--force', 'Overwrite existing entries', false)
   .action(async (path: string | undefined, opts: { force: boolean }) => {
     try {
@@ -335,7 +335,7 @@ plugins
   .command('list')
   .description('List every reviewer and skill that would be loaded for the current cwd')
   .option('--reviewers-dir <path...>', 'Extra reviewer directories to include')
-  .option('--skills-dir <path...>', 'Extra skill directories to include')
+  .option('--skills-dir <path...>', 'Extra skill directories to include (selected, not forced)')
   .action(async (opts: { reviewersDir?: string[]; skillsDir?: string[] }) => {
     try {
       await pluginsList(opts);

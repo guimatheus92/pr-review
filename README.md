@@ -230,10 +230,10 @@ Three packs are pre-configured:
 
 How passes are selected:
 
-- **Your skills are context, not lenses.** Every matched repo/explicit/forced skill is injected into EVERY pass as authoritative project rules. The passes are pack skills.
+- **Your skills are context, not lenses.** Every matched repo/configured/explicit/forced skill is injected into EVERY pass as authoritative project rules. The passes are pack skills.
 - **Evidence tiers.** Pack passes rank by: specific path glob › manifest-backed dependency/framework token › language-consistent type/manifest glob › exact stack tag. At most 6 stack passes run, plus up to 2 installed-plugin passes, plus EVERY baseline pointer. A product guide cannot qualify merely because the PR touches its language or a generic manifest.
 - **Stack detection** emits canonical Linguist language names, reads shallow root manifests plus the manifests owning changed files, and keeps language, ecosystem, dependency-name and dependency-token evidence separate. Legacy and canonical Azure DevOps remotes normalize to the same checkout identity.
-- **Docs-only PRs** run only glob/forced passes. A code PR that matches zero passes exits 2 with a `packs suggest` hint.
+- **Docs-only PRs** run only glob-matched or `--force-skill` passes. A code PR that matches zero passes exits 2 with a `packs suggest` hint.
 
 Manage packs from the CLI:
 
@@ -265,18 +265,20 @@ your-repo/
 ```
 
 - **Every match injects into every pass** as an authoritative project rule (`skills-project.md` — it overrides generic judgement), keeping its plain name. There is no numeric cap and skill bodies are inlined whole, never truncated.
-- **Discovered from** `.claude/skills`, `.claude/rules`, `.copilot/skills`, `.github/skills`, `.github/instructions`, and `.agents/skills`. `applies_to`, `applyTo`, and Claude's `paths` are equivalent scopes.
+- **Discovered from** `.claude/skills`, `.claude/rules`, `.copilot/skills`, `.github/skills`, `.github/instructions`, and `.agents/skills`. `applies_to`, `applyTo`, and Claude's `paths` are equivalent scopes. Directories you configure yourself (`--skills-dir`, `extra_skills_dirs`, `PR_REVIEW_SKILLS_DIR`) are selected exactly the same way, and still apply when your cwd is not the PR's repository.
 - **Targeted or heuristic.** A targeted skill matches exactly when an in-scope changed file matches; a skill without targeting goes through the `name` + `description` relevance heuristic against the changed file paths and the diff.
 - **Unmatched skills are surfaced, not dropped.** They land in `skills-index.md`, an on-demand index every pass can read when relevant.
-- **Rule files added or modified by the PR under review are untrusted input.** They are excluded — before same-name dedupe — from both authoritative context and the on-demand index, and the summary names the skipped coverage. This includes in-repo files supplied through `--skill`; `--force-skill` is the explicit trust override. Linked rule sources that resolve outside the checkout fail closed. Unchanged rules from the checkout remain authoritative.
-- **Scope vs. force.** `--skill <file>` includes one file while preserving its scope; use `--force-skill <file>` only when bypassing that scope is intentional. Whole directories configured through `extra_skills_dirs`, `--skills-dir`, or `PR_REVIEW_SKILLS_DIR` are forced — point them at rules the PR cannot edit.
+- **Rule files added or modified by the PR under review are untrusted input.** They are excluded — before same-name dedupe — from both authoritative context and the on-demand index, and the summary names the skipped coverage. This includes in-repo files supplied through `--skill` and files inside a configured directory; `--force-skill` is the explicit trust override. A link the PR added or changed is refused before anything behind it is read (see linked directories below). Unchanged rules from the checkout remain authoritative.
+- **Scope vs. force.** `--skill <file>` includes one file while preserving its scope (the file must resolve inside the checkout — a link to an outside file is refused). `--force-skill <file|dir>` is the only bypass: a file, or every rule the loader recognizes under a directory (same walk rules: `README.md` never, SKILL.md-owned subfolders under a `skills` root), is injected whole into every pass — no scope, no trust check — so point it only at rules the PR cannot edit. It is per run and CLI-only on purpose: there is no yaml or env key for forcing, so a committed `.pr-review.yaml` can never pre-authorize branch-authored content. Directories configured through `extra_skills_dirs`, `--skills-dir`, or `PR_REVIEW_SKILLS_DIR` are not forced — they are selected and trust-checked like repo skill dirs.
 - **Preview the selection** with `--context-only`: it prints a `## Stack` block and a `## Passes` table (`| Pass | Matched by | Matched on | Source |`, plus the index count) and exits without dispatching.
+
+**Linked directories and `skills/` roots.** Discovery follows a directory link — symlink or NTFS junction — one hop, in every skill dir, so rules shared across repos through a link are read like any other (a link met inside a linked directory is not followed). Trust follows authorship, not location: a link the PR itself added or changed — its path, or any parent of it, is in the diff — is refused before anything behind it is read and named as degraded coverage, and a file that resolves outside the checkout is used only when it is committed and clean in its home git repository (a `SKILL.md` needs its whole directory clean) — the same gate applies to every rule outside the checkout (linked, configured or personal), and a repository git cannot read is skipped, never trusted, because on Windows `git checkout` of a PR branch writes through a junction into the shared folder; an untracked or modified file there is skipped and named, while a directory under no git repository at all is trusted as your local configuration (one stderr note per directory reached through a link). Under any root named `skills/`, a subdirectory is a skill only through its `SKILL.md`: a subdirectory without one is skipped (a warning names it when it holds `.md` files), flat `.md` files at the root are still skills, and a `README.md` is never a skill — loose `.md` rules nest only under `rules/` or `instructions/`.
 
 <details>
 <summary><b>Routing details</b></summary>
 <br>
 
-Large indexes split into digest-bound shards; every indexed body is materialized inside the isolated run directory, and each entry retains its original source for provenance. With no pack passes at all (e.g. `skill_packs: []`), your skills become the passes themselves — up to 10 as passes, with overflow still injected whole as context. `inject_into` is **deprecated**: it is parsed only to print a warning, then ignored. Untargeted **home** skills (`~/.claude/skills/` and friends) are skipped unless pulled in through a forced directory.
+Large indexes split into digest-bound shards; every indexed body is materialized inside the isolated run directory, and each entry retains its original source for provenance. With no pack passes at all (e.g. `skill_packs: []`), your skills become the passes themselves — up to 10 as passes, with overflow still injected whole as context. `inject_into` is **deprecated**: it is parsed only to print a warning, then ignored. Untargeted **home** skills (`~/.claude/skills/` and friends) are skipped unless supplied through a configured directory (`--skills-dir`, selected like repo skills) or injected whole with `--force-skill <dir>`.
 
 </details>
 
@@ -334,8 +336,10 @@ pr-review review <pr-url> [flags]            # full pipeline
 #                           final targeted attempt for incomplete coverage
 #   --force-post            re-post even if this run already recorded a successful post
 #   --skill <file...>       include files while respecting applyTo/paths
-#   --force-skill <file...> include files regardless of applyTo/paths
-#   --skills-dir <path...>  include a directory of skill .md files (forced)
+#   --force-skill <file|dir...>
+#                           include files, or every .md under a directory, whole:
+#                           no applyTo/paths scope, no rule-trust check (CLI only)
+#   --skills-dir <path...>  include a directory of skill .md files (selected like a repo skill dir)
 #   --plugin-dir <path...>  include a packaged plugin directory (has plugin.yaml)
 #   --no-autodiscover       don't scan the standard skill dirs (repo + home)
 #   --dedupe-mode <mode>    strict|loose|off (default strict)

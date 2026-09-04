@@ -40,7 +40,12 @@
 #                                       # index — on-demand skills index only, never a pass
 #     baseline: [error-handling, logging]  # skills that run as a pass on EVERY PR
 
-# Extra directories to load skills from (paths relative to this file).
+# Extra directories to load skills from (paths relative to this file). They are
+# selected like repo skill dirs — applies_to/applyTo/paths targeting and the
+# relevance heuristic apply, unmatched files land in the on-demand index — and
+# trust-checked: a file the PR under review changed is skipped. Nothing here
+# forces a skill; to inject a directory whole into every pass, use
+# --force-skill <dir> on the CLI, per run.
 # Note: standalone reviewers are NEVER dispatched — every review pass is a
 # generic agent applying one skill. The extra_reviewers* keys still parse but
 # are ignored on the review path; use the extra_skills* keys.

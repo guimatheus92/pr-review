@@ -581,3 +581,17 @@ test('passes.json — persisted at dispatch time, equal to ctx.routing (for --re
     rmSync(outDir, { recursive: true, force: true });
   }
 });
+
+test('pass body cap — a CONFIGURED-dir skill running as a pass is never truncated either', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const ctx = prepareSessionContext(
+      baseOpts(outDir, ['src/app.ts'], [pass('my-rules', { body: 'r'.repeat(60_000) + 'RULE-END', matchedBy: 'glob', origin: 'configured' })]),
+    );
+    const file = readFileSync(ctx.skillsFiles['my-rules']!, 'utf8');
+    assert.ok(file.includes('RULE-END'), 'body lands whole');
+    assert.ok(!file.includes('[truncated:'), 'no truncation marker for project-origin passes');
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});

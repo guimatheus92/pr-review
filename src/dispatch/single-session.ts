@@ -422,7 +422,8 @@ function renderPassFile(pass: ReviewPass): string {
   let body = pass.body.trim();
   // Only third-party PACK bodies cap: a project skill running as a pass (the
   // skill_packs: [] fallback) carries business rules and must land whole.
-  const isProjectSkill = pass.origin === 'repo' || pass.origin === 'explicit' || pass.origin === 'forced';
+  const isProjectSkill =
+    pass.origin === 'repo' || pass.origin === 'explicit' || pass.origin === 'configured' || pass.origin === 'forced';
   if (!isProjectSkill && body.length > PASS_BODY_CAP) {
     body = body.slice(0, PASS_BODY_CAP) + `\n\n[truncated: skill body exceeded ${PASS_BODY_CAP} bytes]`;
     process.stderr.write(

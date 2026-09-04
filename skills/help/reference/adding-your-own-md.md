@@ -29,6 +29,8 @@ Skills are standard `SKILL.md` reference docs, so they load from every conventio
 | `~/.claude/skills/*.md`, `~/.copilot/skills/*.md`, `~/.agents/skills/*.md` | Personal, cross-repo |
 | `~/.pr-review/packs/<name>/` | Skill packs — git repos configured via `skill_packs` / `pr-review packs add` |
 
+Under a `skills` root a subdirectory is a skill only through `<dir>/SKILL.md` — a subdirectory without one is skipped (a stderr warning names it when it holds `.md` files), flat `.md` files at the root still load, a `README.md` entry is never a skill, and `rules/` / `instructions/` roots recurse as before. Linked directories (symlinks, NTFS junctions) are followed one hop in every path above and in configured dirs; a link the PR itself added or changed is refused before anything behind it is read, and a link inside a linked directory is not followed.
+
 How each skill routes (see [`reviewers-vs-skills`](reviewers-vs-skills.md) for the full tier list):
 
 - **Targeted** (`applies_to` globs match a changed file) → becomes its own **pass**, authoritatively.
@@ -38,7 +40,7 @@ How each skill routes (see [`reviewers-vs-skills`](reviewers-vs-skills.md) for t
 
 Per review, at most 6 stack-matched pack passes dispatch, plus every baseline pointer and up to 2 installed-plugin passes; overflow joins the index. (Only with no pack passes at all — e.g. `skill_packs: []` — do your own skills become the passes, up to 10, with overflow injected whole as context.)
 
-One `.md` in a skill dir serves both your normal agent sessions and pr-review; add `applies_to` when you want to pin exactly which files trigger it instead of leaning on the relevance heuristic. To force an entire directory in regardless of relevance, point `extra_skills_dirs` / `--skills-dir` / `PR_REVIEW_SKILLS_DIR` at it.
+One `.md` in a skill dir serves both your normal agent sessions and pr-review; add `applies_to` when you want to pin exactly which files trigger it instead of leaning on the relevance heuristic. A directory you configure via `extra_skills_dirs` / `--skills-dir` / `PR_REVIEW_SKILLS_DIR` is selected exactly like a repo skill dir (scope, relevance heuristic, trust check); to force an entire directory in regardless of relevance, use `--force-skill <dir>`.
 
 ## Adding
 
@@ -61,7 +63,7 @@ mkdir -p ~/.claude/skills
 cp ~/notes/personal-checklist.md  ~/.claude/skills/       # add applies_to frontmatter
 ```
 
-With `applies_to` frontmatter it runs on every `pr-review` run from any repo. Or force a whole directory in with `--skills-dir ~/notes/review` (or `PR_REVIEW_SKILLS_DIR`). Use for cross-team review habits you carry with you.
+With `applies_to` frontmatter it runs on every `pr-review` run from any repo. Or point `--skills-dir ~/notes/review` (or `PR_REVIEW_SKILLS_DIR`) at a directory — selected like a repo skill dir, so untargeted files go through the relevance heuristic instead of being skipped — or force the whole directory into every pass with `--force-skill ~/notes/review`. Use for cross-team review habits you carry with you.
 
 ### Adding a skill pack (whole repos of review knowledge)
 
@@ -78,7 +80,8 @@ Or edit `skill_packs:` in `.pr-review.yaml` / `~/.pr-review/config.yaml`. Note `
 ```bash
 pr-review review <pr-url> --skill ./extra-context.md
 pr-review review <pr-url> --force-skill ./extra-context.md  # bypass its declared scope
-pr-review review <pr-url> --skills-dir ./other/path
+pr-review review <pr-url> --skills-dir ./other/path         # selected like a repo skill dir
+pr-review review <pr-url> --force-skill ./other/path        # every file, every pass, per run
 ```
 
 ## Adding depth to a review

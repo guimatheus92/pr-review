@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { partitionTrustedProjectSkills, skillDirPrefix, skillsAllowedForCheckout } from '../src/plugins/trust.js';
@@ -28,34 +28,6 @@ test('partitionTrustedProjectSkills — changed in-repo explicit rules are skipp
     assert.deepEqual(result.skipped.map((entry) => entry.name), ['changed', 'explicit']);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
-  }
-});
-
-test('partitionTrustedProjectSkills — a repo rule resolving outside the checkout is skipped', (context) => {
-  const cwd = mkdtempSync(join(tmpdir(), 'pr-review-trust-root-'));
-  const outside = mkdtempSync(join(tmpdir(), 'pr-review-trust-outside-'));
-  try {
-    mkdirSync(join(cwd, '.github', 'instructions'), { recursive: true });
-    const target = join(outside, 'outside.md');
-    const linkedDir = join(cwd, '.github', 'instructions', 'linked');
-    const linked = join(linkedDir, 'outside.md');
-    writeFileSync(target, 'outside');
-    try {
-      symlinkSync(outside, linkedDir, process.platform === 'win32' ? 'junction' : 'dir');
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === 'EPERM' || code === 'EACCES' || code === 'ENOSYS') {
-        context.skip(`file links unavailable: ${code}`);
-        return;
-      }
-      throw error;
-    }
-    const result = partitionTrustedProjectSkills([skill('linked', linked)], cwd, []);
-    assert.deepEqual(result.trusted, []);
-    assert.deepEqual(result.skipped.map((entry) => entry.name), ['linked']);
-  } finally {
-    rmSync(cwd, { recursive: true, force: true });
-    rmSync(outside, { recursive: true, force: true });
   }
 });
 
@@ -106,7 +78,7 @@ test('skillsAllowedForCheckout — unrelated checkouts admit only explicit force
   const skills = [
     skill('repo', 'repo.md', 'repo'),
     skill('explicit', 'explicit.md', 'explicit'),
-    skill('configured', 'configured.md', 'plugin'),
+    skill('packaged', 'packaged.md', 'plugin'),
     skill('forced', 'forced.md', 'forced'),
   ];
   assert.deepEqual(skillsAllowedForCheckout(skills, false).map((entry) => entry.name), ['forced']);

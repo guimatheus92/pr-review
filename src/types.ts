@@ -97,10 +97,16 @@ export interface SkillDefinition {
   tags?: string[];
   /** Pack name when loaded from a skill pack (name is then `<pack>/<skill>`). */
   pack?: string;
-  /** Where the skill was discovered; undefined ⇒ 'repo' (back-compat). */
-  origin?: 'repo' | 'home' | 'plugin' | 'explicit' | 'forced' | 'pack';
+  /**
+   * Where the skill was discovered; undefined ⇒ 'repo' (back-compat). 'configured' =
+   * a directory named via --skills-dir / extra_skills_dirs / PR_REVIEW_SKILLS_DIR:
+   * selected and trust-checked like a repo dir, admitted from a foreign cwd like forced.
+   */
+  origin?: 'repo' | 'home' | 'plugin' | 'explicit' | 'forced' | 'configured' | 'pack';
   /** Pack mode: 'index' skills are never dispatched as passes, only listed on-demand. */
   mode?: 'auto' | 'index';
+  /** Why the rule was left out of this review (set on skippedProjectSkills entries only). */
+  skipReason?: string;
   /** Installed plugin that supplied this skill, when applicable. */
   plugin?: string;
   /** MCP server names declared by that installed plugin. */

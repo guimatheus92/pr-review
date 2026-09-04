@@ -1274,6 +1274,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     ...untrustedProjectRules.map(
       (skill) => `project rule ${safeSummaryValue(skill.name)} skipped — ${safeSummaryValue(skill.skipReason ?? 'changed by this PR')} (untrusted review instructions)`,
     ),
+    ...loaded.warnings.map((warning) => `skills: ${safeSummaryValue(warning)}`),
   ];
 
   const sessionOpts = {
@@ -1338,11 +1339,8 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
       `**Runtime:** ${runtime}`,
       `**Passes to dispatch:** ${ctx.passes.map((p) => p.name).join(', ') || '(none)'}${includeCodex ? ' + codex (sibling process)' : ''}`,
     ];
-    if (repoConfigChanged) {
-      lines.push(``, `> **Degraded:** .pr-review.yaml changed by this PR — checkout-local configuration ignored as untrusted.`);
-    }
-    for (const skill of untrustedProjectRules) {
-      lines.push(``, `> **Degraded:** project rule ${safeSummaryValue(skill.name)} skipped — ${safeSummaryValue(skill.skipReason ?? 'changed by this PR')}.`);
+    if (degraded.length > 0) {
+      lines.push(``, `> **Degraded:** ${degraded.length} coverage warning(s):`, ...degraded.map((entry) => `> - ${entry}`));
     }
     if (ctx.triageSkipped.length > 0) {
       lines.push(`**Skipped by triage (docs-only PR):** ${ctx.triageSkipped.join(', ')}`);

@@ -80,7 +80,7 @@ program
   .option('--reviewer <path...>', 'Include a specific .md file as a reviewer (repeatable)')
   .option('--reviewers-dir <path...>', 'Include a directory of reviewer .md files (repeatable)')
   .option('--skill <path...>', 'Include a specific .md skill; its applyTo/paths scope still applies (repeatable)')
-  .option('--force-skill <path...>', 'Include a .md skill file OR a whole directory in every pass, regardless of scope, relevance or rule trust (repeatable; the only bypass, per run)')
+  .option('--force-skill <path...>', 'Include a .md skill file, or every rule the loader recognizes under a directory, in every pass regardless of scope, relevance or rule trust (repeatable; the only bypass, per run)')
   .option('--skills-dir <path...>', 'Include a directory of skill .md files, selected like a repo skill dir: targeting and relevance apply, PR-changed files are skipped (repeatable)')
   .option('--plugin <name...>', 'Named plugin to include (resolves from node_modules)')
   .option('--plugin-dir <path...>', 'Packaged plugin directory (has plugin.yaml)')

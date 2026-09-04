@@ -27,10 +27,10 @@ interface RepoState {
   dirty: Set<string>;
 }
 
-/** Per-call memo: one `.git` lookup per directory, one ls-files + status pair per repository. */
+/** Per-review memo: one `.git` lookup per directory, one ls-files + status pair per repository. */
 export interface ProvenanceCache {
   roots: Map<string, string | null>;
-  repos: Map<string, RepoState | null>;
+  repos: Map<string, RepoState | { error: string }>;
 }
 
 export function newProvenanceCache(): ProvenanceCache {
@@ -45,9 +45,15 @@ function findRepoRoot(dir: string): string | null {
   }
 }
 
-/** Throws when git fails: a failure must never read as an empty (clean) tree. */
+/** Throws when git fails or hangs: a failure must never read as an empty (clean) tree. */
 function gitZ(root: string, args: string[]): string[] {
-  return execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 })
+  return execFileSync('git', ['--no-optional-locks', ...args], {
+    cwd: root,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: 64 * 1024 * 1024,
+    timeout: 30_000,
+  })
     .split('\0')
     .filter(Boolean);
 }
@@ -64,13 +70,27 @@ function dirtyPaths(root: string): Set<string> {
   return out;
 }
 
+function repoState(root: string, cache: ProvenanceCache): RepoState | { error: string } {
+  let repo = cache.repos.get(root);
+  if (repo === undefined) {
+    try {
+      repo = { tracked: new Set(gitZ(root, ['ls-files', '-z']).map(foldPath)), dirty: dirtyPaths(root) };
+    } catch (err) {
+      // git missing, or a repository it cannot read — nothing here is verifiable
+      repo = { error: String((err as Error).message ?? err).split('\n')[0] ?? 'git failed' };
+    }
+    cache.repos.set(root, repo);
+  }
+  return repo;
+}
+
 /**
  * Where a file stands in the repository that owns it. Content outside the
  * reviewed checkout is trusted only when `clean`: on Windows, `git checkout`
  * writes THROUGH an NTFS junction into a shared directory, so an untracked or
  * modified file there may be what a checkout just planted. `ownedDir` extends
- * the check to every entry of a directory, for a `SKILL.md` that owns its
- * siblings (a `SKILL.md` at the repository root owns the whole tree).
+ * the check to every entry git reports under a directory, for a `SKILL.md`
+ * that owns its siblings (a `SKILL.md` at the repository root owns the whole tree).
  */
 export function gitProvenance(file: string, cache: ProvenanceCache, ownedDir?: string): GitProvenance {
   const dir = dirname(file);
@@ -80,16 +100,8 @@ export function gitProvenance(file: string, cache: ProvenanceCache, ownedDir?: s
     cache.roots.set(dir, root);
   }
   if (root === null) return 'no-repo';
-  let repo = cache.repos.get(root);
-  if (repo === undefined) {
-    try {
-      repo = { tracked: new Set(gitZ(root, ['ls-files', '-z']).map(foldPath)), dirty: dirtyPaths(root) };
-    } catch {
-      repo = null; // git missing, or a repository it cannot read — nothing here is verifiable
-    }
-    cache.repos.set(root, repo);
-  }
-  if (repo === null) return 'error';
+  const repo = repoState(root, cache);
+  if ('error' in repo) return 'error';
   const rel = foldPath(relative(root, file));
   if (!repo.tracked.has(rel)) return 'untracked';
   if (repo.dirty.has(rel)) return 'dirty';
@@ -99,4 +111,12 @@ export function gitProvenance(file: string, cache: ProvenanceCache, ownedDir?: s
     for (const path of repo.dirty) if (path.startsWith(prefix)) return 'dirty';
   }
   return 'clean';
+}
+
+/** The git failure behind an `error` state, for the skip reason. */
+export function gitProvenanceError(file: string, cache: ProvenanceCache): string | undefined {
+  const root = cache.roots.get(dirname(file));
+  if (!root) return undefined;
+  const repo = cache.repos.get(root);
+  return repo && 'error' in repo ? repo.error : undefined;
 }

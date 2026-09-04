@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { runReview } from '../src/commands/review.js';
@@ -629,5 +629,41 @@ test('runReview — from a checkout that is not the PR repo, configured dirs sti
   } finally {
     s.restore();
     rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+
+test('runReview — the --context-only preview renders every degraded entry, including lost skill coverage', async (context) => {
+  const s = setup(['src/app.ts']);
+  try {
+    mkdirSync(join(s.cwd, '.claude'), { recursive: true });
+    try {
+      symlinkSync(join(s.cwd, 'gone'), join(s.cwd, '.claude', 'skills'), process.platform === 'win32' ? 'junction' : 'dir');
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EPERM' || code === 'EACCES' || code === 'ENOSYS') {
+        context.skip(`directory links unavailable: ${code}`);
+        return;
+      }
+      throw error;
+    }
+    const result = await runReview({
+      ...BASE,
+      homeOverride: s.home,
+      contextOnly: true,
+      runDir: s.runDir,
+      fromGather: s.gatherFile,
+      provider: fakeProvider(),
+      detectCompanionsFn: async () => ({ installed: [], recognized: [], missing: [] }),
+      selectPassesFn: () => ({
+        passes: [{ name: 'p/one', source: '/one.md', body: 'one', matchedBy: 'baseline', matchedOn: [] }],
+        projectSkills: [], indexEntries: [], stackTags: [],
+        routes: [{ name: 'p/one', source: '/one.md', matchedBy: 'baseline' }], missingBaseline: [],
+      }),
+    });
+    assert.equal(result.exitCode, 0);
+    assert.match(result.summary, /Degraded[\s\S]*dangling/i, 'a dangling discovery-root link is named in the preview');
+  } finally {
+    s.restore();
   }
 });

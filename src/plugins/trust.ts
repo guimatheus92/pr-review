@@ -1,7 +1,7 @@
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import type { SkillDefinition } from '../types.js';
 import { foldPath, realpathCanonical } from '../util/realpath.js';
-import { gitProvenance, newProvenanceCache } from '../util/git.js';
+import { gitProvenance, gitProvenanceError, newProvenanceCache, type ProvenanceCache } from '../util/git.js';
 import { printable } from './builtin.js';
 
 export { foldPath };
@@ -52,11 +52,19 @@ export function skillDirPrefix(normalized: string | null): string | null {
   return slash < 0 ? null : normalized.slice(0, slash + 1);
 }
 
-/** Repo rules changed by the PR are untrusted input and cannot instruct that PR's review. */
+/**
+ * Splits loaded rules into the ones this PR's review may read and the ones it
+ * may not: anything the branch authored (a changed file, a changed sibling of
+ * a SKILL.md, a link on the way), and anything outside the checkout that is
+ * not provably committed in its home repository. Skipped entries carry their
+ * reason in `skipReason`. `provenance` lets one review share the git lookups
+ * across the repo, home, explicit, configured and plugin partitions.
+ */
 export function partitionTrustedProjectSkills(
   skills: SkillDefinition[],
   cwd: string,
   changedPaths: string[],
+  provenance: ProvenanceCache = newProvenanceCache(),
 ): { trusted: SkillDefinition[]; skipped: SkillDefinition[] } {
   const root = resolve(cwd);
   let realRoot = root;
@@ -66,7 +74,6 @@ export function partitionTrustedProjectSkills(
     // A missing cwd makes every lexical in-repo comparison fail closed below.
   }
   const changed = changedPathSet(changedPaths);
-  const provenance = newProvenanceCache();
   const noted = new Set<string>();
   const trusted: SkillDefinition[] = [];
   const skipped: SkillDefinition[] = [];
@@ -120,7 +127,11 @@ export function partitionTrustedProjectSkills(
         continue;
       }
       if (state === 'error') {
-        skip(skill, 'could not be verified with git in its home repository (git failed or is missing)');
+        skip(skill, `could not be verified with git in its home repository (${printable(gitProvenanceError(real, provenance) ?? 'git failed or is missing')})`);
+        continue;
+      }
+      if (state !== 'clean' && state !== 'no-repo') {
+        skip(skill, `unexpected provenance state '${String(state)}'`); // a new state is untrusted until named here
         continue;
       }
       if (state === 'no-repo' && lexicalSource !== null && !noted.has(dirname(real))) {

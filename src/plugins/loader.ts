@@ -8,7 +8,7 @@ import { loadReviewerFile, loadSkillFile, loadBuiltInReviewers, printable } from
 import { loadPackSkills } from '../packs/load.js';
 import type { PluginManifest, PluginReviewerEntry, PluginSkillEntry } from './types.js';
 import { changedPathSet, normalizedRelative, partitionTrustedProjectSkills, prAuthoredPath } from './trust.js';
-import { gitTopLevel } from '../util/git.js';
+import { gitTopLevel, newProvenanceCache } from '../util/git.js';
 import { discoverInstalledPlugins, type InstalledPlugin } from './installed.js';
 import { realpathCanonical } from '../util/realpath.js';
 
@@ -22,16 +22,23 @@ export interface LoadedSet {
 }
 
 interface WalkOptions {
-  /** True when a link at this lexical path was added or changed by the PR — it must not be followed, nor read. */
+  /** True when this lexical path (a link, or a root under a PR-authored link) was added or changed by the PR — it must not be followed, nor read. */
   refuseLink?: (absPath: string) => boolean;
-  /** Links refused above, reported as degraded coverage. */
+  /** Paths refused above, reported as degraded coverage. */
   skippedLinks?: string[];
   /** Checkout root: a link anywhere between it and a discovery root spends the single hop. */
   top?: string;
+  /** Coverage the walk lost (dangling links, unreadable dirs, refused hops, unreadable files) — for the Degraded block. */
+  warnings?: string[];
 }
 
 /** Never review material: version control internals and installed packages. */
 const WALK_SKIP = new Set(['.git', 'node_modules']);
+
+function warn(opts: WalkOptions, message: string): void {
+  process.stderr.write(`[skills] ${message}\n`);
+  opts.warnings?.push(message);
+}
 
 function entriesOf(dir: string): string[] | null {
   try {
@@ -39,15 +46,6 @@ function entriesOf(dir: string): string[] | null {
   } catch {
     return null;
   }
-}
-
-function hasMdEntry(dir: string): boolean {
-  return (entriesOf(dir) ?? []).some((entry) => entry.toLowerCase().endsWith('.md'));
-}
-
-/** A folder that groups skills (`skills/<group>/<skill>/SKILL.md`) rather than holding loose rules. */
-function hasSkillChild(dir: string): boolean {
-  return (entriesOf(dir) ?? []).some((entry) => existsSync(join(dir, entry, 'SKILL.md')));
 }
 
 /** Is any directory strictly between `top` and `path` a link? Unreadable counts as yes (the hop is spent, never gained). */
@@ -89,7 +87,7 @@ function walkMdFiles(root: string, opts: WalkOptions = {}): string[] {
     try {
       stats = statSync(root);
     } catch {
-      process.stderr.write(`[skills] warning: ${printable(root)} is a dangling link — nothing loaded from it\n`);
+      warn(opts, `warning: ${printable(root)} is a dangling link — nothing loaded from it`);
       return [];
     }
   } else if (opts.top && linkAbove(root, opts.top)) {
@@ -99,22 +97,23 @@ function walkMdFiles(root: string, opts: WalkOptions = {}): string[] {
   if (stats.isFile()) return root.toLowerCase().endsWith('.md') ? [root] : [];
   if (!stats.isDirectory()) return [];
   // Under a `skills` root a subdirectory is a skill only through its SKILL.md
-  // (the convention every agent tool shares); any other root (rules/,
-  // instructions/, a configured dir of loose files) nests freely.
-  return walkDir(root, opts, /^skills$/i.test(basename(root)), followLinks);
+  // (the convention every agent tool shares) and loose .md files count only at
+  // the root; any other root (rules/, instructions/, a configured dir of loose
+  // files) nests freely. README.md is never a skill in any walked directory.
+  return walkDir(root, opts, /^skills$/i.test(basename(root)), followLinks, 0);
 }
 
-function walkDir(dir: string, opts: WalkOptions, strict: boolean, followLinks: boolean): string[] {
+function walkDir(dir: string, opts: WalkOptions, strict: boolean, followLinks: boolean, depth: number): string[] {
   const out: string[] = [];
   const entries = entriesOf(dir);
   if (entries === null) {
-    process.stderr.write(`[skills] warning: ${printable(dir)} could not be read — nothing loaded from it\n`);
+    warn(opts, `warning: ${printable(dir)} could not be read — nothing loaded from it`);
     return out;
   }
   // A link is followed only when the walk that met it still has its hop and the PR did not author it.
   const followable = (path: string, hop: boolean): boolean => {
     if (!hop) {
-      process.stderr.write(`[skills] not following ${printable(path)}: a link inside a linked directory (one hop only)\n`);
+      warn(opts, `not following ${printable(path)}: a link inside a linked directory (one hop only)`);
       return false;
     }
     if (opts.refuseLink?.(path)) {
@@ -139,7 +138,7 @@ function walkDir(dir: string, opts: WalkOptions, strict: boolean, followLinks: b
       try {
         s = statSync(full);
       } catch {
-        process.stderr.write(`[skills] warning: ${printable(full)} is a dangling link — nothing loaded from it\n`);
+        warn(opts, `warning: ${printable(full)} is a dangling link — nothing loaded from it`);
         continue;
       }
     }
@@ -157,23 +156,41 @@ function walkDir(dir: string, opts: WalkOptions, strict: boolean, followLinks: b
         try {
           sf = statSync(skillFile);
         } catch {
+          warn(opts, `warning: ${printable(skillFile)} is a dangling link — the skill is not loaded`);
           continue;
         }
       }
       if (sf?.isFile()) {
         out.push(skillFile);
-      } else if (!strict || hasSkillChild(full)) {
-        out.push(...walkDir(full, opts, strict, childFollow));
-      } else if (hasMdEntry(full)) {
-        process.stderr.write(
-          `[skills] warning: ${printable(full)} has no SKILL.md — its .md files are not loaded as skills (loose .md rules nest only under rules/ or instructions/)\n`,
+        continue;
+      }
+      if (!strict) {
+        out.push(...walkDir(full, opts, strict, childFollow, depth + 1));
+        continue;
+      }
+      const children = entriesOf(full);
+      if (children === null) {
+        warn(opts, `warning: ${printable(full)} could not be read — nothing loaded from it`);
+      } else if (children.some((child) => existsSync(join(full, child, 'SKILL.md')))) {
+        out.push(...walkDir(full, opts, strict, childFollow, depth + 1)); // a group folder of skills
+      } else if (children.some((child) => child.toLowerCase().endsWith('.md'))) {
+        warn(
+          opts,
+          `warning: ${printable(full)} has no SKILL.md — its .md files are not loaded as skills (give it a SKILL.md, or keep loose rules under a top-level rules/ or instructions/ dir)`,
         );
       }
     } else if (s.isFile() && entry.toLowerCase().endsWith('.md') && entry.toLowerCase() !== 'readme.md') {
+      if (strict && depth > 0) {
+        if (!out.includes(`loose:${dir}`)) {
+          out.push(`loose:${dir}`); // marker: warn once per group folder (stripped below)
+          warn(opts, `warning: ${printable(dir)} is a group folder — its loose .md files are not loaded as skills (a skill is <dir>/SKILL.md)`);
+        }
+        continue;
+      }
       out.push(full);
     }
   }
-  return out;
+  return out.filter((path) => !path.startsWith('loose:'));
 }
 
 /** Resolve to the real (symlink-followed) path so the same file reached via a
@@ -213,7 +230,16 @@ function loadFromPaths(
     seen.add(norm);
     return true;
   });
-  return unique.map((f) => (kind === 'reviewer' ? loadReviewerFile(f) : loadSkillFile(f)));
+  const loaded: (ReviewerDefinition | SkillDefinition)[] = [];
+  for (const f of unique) {
+    try {
+      loaded.push(kind === 'reviewer' ? loadReviewerFile(f) : loadSkillFile(f));
+    } catch (err) {
+      // A walk that crosses into other repositories meets files the reviewer may not be able to read.
+      warn(walk, `warning: ${printable(f)} could not be read (${printable(String((err as Error).message ?? err).split('\n')[0] ?? '')}) — not loaded`);
+    }
+  }
+  return loaded;
 }
 
 function loadPluginManifest(pluginDir: string): PluginManifest | null {
@@ -323,6 +349,8 @@ export function loadAll(
   installedPluginSkills: SkillDefinition[];
   installedPlugins: InstalledPlugin[];
   skippedProjectSkills: SkillDefinition[];
+  /** Coverage lost while walking (dangling links, unreadable dirs, refused hops, missing configured dirs). */
+  warnings: string[];
 } {
   const { config, includeBuiltIn = true, skillsOnly = false } = opts;
   const cwd = gitTopLevel(opts.cwd) ?? opts.cwd;
@@ -330,9 +358,10 @@ export function loadAll(
   const skills: SkillDefinition[] = [];
   const catalog: SkillDefinition[] = [];
   const skippedProjectSkills: SkillDefinition[] = [];
+  const provenance = newProvenanceCache();
   const trust = (loaded: SkillDefinition[]): SkillDefinition[] => {
     if (!opts.changedPaths) return loaded;
-    const partition = partitionTrustedProjectSkills(loaded, cwd, opts.changedPaths);
+    const partition = partitionTrustedProjectSkills(loaded, cwd, opts.changedPaths, provenance);
     skippedProjectSkills.push(...partition.skipped);
     return partition.trusted;
   };
@@ -340,9 +369,11 @@ export function loadAll(
   // read. Without changedPaths (`plugins list`) every link is the reviewer's own.
   const changed = opts.changedPaths ? changedPathSet(opts.changedPaths) : null;
   const skippedLinks: string[] = [];
+  const warnings: string[] = [];
   const walk: WalkOptions = {
     top: cwd,
     skippedLinks,
+    warnings,
     refuseLink: changed
       ? (absPath) => {
           const rel = normalizedRelative(cwd, absPath);
@@ -401,29 +432,36 @@ export function loadAll(
   skills.push(...explicitSkills);
   // --force-skill takes a file OR a directory: injected whole, no scope, no trust
   // check, per run only — the deliberate bypass.
-  const forceSkills = withOrigin(loadFromPaths(config.forceSkills, 'skill', { top: cwd }) as SkillDefinition[], 'forced');
+  const forceSkills = withOrigin(loadFromPaths(config.forceSkills, 'skill', { top: cwd, warnings }) as SkillDefinition[], 'forced');
   skills.push(...forceSkills);
   // --skills-dir / extra_skills_dirs / PR_REVIEW_SKILLS_DIR: the same treatment as
   // a repo skill dir (targeted → scoped rule, untargeted → relevance heuristic,
   // unmatched → index), subject to rule trust, kept when cwd is not the PR repo.
-  const configuredLoaded = loadFromPaths(config.skillsDirs, 'skill', walk) as SkillDefinition[];
+  const configuredDirs = config.skillsDirs.filter((dir) => {
+    if (existsSync(dir)) return true;
+    warn(walk, `warning: configured skills dir ${printable(dir)} does not exist — nothing loaded from it`);
+    return false;
+  });
+  const configuredLoaded = loadFromPaths(configuredDirs, 'skill', walk) as SkillDefinition[];
   const configured = trust(withOrigin(configuredLoaded, 'configured'));
   skills.push(...configured.filter(hasReviewTargeting));
   catalog.push(...configured.filter((s) => !hasReviewTargeting(s)));
   if (configuredLoaded.length > 0) {
     process.stderr.write(
-      `[skills] ${configuredLoaded.length} skill(s) from configured dirs (--skills-dir / extra_skills_dirs / PR_REVIEW_SKILLS_DIR) — selected like repo skills; --force-skill <dir> injects a directory whole\n`,
+      `[skills] ${configuredLoaded.length} skill(s) read from configured dirs (--skills-dir / extra_skills_dirs / PR_REVIEW_SKILLS_DIR), ${configured.length} trusted — selected like repo skills; --force-skill <dir> injects a directory whole\n`,
     );
-  } else if (config.skillsDirs.length > 0) {
-    process.stderr.write(
-      `[skills] warning: no skills found in configured dir(s) ${config.skillsDirs.map((dir) => printable(dir)).join(', ')} — under a \`skills\` root only <dir>/SKILL.md and flat .md files count\n`,
+  } else if (configuredDirs.length > 0) {
+    warn(
+      walk,
+      `warning: no skills found in configured dir(s) ${configuredDirs.map((dir) => printable(dir)).join(', ')} — under a \`skills\` root only <dir>/SKILL.md and flat .md files count`,
     );
   }
 
-  for (const link of new Set(skippedLinks)) {
-    const rel = normalizedRelative(cwd, link) ?? link;
-    process.stderr.write(`[skills] skipped link ${printable(rel)}: added or changed by this PR — not followed\n`);
-    skippedProjectSkills.push({ name: rel, source: link, body: '', appliesTo: [], skipReason: 'link added or changed by this PR — not followed' });
+  for (const path of new Set(skippedLinks)) {
+    const rel = normalizedRelative(cwd, path) ?? path;
+    const reason = 'added or changed by this PR — not read';
+    process.stderr.write(`[skills] skipped ${printable(rel)}: ${reason}\n`);
+    skippedProjectSkills.push({ name: rel, source: path, body: '', appliesTo: [], skipReason: reason });
   }
 
   for (const dir of config.pluginDirs) {
@@ -463,6 +501,7 @@ export function loadAll(
     installedPluginSkills,
     installedPlugins,
     skippedProjectSkills,
+    warnings,
   };
 }
 

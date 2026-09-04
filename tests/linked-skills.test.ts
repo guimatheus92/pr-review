@@ -316,7 +316,10 @@ test('trust — outside-checkout content under no repository is trusted as local
 
 test('trust — foldPath and ancestorsOf normalize case, slashes and unicode on every platform', () => {
   assert.equal(foldPath('.Agents\\Skills\\X'), '.agents/skills/x');
-  assert.equal(foldPath('créditos'), foldPath('créditos'), 'NFD and NFC spellings fold to one key');
+  const nfd = 'cre' + String.fromCharCode(0x0301) + 'ditos'; // e + combining acute
+  const nfc = 'cr' + String.fromCharCode(0x00e9) + 'ditos'; // precomposed é
+  assert.notEqual(nfd, nfc, 'the two spellings differ byte-for-byte');
+  assert.equal(foldPath(nfd), foldPath(nfc), 'NFD and NFC spellings fold to one key');
   assert.deepEqual(ancestorsOf('.agents/skills/x/skill.md'), ['.agents', '.agents/skills', '.agents/skills/x']);
   assert.deepEqual(ancestorsOf('flat.md'), []);
 });
@@ -608,5 +611,151 @@ test('trust — a skill whose home repository git cannot read is skipped, never 
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(broken, { recursive: true, force: true });
+  }
+});
+
+test('configured dirs — a configured dir that does not exist is reported as missing, not as empty', () => {
+  const cwd = tmp('cwd');
+  const home = tmp('home');
+  try {
+    const missing = join(cwd, 'nowhere');
+    const { config } = loadConfig({ cwd, homeOverride: home, cliOverrides: { autodiscover: false, skillsDirs: [missing] } });
+    const err = captureStderr();
+    let set;
+    try {
+      set = loadAll({ cwd, config, skillsOnly: true, home, changedPaths: ['src/app.ts'] });
+    } finally {
+      err.restore();
+    }
+    assert.ok(err.lines.some((line) => line.includes('nowhere') && /does not exist/i.test(line)), err.lines.join('|'));
+    assert.ok(set.warnings.some((line) => line.includes('nowhere')), 'the loss reaches the Degraded list');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('linked skills — lost coverage (dangling link, refused hop) is returned for the Degraded block, not only printed', (context) => {
+  const cwd = tmp('cwd');
+  const home = tmp('home');
+  const shared = sharedRules({ git: false });
+  const third = tmp('third');
+  try {
+    mkdirSync(join(third, 'deep'));
+    writeFileSync(join(third, 'deep', 'SKILL.md'), '---\ndescription: two hops away\n---\nDeep.\n');
+    if (!link(third, join(shared, 'nested'), context)) return;
+    mkdirSync(join(cwd, '.agents'));
+    mkdirSync(join(cwd, '.claude'));
+    if (!link(shared, join(cwd, '.agents', 'skills'), context)) return;
+    if (!link(join(cwd, 'gone'), join(cwd, '.claude', 'skills'), context)) return;
+    const { config } = loadConfig({ cwd, homeOverride: home });
+    const err = captureStderr();
+    let set;
+    try {
+      set = loadAll({ cwd, config, skillsOnly: true, home, changedPaths: ['src/app.ts'] });
+    } finally {
+      err.restore();
+    }
+    assert.ok(set.warnings.some((line) => /dangling/i.test(line) && line.includes('.claude')), set.warnings.join('|'));
+    assert.ok(set.warnings.some((line) => /not follow/i.test(line) && line.includes('nested')), set.warnings.join('|'));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+    rmSync(shared, { recursive: true, force: true });
+    rmSync(third, { recursive: true, force: true });
+  }
+});
+
+test('discovery — .git and node_modules are never walked, even under a loose root', () => {
+  const cwd = tmp('cwd');
+  const home = tmp('home');
+  try {
+    mkdirSync(join(cwd, '.claude', 'rules', 'node_modules', 'pkg'), { recursive: true });
+    mkdirSync(join(cwd, '.claude', 'rules', '.git'), { recursive: true });
+    writeFileSync(join(cwd, '.claude', 'rules', 'node_modules', 'pkg', 'README-rule.md'), '# vendored\n');
+    writeFileSync(join(cwd, '.claude', 'rules', '.git', 'hook.md'), '# internal\n');
+    writeFileSync(join(cwd, '.claude', 'rules', 'real.md'), '---\ndescription: real rule\n---\nR.\n');
+    const { config } = loadConfig({ cwd, homeOverride: home });
+    const set = loadAll({ cwd, config, skillsOnly: true, home, changedPaths: ['src/app.ts'] });
+    assert.deepEqual(names([...set.skills, ...set.catalog]), ['real']);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('linked skills — a link ABOVE the discovery root spends the hop: a link inside the target is not followed', (context) => {
+  const cwd = tmp('cwd');
+  const home = tmp('home');
+  const parent = tmp('parent');
+  const third = tmp('third');
+  try {
+    mkdirSync(join(parent, 'skills', 'x'), { recursive: true });
+    writeFileSync(join(parent, 'skills', 'x', 'SKILL.md'), '---\ndescription: x\n---\nX.\n');
+    mkdirSync(join(third, 'deep'));
+    writeFileSync(join(third, 'deep', 'SKILL.md'), '---\ndescription: deep\n---\nDeep.\n');
+    if (!link(third, join(parent, 'skills', 'nested'), context)) return;
+    commitAll(parent);
+    if (!link(parent, join(cwd, '.agents'), context)) return;
+    const { config } = loadConfig({ cwd, homeOverride: home });
+    const err = captureStderr();
+    let set;
+    try {
+      set = loadAll({ cwd, config, skillsOnly: true, home, changedPaths: ['src/app.ts'] });
+    } finally {
+      err.restore();
+    }
+    const all = names([...set.skills, ...set.catalog]);
+    assert.ok(all.includes('x'), 'one hop (the parent link) loads');
+    assert.ok(!all.includes('deep'), 'the nested link is a second hop');
+    assert.ok(err.lines.some((line) => /not follow/i.test(line) && line.includes('nested')));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+    rmSync(parent, { recursive: true, force: true });
+    rmSync(third, { recursive: true, force: true });
+  }
+});
+
+test('skills root — inside a group folder, loose .md files are not skills and are named', () => {
+  const cwd = tmp('cwd');
+  const home = tmp('home');
+  try {
+    mkdirSync(join(cwd, '.claude', 'skills', 'backend', 'db', 'notes'), { recursive: true });
+    writeFileSync(join(cwd, '.claude', 'skills', 'backend', 'db', 'SKILL.md'), '---\ndescription: db\n---\nDB.\n');
+    writeFileSync(join(cwd, '.claude', 'skills', 'backend', 'overview.md'), '# overview, not a skill\n');
+    const { config } = loadConfig({ cwd, homeOverride: home });
+    const err = captureStderr();
+    let set;
+    try {
+      set = loadAll({ cwd, config, skillsOnly: true, home, changedPaths: ['src/app.ts'] });
+    } finally {
+      err.restore();
+    }
+    assert.deepEqual(names([...set.skills, ...set.catalog]), ['db']);
+    assert.ok(err.lines.some((line) => line.includes('backend') && line.includes('overview.md') === false && /not loaded as skills/.test(line)), err.lines.join('|'));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('trust — a personal (home) targeted skill under a dirty repository is skipped like any outside-checkout rule', () => {
+  const cwd = tmp('cwd');
+  const home = tmp('home');
+  try {
+    const personal = join(home, '.claude', 'skills');
+    mkdirSync(personal, { recursive: true });
+    writeFileSync(join(personal, 'committed.md'), '---\napplies_to: ["src/**"]\n---\nOK.\n');
+    commitAll(home);
+    writeFileSync(join(personal, 'draft.md'), '---\napplies_to: ["src/**"]\n---\nDraft.\n');
+    const { config } = loadConfig({ cwd, homeOverride: home });
+    const set = loadAll({ cwd, config, skillsOnly: true, home, changedPaths: ['src/app.ts'] });
+    assert.deepEqual(names(set.skills), ['committed']);
+    assert.deepEqual(names(set.skippedProjectSkills), ['draft']);
+    assert.match(set.skippedProjectSkills[0]!.skipReason ?? '', /untracked/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   }
 });

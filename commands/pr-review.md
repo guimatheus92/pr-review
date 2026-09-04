@@ -35,8 +35,8 @@ if [ -n "$PR_URL" ]; then
   for d in "$(git rev-parse --show-toplevel 2>/dev/null || echo .)" */ ../*/; do
     [ -e "$d/.git" ] || continue
     o=$(git -C "$d" remote get-url origin 2>/dev/null) || continue
-    # origin URL → "owner/repo" path: drop scheme, user@, host (and the ':' of scp-style), and .git
-    o=$(printf '%s' "$o" | sed -e 's#^[a-z+]*://##' -e 's#^[^@]*@##' -e 's#^[^/:]*[:/]##' -e 's#\.git$##' | tr 'A-Z' 'a-z')
+    # origin URL → "owner/repo" path: drop scheme, user@, host (and the ':' of scp-style) and .git; ADO ssh v3/org/proj/repo → org/proj/_git/repo
+    o=$(printf '%s' "$o" | sed -e 's#^[a-z+]*://##' -e 's#^[^@]*@##' -e 's#^[^/:]*[:/]##' -e 's#\.git$##' -e 's#^v3/\([^/]*\)/\([^/]*\)/\([^/]*\)$#\1/\2/_git/\3#' | tr 'A-Z' 'a-z')
     [ -n "$o" ] || continue
     case "$PR_URL" in *"/$o/"*) ;; *) continue ;; esac
     if [ "$(git -C "$d" rev-parse --git-dir 2>/dev/null)" = "$(git -C "$d" rev-parse --git-common-dir 2>/dev/null)" ]; then

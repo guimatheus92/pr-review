@@ -81,7 +81,9 @@ test('loadConfig — hosts: keys are lowercased (detectProvider looks up lowerca
   const tmp = mkdtempSync(join(tmpdir(), 'pr-review-cfg-'));
   const home = mkdtempSync(join(tmpdir(), 'pr-review-home-'));
   try {
-    writeFileSync(join(tmp, '.pr-review.yaml'), 'hosts:\n  GitHub.Corp.COM: github\n  tfs.corp.com: azuredevops\n  bad.com: bitbucket\n');
+    // hosts: is honoured from the global config only (a checkout-local map is stripped at load), so the fixture lives there.
+    mkdirSync(join(home, '.pr-review'), { recursive: true });
+    writeFileSync(join(home, '.pr-review', 'config.yaml'), 'hosts:\n  GitHub.Corp.COM: github\n  tfs.corp.com: azuredevops\n  bad.com: bitbucket\n');
     const { config } = loadConfig({ cwd: tmp, homeOverride: home });
     assert.equal(config.hosts['github.corp.com'], 'github', 'mixed-case yaml key normalized to lowercase');
     assert.equal(config.hosts['GitHub.Corp.COM'], undefined, 'raw mixed-case key is not kept');

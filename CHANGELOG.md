@@ -4,6 +4,8 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-09-04
+
 ### Added
 - The plugin slash command (`commands/pr-review.md`) locates the checkout whose git origin matches the PR URL before starting the CLI — the current directory, then its subdirectories, then its siblings, preferring a primary worktree over a linked one — and prints a project-skill count computed with the same rule as the loader.
 - `--force-skill <file|dir>` is documented as the only bypass: the file, or every `.md` under the directory, is injected whole into every pass with no scope, relevance or rule-trust check (the directory form has always been accepted). It is per run and CLI-only by design — there is deliberately no yaml or env key for forcing, so a committed `.pr-review.yaml` can never pre-authorize branch-authored content. Docs that told you to point `extra_skills_dirs` / `--skills-dir` / `PR_REVIEW_SKILLS_DIR` at a directory to force it now say `--force-skill <dir>`; those keys are trust-checked, and the warning not to aim a forced directory at rules the PR can edit applies to `--force-skill` alone.

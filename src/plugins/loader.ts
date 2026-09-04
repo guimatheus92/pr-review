@@ -111,9 +111,9 @@ function walkDir(dir: string, opts: WalkOptions, strict: boolean, followLinks: b
     process.stderr.write(`[skills] warning: ${printable(dir)} could not be read — nothing loaded from it\n`);
     return out;
   }
-  // A link is followed only when this walk still has its hop and the PR did not author it.
-  const followable = (path: string): boolean => {
-    if (!followLinks) {
+  // A link is followed only when the walk that met it still has its hop and the PR did not author it.
+  const followable = (path: string, hop: boolean): boolean => {
+    if (!hop) {
       process.stderr.write(`[skills] not following ${printable(path)}: a link inside a linked directory (one hop only)\n`);
       return false;
     }
@@ -134,7 +134,7 @@ function walkDir(dir: string, opts: WalkOptions, strict: boolean, followLinks: b
     }
     let childFollow = followLinks;
     if (s.isSymbolicLink()) {
-      if (!followable(full)) continue;
+      if (!followable(full, followLinks)) continue;
       childFollow = false;
       try {
         s = statSync(full);
@@ -153,7 +153,7 @@ function walkDir(dir: string, opts: WalkOptions, strict: boolean, followLinks: b
       }
       if (sf?.isSymbolicLink()) {
         // The skill file itself is a link: same rules as a linked directory.
-        if (!(childFollow && followable(skillFile))) continue;
+        if (!followable(skillFile, childFollow)) continue;
         try {
           sf = statSync(skillFile);
         } catch {

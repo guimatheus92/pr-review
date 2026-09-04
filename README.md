@@ -20,7 +20,7 @@
 
 **pr-review** is a plugin for [Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/plugins-creating) **or** Claude Code that reviews a pull request with parallel review passes — each one a skill drawn from synced skill packs or your own repo — inside a single agent session, and posts **every** finding back to the PR as a resolvable inline review comment: never a top-level comment, nothing dropped. A thin Node CLI does the deterministic plumbing (gather, dedupe, post); the agents only review. When the `codex` CLI is installed, a Codex second-opinion reviewer runs alongside automatically (`--no-codex` opts out).
 
-```
+```text
 /pr-review https://github.com/org/repo/pull/123
 /pr-review https://dev.azure.com/org/proj/_git/repo/pullrequest/456 --dry-run
 ```
@@ -42,7 +42,7 @@
 flowchart TD
     U["/pr-review #lt;pr-url#gt;"] --> G["gather metadata, comments and diff (cached)<br/>early-exit gate: malformed or too large → exit 2 + error.txt"]
     G --> L["load skills + detect stack<br/>repo dirs · skill packs · installed plugins<br/>(rules the PR itself changed are dropped as untrusted)"]
-    L --> P["select passes<br/>project skills → context in every pass<br/>pack passes by evidence tier (cap 6) + every baseline<br/>everything else → skills-index.md"]
+    L --> P["select passes<br/>project skills → context in every pass<br/>pack passes by evidence tier (cap 6) + up to 2 installed-plugin passes + every baseline<br/>everything else → skills-index.md"]
     P --> D["one dispatch-only agent session (Copilot CLI or Claude Code)<br/>one task() per pass and companion → attempt-N.json"]
     P -. optional, parallel .-> C["Codex sibling (read-only)"]
     D --> N["Node validates and promotes write-once raw-#lt;reviewer#gt;.json<br/>one automatic recovery session for missing or invalid reviewers only"]
@@ -58,7 +58,7 @@ flowchart TD
 
 **Why a CLI, not just a skill?** LLMs are unreliable at gathering metadata, deduplicating findings, and posting comments. The Node CLI handles those deterministic tasks; review passes only do the actual reviewing. The orchestrator session is dispatch-only — it cannot assemble findings, decide the verifier, or post. See the [architecture](skills/help/reference/architecture.md) for the full execution model.
 
-Every run reports which skills it used — a progress brief at dispatch (`N pass(es) · M project rule(s) · K on-demand`) and a `## Skills` section in the final summary:
+Every run reports which skills it used — a progress brief at dispatch (`N pass(es) · M project rule(s) · K on-demand`) and a `## Skills` section in the final summary (with a `**Skipped:** S` segment when any pass was skipped):
 
 ```markdown
 ## Skills
@@ -92,7 +92,7 @@ Every run reports which skills it used — a progress brief at dispatch (`N pass
 
 Inside a `copilot` session or a `claude` (Claude Code) session — the same two commands in both:
 
-```
+```text
 /plugin marketplace add guimatheus92/pr-review
 /plugin install pr-review@pr-review
 ```
@@ -156,7 +156,7 @@ npm install && npm run build
 
 ### 3. Review a PR
 
-```
+```text
 /pr-review https://github.com/<owner>/<repo>/pull/<number>
 ```
 
@@ -166,7 +166,7 @@ Posting line comments back to the PR is the default; add `--dry-run` to preview 
 <summary><b>Accepted URL shapes and self-hosted hosts</b></summary>
 <br>
 
-```
+```text
 https://github.com/<owner>/<repo>/pull/<number>
 https://<ghes-host>/<owner>/<repo>/pull/<number>                                     # GitHub Enterprise Server
 https://dev.azure.com/<org>[/<project>]/_git/<repo>/pullrequest/<id>
@@ -253,7 +253,7 @@ Skip any pass with `--skip <names>` (full `awesome-copilot/go` or bare `go`; als
 
 Review rules live where your agent tools already keep skills — no separate folder, no duplication, no flags:
 
-```
+```text
 your-repo/
 └── .claude/                           # or .copilot/, .github/, .agents/
     └── skills/
@@ -295,7 +295,7 @@ Installed plugins — from Copilot CLI or Claude Code alike — provide an addit
 
 ## Background runs, status and resume
 
-A full review takes roughly 6–10 minutes. `pr-review review <url> --detach` returns a run-id immediately; `pr-review status <run-id>` shows the live progress feed, or the summary once done. `status` exits `0` when done, `20` while running, `21` when authenticated recovery is available (it prints the exact `--resume` command), and `22` on a terminal failure.
+A full review takes roughly 6–10 minutes. `pr-review review <url> --detach` returns a run-id immediately; `pr-review status <run-id>` shows the live progress feed, or the summary once done. `status` exits `0` when done, `20` while running, `21` when authenticated recovery is available (it prints the exact `--resume` command), `22` on a terminal failure, and `1` when the run-id is unknown.
 
 <details>
 <summary><b>Delivery, recovery and resume in detail</b></summary>
@@ -340,7 +340,7 @@ pr-review review <pr-url> [flags]            # full pipeline
 #   --copilot <path>        path to the copilot binary (implies --runtime copilot unless --runtime given)
 #   --from-gather <path>    (eval harness) read the gather JSON from a file
 #                           instead of the provider APIs; requires --dry-run
-pr-review status <run-id>                    # live progress, summary, or the recovery command (exit 0/20/21/22)
+pr-review status <run-id>                    # live progress, summary, or the recovery command (exit 0/20/21/22; 1 = unknown run-id)
 pr-review gather <pr-url> [--out <path>]     # fetch + cache metadata only
 pr-review post <pr-url> --findings <path>    # post pre-computed findings
 pr-review packs list|sync|add <source>|suggest <tags...|pr-url>   # manage skill packs

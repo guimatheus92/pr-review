@@ -78,7 +78,7 @@ Prints a `## Stack` section (languages, dependencies, notes) and a `## Passes` t
 
 ## Skills in the run summary
 
-The `pr-review-summary.md` carries a `## Skills` section: `**Passes:** N · **Project rules (in every pass):** M · **On-demand (index):** K` (the project-rules segment appears when at least one matched) plus a `| Pass | Matched by |` table. The progress feed shows the same brief (`N pass(es) · K on-demand`), surfaced by `pr-review status`. A `--resume` reproduces the section from the `passes.json` the live run persisted (old runs without it: section omitted, findings still replay).
+The `pr-review-summary.md` carries a `## Skills` section: `**Passes:** N · **Project rules (in every pass):** M · **On-demand (index):** K` (the project-rules segment appears when at least one matched; `· **Skipped:** S` is appended when any pass was skipped) plus a `| Pass | Matched by |` table. The progress feed shows the same brief (`N pass(es) · M project rule(s) · K on-demand`), surfaced by `pr-review status`. A `--resume` reproduces the section from the `passes.json` the live run persisted (old runs without it: section omitted, findings still replay).
 
 ## Common confusion to avoid
 

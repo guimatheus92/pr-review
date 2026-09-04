@@ -40,29 +40,18 @@
 
 ```mermaid
 flowchart TD
-    U["/pr-review &lt;pr-url&gt;"] --> G["gather: metadata + comments + diff (cached)"]
-    G --> X{"early-exit gate<br/>malformed or too large?"}
-    X -- yes --> E2["exit 2 + error.txt"]
-    X -- no --> L["load skills: repo dirs + skill packs + installed plugins<br/>(rules the PR itself changed are dropped as untrusted)"]
-    L --> S["detect stack: Linguist languages + manifest evidence"]
-    S --> P["select passes<br/>project skills → context in every pass<br/>pack passes by evidence tier (cap 6) + every baseline<br/>everything else → skills-index.md"]
-    P --> M["materialize the run dir + HMAC-authenticated plan"]
-    M --> D["one dispatch-only agent session (Copilot CLI or Claude Code)<br/>one task() per pass and companion → attempt-N.json"]
-    M -. optional, parallel .-> C["Codex sibling (read-only)"]
-    D --> N["Node validates and promotes write-once raw-&lt;reviewer&gt;.json"]
+    U["/pr-review #lt;pr-url#gt;"] --> G["gather metadata, comments and diff (cached)<br/>early-exit gate: malformed or too large → exit 2 + error.txt"]
+    G --> L["load skills + detect stack<br/>repo dirs · skill packs · installed plugins<br/>(rules the PR itself changed are dropped as untrusted)"]
+    L --> P["select passes<br/>project skills → context in every pass<br/>pack passes by evidence tier (cap 6) + every baseline<br/>everything else → skills-index.md"]
+    P --> D["one dispatch-only agent session (Copilot CLI or Claude Code)<br/>one task() per pass and companion → attempt-N.json"]
+    P -. optional, parallel .-> C["Codex sibling (read-only)"]
+    D --> N["Node validates and promotes write-once raw-#lt;reviewer#gt;.json<br/>one automatic recovery session for missing or invalid reviewers only"]
     C --> N
-    N --> R{"every planned reviewer delivered?"}
-    R -- no --> RC["one automatic recovery session<br/>missing or invalid reviewers only"]
-    RC --> R2{"complete now?"}
-    R2 -- no --> E2b["exit 2 — partial findings never post<br/>(--resume makes the bounded final attempt)"]
-    R2 -- yes --> P1
-    R -- yes --> P1["assemble Phase 1"]
-    P1 --> V{"any CRITICAL or HIGH?"}
-    V -- yes --> VR["direct verifier session"] --> DD
-    V -- no --> DD["dedupe: intra-batch + existing PR comments"]
-    DD --> O{"--dry-run?"}
-    O -- yes --> SUM["print the complete summary"]
-    O -- no --> POST["post inline: GitHub review · ADO threads · GitLab discussions"]
+    N -- still incomplete --> E2["exit 2 — partial findings never post<br/>(--resume makes the bounded final attempt)"]
+    N -- complete --> V["direct verifier session<br/>(only when Phase 1 has CRITICAL/HIGH findings)"]
+    V --> DD["dedupe: intra-batch + existing PR comments"]
+    DD -- "--dry-run" --> SUM["print the complete summary"]
+    DD -- publish --> POST["post inline: GitHub review · ADO threads · GitLab discussions"]
     SUM --> EX["exit 0 · 1 (findings ≥ --fail-on) · 2"]
     POST --> EX
 ```

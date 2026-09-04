@@ -300,7 +300,11 @@ test('detectProvider — the fallback host map never reads a checkout-local .pr-
   try {
     writeFileSync(join(cwd, '.pr-review.yaml'), 'hosts:\n  trusted-sink.example: gitlab\n');
     process.chdir(cwd);
-    assert.throws(() => detectProvider(url), /Unrecognized PR URL/, 'repo-level hosts must not map an unknown host');
+    assert.throws(
+      () => detectProvider(url),
+      (e: unknown) => e instanceof Error && /Unrecognized PR URL/.test(e.message) && /map the host in the global config ~\/\.pr-review\/config\.yaml/.test(e.message) && !/or \.pr-review\.yaml/.test(e.message),
+      'repo-level hosts must not map an unknown host, and the tip must name the global file only',
+    );
     assert.equal(detectProvider(url, { 'trusted-sink.example': 'gitlab' }).name, 'gitlab', 'an explicit trusted map still does');
   } finally {
     process.chdir(previous);

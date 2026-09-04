@@ -118,6 +118,7 @@ test('detachReview — self-hosted provider comes from trusted config, not a bra
     const result = detachReview(url, ['review', url, '--detach'], fakeSpawn, () => ({}), home);
     assert.match(result.runId, /^github__o__r__7__/, 'trusted GitHub mapping owns the run identity');
     assert.equal(calls.length, 1, 'the trusted mapping reaches child spawn');
+    assert.deepEqual(calls[0]!.args.slice(-2), ['--run-dir', result.outDir], 'the child inherits the run dir minted from the trusted mapping');
   } finally {
     process.chdir(previous);
     for (const entry of existsSync(RUNS_ROOT) ? readdirSync(RUNS_ROOT) : []) {

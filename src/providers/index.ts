@@ -28,7 +28,8 @@ function shapesHelp(names: Provider[] = Object.keys(URL_SHAPES) as Provider[]): 
 
 function hostsTip(hostname: string): string {
   return [
-    'For a self-hosted server, map the host in ~/.pr-review/config.yaml or .pr-review.yaml:',
+    'For a self-hosted server, map the host in the global config ~/.pr-review/config.yaml',
+    '(a hosts: map in a checkout-local .pr-review.yaml is ignored — it decides where a credential is sent):',
     '  hosts:',
     `    ${hostname}: github   # or: azuredevops | gitlab`,
   ].join('\n');

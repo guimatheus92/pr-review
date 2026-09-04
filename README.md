@@ -43,8 +43,11 @@ flowchart TD
     U["/pr-review #lt;pr-url#gt;"] --> G["gather metadata, comments and diff (cached)<br/>early-exit gate: malformed or too large → exit 2 + error.txt"]
     G --> L["load skills + detect stack<br/>repo dirs · skill packs · installed plugins<br/>(rules the PR itself changed are dropped as untrusted)"]
     L --> P["select passes<br/>project skills → context in every pass<br/>pack passes by evidence tier (cap 6) + up to 2 installed-plugin passes + every baseline<br/>everything else → skills-index.md"]
-    P --> D["one dispatch-only agent session (Copilot CLI or Claude Code)<br/>one task() per pass and companion → attempt-N.json"]
-    P -. optional, parallel .-> C["Codex sibling (read-only)"]
+    P --> T{"anything to dispatch?<br/>(a docs-only PR keeps only glob/forced passes)"}
+    T -- "no pass matched" --> E0["exit 2 — nothing to review with<br/>(packs suggest hint)"]
+    T -- "docs-only, nothing doc-scoped" --> E0b["exit 0 — nothing to review"]
+    T -- yes --> D["one dispatch-only agent session (Copilot CLI or Claude Code)<br/>one task() per pass and companion → attempt-N.json"]
+    D -. optional, parallel .-> C["Codex sibling (read-only)"]
     D --> N["Node validates and promotes write-once raw-#lt;reviewer#gt;.json<br/>one automatic recovery session for missing or invalid reviewers only"]
     C --> N
     N -- still incomplete --> E2["exit 2 — partial findings never post<br/>(--resume makes the bounded final attempt)"]

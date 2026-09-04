@@ -1067,7 +1067,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   // CLI --skip replaces the config list for the run (same rule the session uses).
   const effectiveSkip = opts.skip?.length ? opts.skip : config.skipReviewers;
 
-  // Packs, Linguist, companion, and Codex detection resolve together after gather. Review-time is
+  // Packs + Linguist resolve after gather (alongside companion and Codex detection). Review-time is
   // clone-if-missing ONLY (`packs sync` is the explicit update path); every
   // failure is a warning — a review runs with whatever is on disk.
   const packsPromise = Promise.resolve().then(() => ensurePacks(config.skillPacks, { home: opts.homeOverride }));

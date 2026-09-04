@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { detachReview } from '../src/commands/detach.js';
+import { RUNS_ROOT } from '../src/util/tmp.js';
 
 test('detachReview — strips --detach, appends --run-dir, spawns detached+unref with an error listener and pre-resolved auth env', () => {
   // Pre-set the token so the parent pre-flight resolves from env (no `gh` subprocess).
@@ -105,7 +106,9 @@ test('detachReview — self-hosted provider comes from trusted config, not a bra
     return child;
   }) as unknown as typeof import('node:child_process').spawn;
   const url = 'https://github.corp.example/o/r/pull/7';
-  let outDir: string | undefined;
+  // ensureRunDir mints under the REAL home (RUNS_ROOT ignores homeOverride), so
+  // sweep whatever this test created there — on the throw path too.
+  const runsBefore = new Set(existsSync(RUNS_ROOT) ? readdirSync(RUNS_ROOT) : []);
   try {
     mkdirSync(join(home, '.pr-review'), { recursive: true });
     writeFileSync(join(home, '.pr-review', 'config.yaml'), 'hosts:\n  github.corp.example: github\n');
@@ -113,12 +116,13 @@ test('detachReview — self-hosted provider comes from trusted config, not a bra
     process.chdir(cwd);
 
     const result = detachReview(url, ['review', url, '--detach'], fakeSpawn, () => ({}), home);
-    outDir = result.outDir;
     assert.match(result.runId, /^github__o__r__7__/, 'trusted GitHub mapping owns the run identity');
     assert.equal(calls.length, 1, 'the trusted mapping reaches child spawn');
   } finally {
     process.chdir(previous);
-    if (outDir) rmSync(outDir, { recursive: true, force: true });
+    for (const entry of existsSync(RUNS_ROOT) ? readdirSync(RUNS_ROOT) : []) {
+      if (!runsBefore.has(entry) && entry.startsWith('github__o__r__7__')) rmSync(join(RUNS_ROOT, entry), { recursive: true, force: true });
+    }
     rmSync(cwd, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   }

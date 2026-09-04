@@ -510,7 +510,6 @@ test('runReview — gather receives the provider resolved from trusted config, n
       runDir,
       runGatherFn: async (opts) => {
         gatherProviderName = opts.provider?.name;
-        assert.equal(gatherProviderName, 'github');
         const gather = gatherFixture(['.pr-review.yaml', 'src/app.ts']);
         gather.pr = opts.provider!.parseUrl(opts.prUrl)!;
         return gather;

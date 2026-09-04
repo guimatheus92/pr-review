@@ -11,9 +11,9 @@ function normalizedRelative(root: string, path: string): string | null {
 }
 
 /**
- * A `SKILL.md` owns its directory: every pass is handed a `Source:` line and told
- * that relative `references/` links resolve from there, so the skill's sibling
- * files are reachable review input even though only `SKILL.md` loads as a skill.
+ * A `SKILL.md` owns its directory: the reviewer session can read the checkout
+ * (`--add-dir <repoRoot>`), so the skill's sibling files are reachable review input
+ * even though only `SKILL.md` loads as a skill and no sibling is materialized.
  * Trusting the skill because `SKILL.md` itself is unchanged would let a PR ship
  * branch-authored instructions beside it. Flat `<dir>/<name>.md` rules share a
  * directory with unrelated rules, so for those the file stays the unit.

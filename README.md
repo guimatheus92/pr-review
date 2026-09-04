@@ -176,10 +176,10 @@ https://gitlab.com/<group>[/<subgroup>]/<project>/-/merge_requests/<iid>
 https://<gitlab-host>/<group>/<project>/-/merge_requests/<iid>                       # self-managed GitLab
 ```
 
-Trailing paths, query strings, and fragments are ignored (`…/pull/42/files?diff=split` works). Self-hosted hosts must be mapped explicitly in config — a credential is only ever sent to a host you named (the unrecognized-URL error prints the exact yaml to add):
+Trailing paths, query strings, and fragments are ignored (`…/pull/42/files?diff=split` works). Self-hosted hosts must be mapped explicitly in the **global** config — a credential is only ever sent to a host you named, so a checkout-local `hosts:` map is ignored (the unrecognized-URL error prints the exact yaml to add):
 
 ```yaml
-# ~/.pr-review/config.yaml or .pr-review.yaml
+# ~/.pr-review/config.yaml — global only; a hosts: map in .pr-review.yaml is ignored
 hosts:
   github.mycorp.com: github
   tfs.corp.com: azuredevops

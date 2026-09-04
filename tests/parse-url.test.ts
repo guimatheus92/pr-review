@@ -1,4 +1,6 @@
 import { test } from 'node:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { strict as assert } from 'node:assert';
 import { join } from 'node:path';
 import { detectProvider, resolvePr } from '../src/providers/index.js';
@@ -289,4 +291,19 @@ test('cache paths — GitHub stays stable while ADO is isolated by project', () 
     true,
     'canonical and legacy ADO cloud forms share one authority',
   );
+});
+
+test('detectProvider — the fallback host map never reads a checkout-local .pr-review.yaml', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'pr-hosts-sink-'));
+  const previous = process.cwd();
+  const url = 'https://trusted-sink.example/g/p/-/merge_requests/1';
+  try {
+    writeFileSync(join(cwd, '.pr-review.yaml'), 'hosts:\n  trusted-sink.example: gitlab\n');
+    process.chdir(cwd);
+    assert.throws(() => detectProvider(url), /Unrecognized PR URL/, 'repo-level hosts must not map an unknown host');
+    assert.equal(detectProvider(url, { 'trusted-sink.example': 'gitlab' }).name, 'gitlab', 'an explicit trusted map still does');
+  } finally {
+    process.chdir(previous);
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });

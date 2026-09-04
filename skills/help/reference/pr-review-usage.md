@@ -41,7 +41,7 @@ From inside a `copilot` or `claude` session in any repo:
 /pr-review https://gitlab.com/<group>/<project>/-/merge_requests/<iid>
 ```
 
-Also accepted: legacy `https://<org>.visualstudio.com/[<collection>/][<proj>/]_git/<repo>/pullrequest/<id>`, GitHub Enterprise Server hosts, on-prem Azure DevOps Server (`https://<server>/<collection>/<proj>/_git/…`), and self-managed GitLab. Trailing paths/query strings are ignored. Self-hosted hosts must be mapped in config with `hosts: {<hostname>: github|azuredevops|gitlab}` — credentials only go to hosts you named. GHES auth uses `GH_ENTERPRISE_TOKEN`/`GITHUB_ENTERPRISE_TOKEN` or `gh auth login --hostname <host>` (github.com tokens are never sent to enterprise hosts).
+Also accepted: legacy `https://<org>.visualstudio.com/[<collection>/][<proj>/]_git/<repo>/pullrequest/<id>`, GitHub Enterprise Server hosts, on-prem Azure DevOps Server (`https://<server>/<collection>/<proj>/_git/…`), and self-managed GitLab. Trailing paths/query strings are ignored. Self-hosted hosts must be mapped in the global config with `hosts: {<hostname>: github|azuredevops|gitlab}` — credentials only go to hosts you named, so a checkout-local `hosts:` map is ignored. GHES auth uses `GH_ENTERPRISE_TOKEN`/`GITHUB_ENTERPRISE_TOKEN` or `gh auth login --hostname <host>` (github.com tokens are never sent to enterprise hosts).
 
 Under Claude Code the plugin command is `/pr-review:pr-review <url>`; since the plugin no longer ships agents, current Claude Code should register the bare `/pr-review` alias as well (a personal command remains the fallback — see the README install section).
 

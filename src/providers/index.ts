@@ -63,7 +63,9 @@ export function detectProvider(url: string, hosts?: Record<string, Provider>): P
   if (host === 'github.com' || host === 'www.github.com') return makeProvider('github');
   if (host === 'dev.azure.com' || host.endsWith('.visualstudio.com')) return makeProvider('azuredevops');
   if (host === 'gitlab.com' || host === 'www.gitlab.com') return makeProvider('gitlab');
-  const mapped = (hosts ?? loadConfig().config.hosts)[host];
+  // Trusted default: a checkout-local .pr-review.yaml decides nothing about where a
+  // credential is sent, so the fallback never reads it — global config and env only.
+  const mapped = (hosts ?? loadConfig({ includeRepoConfig: false }).config.hosts)[host];
   if (mapped) return makeProvider(mapped);
   throw new Error(`Unrecognized PR URL: ${url}\nExpected one of:\n${shapesHelp()}\n${hostsTip(host)}`);
 }

@@ -57,7 +57,7 @@ There is no per-pass timeout: everything dispatched inside one session shares it
 
 ## Cost note
 
-Companion plugins roughly **2-3x review cost** because each one runs its entire internal orchestrator inside the review session, spinning up Anthropic's internal agents on top. With pr-review-toolkit + code-review + the codex second-opinion reviewer all present, a run can total up to 19 reviewers (up to 10 review passes + verifier + 7 companion agents + codex). If review cost matters and the review passes are sufficient, opt out:
+Companion plugins roughly **2-3x review cost** because each one runs its entire internal orchestrator inside the review session, spinning up Anthropic's internal agents on top. With pr-review-toolkit + code-review + the codex second-opinion reviewer all present, a run can total up to 24 reviewers (up to 15 review passes — 6 stack + 2 installed-plugin + the 7 default baselines — plus verifier + 7 companion agents + codex). If review cost matters and the review passes are sufficient, opt out:
 
 ```bash
 pr-review review <url> --no-companions

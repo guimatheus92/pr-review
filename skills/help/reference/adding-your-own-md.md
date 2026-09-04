@@ -36,7 +36,7 @@ How each skill routes (see [`reviewers-vs-skills`](reviewers-vs-skills.md) for t
 - **Pack skills** → glob/tag/baseline tiers; index-mode packs go straight to the index.
 - **Untargeted, in a home dir** (`~/.claude/skills/` etc.) → skipped (with a stderr note); these are personal general-purpose helpers, not review content.
 
-At most 10 passes dispatch per review; overflow joins the index.
+Per review, at most 6 stack-matched pack passes dispatch, plus every baseline pointer and up to 2 installed-plugin passes; overflow joins the index. (Only with no pack passes at all — e.g. `skill_packs: []` — do your own skills become the passes, up to 10, with overflow injected whole as context.)
 
 One `.md` in a skill dir serves both your normal agent sessions and pr-review; add `applies_to` when you want to pin exactly which files trigger it instead of leaning on the relevance heuristic. To force an entire directory in regardless of relevance, point `extra_skills_dirs` / `--skills-dir` / `PR_REVIEW_SKILLS_DIR` at it.
 

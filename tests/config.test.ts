@@ -333,3 +333,24 @@ test('loadConfig — a checkout-local hosts: map never merges, with or without r
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+
+test('loadConfig — nothing in yaml or env can force a skill: force_skills / force_skills_dirs / PR_REVIEW_FORCE_SKILLS_DIR are ignored', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'pr-review-cfg-force-'));
+  const home = mkdtempSync(join(tmpdir(), 'pr-review-home-force-'));
+  const previous = process.env.PR_REVIEW_FORCE_SKILLS_DIR;
+  try {
+    mkdirSync(join(home, '.pr-review'), { recursive: true });
+    writeFileSync(join(home, '.pr-review', 'config.yaml'), 'force_skills_dirs: [./global-force]\nforce_skills: [./global.md]\n');
+    writeFileSync(join(tmp, '.pr-review.yaml'), 'force_skills_dirs: [./repo-force]\nforce_skills: [./repo.md]\n');
+    process.env.PR_REVIEW_FORCE_SKILLS_DIR = join(tmp, 'env-force');
+    const { config } = loadConfig({ cwd: tmp, homeOverride: home });
+    assert.deepEqual(config.forceSkills, [], 'forcing is a per-run CLI decision only');
+    assert.ok(!('forceSkillsDirs' in config), 'no directory-level force list exists');
+    assert.deepEqual(config.skillsDirs, []);
+  } finally {
+    if (previous === undefined) delete process.env.PR_REVIEW_FORCE_SKILLS_DIR; else process.env.PR_REVIEW_FORCE_SKILLS_DIR = previous;
+    rmSync(tmp, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});

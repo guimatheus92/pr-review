@@ -4,7 +4,7 @@ import { parse as parseYaml } from 'yaml';
 import type { ReviewerDefinition, SkillDefinition } from '../types.js';
 import type { Config } from '../config.js';
 import { autodiscoveryPaths } from '../config.js';
-import { loadReviewerFile, loadSkillFile, loadBuiltInReviewers } from './builtin.js';
+import { loadReviewerFile, loadSkillFile, loadBuiltInReviewers, printable } from './builtin.js';
 import { loadPackSkills } from '../packs/load.js';
 import type { PluginManifest, PluginReviewerEntry, PluginSkillEntry } from './types.js';
 import { changedPathSet, normalizedRelative, partitionTrustedProjectSkills, prAuthoredPath } from './trust.js';
@@ -30,22 +30,36 @@ interface WalkOptions {
   top?: string;
 }
 
-function hasMdEntry(dir: string): boolean {
+/** Never review material: version control internals and installed packages. */
+const WALK_SKIP = new Set(['.git', 'node_modules']);
+
+function entriesOf(dir: string): string[] | null {
   try {
-    return readdirSync(dir).some((entry) => entry.toLowerCase().endsWith('.md'));
+    return readdirSync(dir);
   } catch {
-    return false;
+    return null;
   }
 }
 
-/** Is any directory strictly between `top` and `path` a link? */
+function hasMdEntry(dir: string): boolean {
+  return (entriesOf(dir) ?? []).some((entry) => entry.toLowerCase().endsWith('.md'));
+}
+
+/** A folder that groups skills (`skills/<group>/<skill>/SKILL.md`) rather than holding loose rules. */
+function hasSkillChild(dir: string): boolean {
+  return (entriesOf(dir) ?? []).some((entry) => existsSync(join(dir, entry, 'SKILL.md')));
+}
+
+/** Is any directory strictly between `top` and `path` a link? Unreadable counts as yes (the hop is spent, never gained). */
 function linkAbove(path: string, top: string): boolean {
-  for (let dir = dirname(path); dir !== resolve(top) && normalizedRelative(top, dir) !== null; dir = dirname(dir)) {
+  const stop = resolve(top);
+  for (let dir = dirname(resolve(path)); dir !== stop && normalizedRelative(stop, dir) !== null; dir = dirname(dir)) {
     try {
       if (lstatSync(dir).isSymbolicLink()) return true;
     } catch {
-      return false;
+      return true;
     }
+    if (dirname(dir) === dir) return false;
   }
   return false;
 }
@@ -67,7 +81,7 @@ function walkMdFiles(root: string, opts: WalkOptions = {}): string[] {
   try {
     stats = lstatSync(root);
   } catch {
-    return [];
+    return []; // an absent discovery dir is the normal case
   }
   let followLinks = true;
   if (stats.isSymbolicLink()) {
@@ -75,7 +89,8 @@ function walkMdFiles(root: string, opts: WalkOptions = {}): string[] {
     try {
       stats = statSync(root);
     } catch {
-      return []; // dangling link
+      process.stderr.write(`[skills] warning: ${printable(root)} is a dangling link — nothing loaded from it\n`);
+      return [];
     }
   } else if (opts.top && linkAbove(root, opts.top)) {
     followLinks = false;
@@ -84,20 +99,32 @@ function walkMdFiles(root: string, opts: WalkOptions = {}): string[] {
   if (stats.isFile()) return root.toLowerCase().endsWith('.md') ? [root] : [];
   if (!stats.isDirectory()) return [];
   // Under a `skills` root a subdirectory is a skill only through its SKILL.md
-  // (the convention every agent tool shares); loose rules nest only under
-  // rules/ or instructions/ roots.
+  // (the convention every agent tool shares); any other root (rules/,
+  // instructions/, a configured dir of loose files) nests freely.
   return walkDir(root, opts, /^skills$/i.test(basename(root)), followLinks);
 }
 
 function walkDir(dir: string, opts: WalkOptions, strict: boolean, followLinks: boolean): string[] {
   const out: string[] = [];
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
+  const entries = entriesOf(dir);
+  if (entries === null) {
+    process.stderr.write(`[skills] warning: ${printable(dir)} could not be read — nothing loaded from it\n`);
     return out;
   }
+  // A link is followed only when this walk still has its hop and the PR did not author it.
+  const followable = (path: string): boolean => {
+    if (!followLinks) {
+      process.stderr.write(`[skills] not following ${printable(path)}: a link inside a linked directory (one hop only)\n`);
+      return false;
+    }
+    if (opts.refuseLink?.(path)) {
+      opts.skippedLinks?.push(path);
+      return false;
+    }
+    return true;
+  };
   for (const entry of entries) {
+    if (WALK_SKIP.has(entry)) continue;
     const full = join(dir, entry);
     let s;
     try {
@@ -107,33 +134,40 @@ function walkDir(dir: string, opts: WalkOptions, strict: boolean, followLinks: b
     }
     let childFollow = followLinks;
     if (s.isSymbolicLink()) {
-      if (!followLinks) {
-        process.stderr.write(`[skills] not following ${full}: a link inside a linked directory (one hop only)\n`);
-        continue;
-      }
-      if (opts.refuseLink?.(full)) {
-        opts.skippedLinks?.push(full);
-        continue;
-      }
+      if (!followable(full)) continue;
       childFollow = false;
       try {
         s = statSync(full);
       } catch {
-        continue; // dangling link
+        process.stderr.write(`[skills] warning: ${printable(full)} is a dangling link — nothing loaded from it\n`);
+        continue;
       }
     }
     if (s.isDirectory()) {
       const skillFile = join(full, 'SKILL.md');
-      if (existsSync(skillFile)) {
-        out.push(skillFile);
-      } else if (strict) {
-        if (hasMdEntry(full)) {
-          process.stderr.write(
-            `[skills] warning: ${full} has no SKILL.md — its .md files are not loaded as skills (loose .md rules nest only under rules/ or instructions/)\n`,
-          );
+      let sf;
+      try {
+        sf = lstatSync(skillFile);
+      } catch {
+        sf = null;
+      }
+      if (sf?.isSymbolicLink()) {
+        // The skill file itself is a link: same rules as a linked directory.
+        if (!(childFollow && followable(skillFile))) continue;
+        try {
+          sf = statSync(skillFile);
+        } catch {
+          continue;
         }
-      } else {
+      }
+      if (sf?.isFile()) {
+        out.push(skillFile);
+      } else if (!strict || hasSkillChild(full)) {
         out.push(...walkDir(full, opts, strict, childFollow));
+      } else if (hasMdEntry(full)) {
+        process.stderr.write(
+          `[skills] warning: ${printable(full)} has no SKILL.md — its .md files are not loaded as skills (loose .md rules nest only under rules/ or instructions/)\n`,
+        );
       }
     } else if (s.isFile() && entry.toLowerCase().endsWith('.md') && entry.toLowerCase() !== 'readme.md') {
       out.push(full);
@@ -372,19 +406,24 @@ export function loadAll(
   // --skills-dir / extra_skills_dirs / PR_REVIEW_SKILLS_DIR: the same treatment as
   // a repo skill dir (targeted → scoped rule, untargeted → relevance heuristic,
   // unmatched → index), subject to rule trust, kept when cwd is not the PR repo.
-  const configured = trust(withOrigin(loadFromPaths(config.skillsDirs, 'skill', walk) as SkillDefinition[], 'configured'));
+  const configuredLoaded = loadFromPaths(config.skillsDirs, 'skill', walk) as SkillDefinition[];
+  const configured = trust(withOrigin(configuredLoaded, 'configured'));
   skills.push(...configured.filter(hasReviewTargeting));
   catalog.push(...configured.filter((s) => !hasReviewTargeting(s)));
-  if (configured.length > 0) {
+  if (configuredLoaded.length > 0) {
     process.stderr.write(
-      `[skills] ${configured.length} skill(s) from configured dirs (--skills-dir / extra_skills_dirs / PR_REVIEW_SKILLS_DIR) — selected like repo skills; --force-skill <dir> injects a directory whole\n`,
+      `[skills] ${configuredLoaded.length} skill(s) from configured dirs (--skills-dir / extra_skills_dirs / PR_REVIEW_SKILLS_DIR) — selected like repo skills; --force-skill <dir> injects a directory whole\n`,
+    );
+  } else if (config.skillsDirs.length > 0) {
+    process.stderr.write(
+      `[skills] warning: no skills found in configured dir(s) ${config.skillsDirs.map((dir) => printable(dir)).join(', ')} — under a \`skills\` root only <dir>/SKILL.md and flat .md files count\n`,
     );
   }
 
   for (const link of new Set(skippedLinks)) {
     const rel = normalizedRelative(cwd, link) ?? link;
-    process.stderr.write(`[skills] skipped link ${rel}: added or changed by this PR — not followed\n`);
-    skippedProjectSkills.push({ name: rel, source: link, body: '', appliesTo: [] });
+    process.stderr.write(`[skills] skipped link ${printable(rel)}: added or changed by this PR — not followed\n`);
+    skippedProjectSkills.push({ name: rel, source: link, body: '', appliesTo: [], skipReason: 'link added or changed by this PR — not followed' });
   }
 
   for (const dir of config.pluginDirs) {

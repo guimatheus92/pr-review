@@ -10,7 +10,7 @@ You are running the `pr-review` CLI. You are NOT reviewing the PR yourself — t
 
 Locate the bundled CLI, move into the checkout the PR belongs to, and start a detached run. Under Claude Code `${CLAUDE_PLUGIN_ROOT}` expands to the plugin root at load time (with a plugin-cache search as fallback); under Copilot CLI the plugin lives beneath `~/.copilot/installed-plugins/`.
 
-The CLI reads project rules from **its own working directory only** — it has no `--repo` flag. Run from a checkout whose `origin` matches the PR, or it applies no project skills and skips stack detection. The block below finds that checkout for you: the current directory, then its subdirectories, then its siblings, comparing each origin's path against the PR URL (provider-agnostic). A primary worktree is preferred over a linked one, because linked worktrees usually lack a workspace's shared skill links.
+The CLI reads project rules from **its own working directory only** — it has no `--repo` flag. Run from a checkout whose `origin` matches the PR, or it applies no project skills and skips stack detection. The block below finds that checkout for you: the repository containing the current directory, then the current directory's subdirectories, then its siblings, comparing each origin's path against the PR URL (provider-agnostic). A primary worktree is preferred over a linked one, because linked worktrees usually lack a workspace's shared skill links. Because the CLI is started from that checkout, a relative path in the arguments (`--skill ./x.md`) resolves from the checkout, not from where the command was typed.
 
 ```bash
 CLI="${CLAUDE_PLUGIN_ROOT}/dist/cli.cjs"
@@ -25,16 +25,17 @@ if [ -z "$CLI" ] || [ ! -f "$CLI" ]; then
   exit 1
 fi
 
-# Find the checkout this PR belongs to: cwd, then its subdirectories, then its siblings.
+# Find the checkout this PR belongs to: the repo containing cwd, then cwd's subdirectories, then its siblings.
 PR_URL=
 for a in $ARGUMENTS; do
   case "$a" in http://*|https://*) PR_URL=$(printf %s "$a" | tr 'A-Z' 'a-z'); break ;; esac
 done
 REPO_DIR=; FALLBACK=
 if [ -n "$PR_URL" ]; then
-  for d in . */ ../*/; do
+  for d in "$(git rev-parse --show-toplevel 2>/dev/null || echo .)" */ ../*/; do
     [ -e "$d/.git" ] || continue
     o=$(git -C "$d" remote get-url origin 2>/dev/null) || continue
+    # origin URL → "owner/repo" path: drop scheme, user@, host (and the ':' of scp-style), and .git
     o=$(printf '%s' "$o" | sed -e 's#^[a-z+]*://##' -e 's#^[^@]*@##' -e 's#^[^/:]*[:/]##' -e 's#\.git$##' | tr 'A-Z' 'a-z')
     [ -n "$o" ] || continue
     case "$PR_URL" in *"/$o/"*) ;; *) continue ;; esac
@@ -49,7 +50,7 @@ fi
 if [ -n "$REPO_DIR" ]; then
   echo "repo: $REPO_DIR"
   cd "$REPO_DIR" || exit 1
-  # Same rule as the loader: <dir>/SKILL.md plus flat .md files (README excluded) in the standard dirs.
+  # Approximates the loader's rule — <dir>/SKILL.md plus flat .md files (README excluded) in the standard dirs; the CLI's own count is authoritative.
   n=$( { ls -d .claude/skills/*/SKILL.md .copilot/skills/*/SKILL.md .github/skills/*/SKILL.md .agents/skills/*/SKILL.md 2>/dev/null; ls .claude/skills/*.md .copilot/skills/*.md .github/skills/*.md .agents/skills/*.md .claude/rules/*.md .github/instructions/*.md 2>/dev/null | grep -vi '/readme\.md$'; } | wc -l)
   if [ "$n" -gt 0 ]; then
     echo "project skills discoverable: $n (the CLI reports the exact count it loads)"

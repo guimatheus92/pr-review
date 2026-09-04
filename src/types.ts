@@ -105,6 +105,8 @@ export interface SkillDefinition {
   origin?: 'repo' | 'home' | 'plugin' | 'explicit' | 'forced' | 'configured' | 'pack';
   /** Pack mode: 'index' skills are never dispatched as passes, only listed on-demand. */
   mode?: 'auto' | 'index';
+  /** Why the rule was left out of this review (set on skippedProjectSkills entries only). */
+  skipReason?: string;
   /** Installed plugin that supplied this skill, when applicable. */
   plugin?: string;
   /** MCP server names declared by that installed plugin. */

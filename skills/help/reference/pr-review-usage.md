@@ -81,7 +81,7 @@ Most review knowledge comes from skill packs (git repos under `~/.pr-review/pack
 | `--fail-on <severity>` | Exit 1 if findings at/above this severity survive dedupe (`critical`\|`high`\|`medium`\|`low`\|`nit`) |
 | `--skip <names>` | Comma-separated pass names to skip — full (`awesome-copilot/go`) or bare suffix (`go`); also `verifier`, `codex` |
 | `--no-cache` | Bypass the gather cache |
-| `--skill <file>` | Include a specific .md file while preserving its `applyTo`/`paths` scope |
+| `--skill <file>` | Include a specific .md file (inside the checkout) while preserving its `applyTo`/`paths` scope |
 | `--force-skill <file\|dir>` | Include .md skill(s) in every pass regardless of scope, relevance or rule trust (per run, the only bypass) |
 | `--skills-dir <path>` | Include a directory of .md skills, selected like a repo skill dir |
 | `--plugin-dir <path>` | Include a packaged plugin (has its own plugin.yaml) |

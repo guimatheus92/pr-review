@@ -1272,7 +1272,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     ...mcpCapabilities.warnings,
     ...(repoConfigChanged ? ['.pr-review.yaml changed by this PR — checkout-local configuration ignored as untrusted'] : []),
     ...untrustedProjectRules.map(
-      (skill) => `project rule ${safeSummaryValue(skill.name)} changed by this PR — skipped as untrusted review instructions`,
+      (skill) => `project rule ${safeSummaryValue(skill.name)} skipped — ${safeSummaryValue(skill.skipReason ?? 'changed by this PR')} (untrusted review instructions)`,
     ),
   ];
 
@@ -1340,6 +1340,9 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     ];
     if (repoConfigChanged) {
       lines.push(``, `> **Degraded:** .pr-review.yaml changed by this PR — checkout-local configuration ignored as untrusted.`);
+    }
+    for (const skill of untrustedProjectRules) {
+      lines.push(``, `> **Degraded:** project rule ${safeSummaryValue(skill.name)} skipped — ${safeSummaryValue(skill.skipReason ?? 'changed by this PR')}.`);
     }
     if (ctx.triageSkipped.length > 0) {
       lines.push(`**Skipped by triage (docs-only PR):** ${ctx.triageSkipped.join(', ')}`);

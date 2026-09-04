@@ -26,10 +26,13 @@ export function changedPathSet(changedPaths: string[]): Set<string> {
 }
 
 /**
- * The branch under review can author two things: files inside the checkout, and the
- * LINKS inside the checkout — a committed symlink shows up in the diff as its own
- * path. So a path is branch-authored when it, or any directory on the way to it, is
- * in the diff. Content whose real path is outside the checkout cannot be.
+ * The branch under review can author two things inside the checkout: files, and
+ * LINKS — a committed link shows up in the diff as its own path. So a path is
+ * branch-authored when it, or any directory on the way to it, is in the diff.
+ * What sits outside the checkout is out of the branch's reach through git alone;
+ * the one way a checkout still lands a file out there (Windows writing through
+ * a junction) is what the commit-and-clean gate in partitionTrustedProjectSkills
+ * covers.
  */
 export function prAuthoredPath(changed: Set<string>, rel: string): boolean {
   return changed.has(rel) || ancestorsOf(rel).some((dir) => changed.has(dir));
@@ -69,7 +72,7 @@ export function partitionTrustedProjectSkills(
   const skipped: SkillDefinition[] = [];
   const skip = (skill: SkillDefinition, reason: string): void => {
     process.stderr.write(`[skills] skipped ${printable(skill.name)}: ${reason}\n`);
-    skipped.push(skill);
+    skipped.push({ ...skill, skipReason: reason });
   };
   for (const skill of skills) {
     if (skill.origin === 'forced') {
@@ -81,8 +84,8 @@ export function partitionTrustedProjectSkills(
     try {
       real = realpathCanonical(skill.source);
     } catch {
-      // The loader already read the file; failure here is a trust failure, not absence.
-      skip(skill, 'file vanished after loading');
+      // The loader read this file moments ago; an unresolvable path now is a trust failure, not absence.
+      skip(skill, 'its real path could not be resolved');
       continue;
     }
     const realSource = normalizedRelative(realRoot, real);
@@ -103,20 +106,24 @@ export function partitionTrustedProjectSkills(
       skip(skill, 'reached through a link this PR added or changed');
       continue;
     }
-    if (lexicalSource !== null && realSource === null) {
-      // Reached THROUGH a link in the checkout, landing outside it: the branch cannot
-      // author the content — but on Windows a checkout writes THROUGH an NTFS junction
-      // into the shared directory, so the file must be committed and clean in its home
-      // repository. A directory under no repository at all is the reviewer's local
-      // configuration. Personal (~) and configured dirs are not reached through the
-      // checkout, so this gate does not apply to them.
+    if (realSource === null) {
+      // Outside the checkout — through a link in it, a configured dir, or a home
+      // dir. The branch cannot commit there, but on Windows a checkout writes
+      // THROUGH an NTFS junction into a shared directory, so the file must be
+      // committed and clean in its home repository. A directory under no
+      // repository at all is the reviewer's local configuration (noted once per
+      // directory when reached through a link, the case a reader may not expect).
       const ownedDir = /^skill\.md$/i.test(basename(real)) ? dirname(real) : undefined;
       const state = gitProvenance(real, provenance, ownedDir);
       if (state === 'untracked' || state === 'dirty') {
         skip(skill, `${state} in its home repository — commit it to use it`);
         continue;
       }
-      if (state === 'no-repo' && !noted.has(dirname(real))) {
+      if (state === 'error') {
+        skip(skill, 'could not be verified with git in its home repository (git failed or is missing)');
+        continue;
+      }
+      if (state === 'no-repo' && lexicalSource !== null && !noted.has(dirname(real))) {
         noted.add(dirname(real));
         process.stderr.write(`[skills] note: ${printable(dirname(real))} is not under version control — trusted as local configuration\n`);
       }
@@ -126,7 +133,12 @@ export function partitionTrustedProjectSkills(
   return { trusted, skipped };
 }
 
-/** Forced and configured skills are the reviewer's own choice and may cross a checkout boundary. */
+/**
+ * Only forced (--force-skill) and configured (--skills-dir / extra_skills_dirs /
+ * PR_REVIEW_SKILLS_DIR) skills were named by the reviewer's own invocation or
+ * config, so only they may cross a checkout boundary; a checkout's own rules
+ * belong to that checkout.
+ */
 export function skillsAllowedForCheckout(skills: SkillDefinition[], cwdIsPrRepo: boolean): SkillDefinition[] {
   return cwdIsPrRepo ? skills : skills.filter((skill) => skill.origin === 'forced' || skill.origin === 'configured');
 }

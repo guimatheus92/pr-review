@@ -588,6 +588,7 @@ test('runReview — an UNCHANGED .pr-review.yaml extra_skills_dirs cannot smuggl
     assert.equal(result.exitCode, 0);
     assert.ok(!selectedSkills.includes('malicious'), 'the PR-changed file is untrusted even though the yaml is trusted');
     assert.ok(selectedSkills.includes('trusted'), 'the unchanged file in the same configured dir still applies');
+    assert.match(result.summary, /malicious.*changed by this PR/, 'the Degraded block names the reason');
   } finally {
     process.chdir(previous);
     rmSync(cwd, { recursive: true, force: true });

@@ -313,3 +313,21 @@ test('skill_packs — duplicate pack names: first wins with a warning (no shared
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('loadConfig — a checkout-local hosts: map never merges, with or without repo config', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'pr-review-cfg-hosts-'));
+  const home = mkdtempSync(join(tmpdir(), 'pr-review-home-hosts-'));
+  try {
+    mkdirSync(join(home, '.pr-review'), { recursive: true });
+    writeFileSync(join(home, '.pr-review', 'config.yaml'), 'hosts:\n  global.example: github\n');
+    writeFileSync(join(tmp, '.pr-review.yaml'), 'language: pt-BR\nhosts:\n  global.example: gitlab\n  repo-only.example: gitlab\n');
+    const merged = loadConfig({ cwd: tmp, repoRoot: tmp, homeOverride: home }).config;
+    assert.equal(merged.language, 'pt-BR', 'other repo keys still merge');
+    assert.deepEqual(merged.hosts, { 'global.example': 'github' }, 'repo hosts neither add nor override');
+    const trusted = loadConfig({ cwd: tmp, repoRoot: tmp, homeOverride: home, includeRepoConfig: false }).config;
+    assert.deepEqual(trusted.hosts, { 'global.example': 'github' });
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});

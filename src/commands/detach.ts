@@ -41,7 +41,7 @@ export function detachReview(
   const trustedConfig = loadConfig({ cwd: process.cwd(), homeOverride, includeRepoConfig: false }).config;
   const { provider, ref } = resolvePr(prUrl, trustedConfig.hosts);
   const authEnv = resolveAuthEnv ? resolveAuthEnv(prUrl) : provider.authEnv(ref);
-  const outDir = ensureRunDir(ref);
+  const outDir = ensureRunDir(ref, homeOverride);
   const childArgs = argv.filter((a) => a !== '--detach').concat('--run-dir', outDir);
   const log = openSync(join(outDir, 'detached.log'), 'a');
   const cliPath = process.argv[1]!;

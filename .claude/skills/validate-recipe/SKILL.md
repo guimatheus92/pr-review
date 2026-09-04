@@ -37,4 +37,4 @@ TypeScript CLI (Node >= 20), esbuild single-file bundle at dist/cli.cjs; tests v
 - Exit codes: pipe the CLI to `head` and you capture `head`'s status, not the CLI's. Run it bare with `>/dev/null 2>&1; echo $?` when the code is the evidence.
 - Posting behaviour is best proven with a small `tsx` script driving `runPost` against a stateful fake provider that records writes AND throws — a test that only asserts counts cannot show duplication. Copy it into a base worktree to get the before/after comment counts.
 
-Last verified: 2026-09-04 (PR #22 head, branch feat/review-workflow-diagram)
+Last verified: 2026-09-04 (feat/review-workflow-diagram, d0d60cb; the final fix commit on PR #22 re-ran build, suite and smokes before push)

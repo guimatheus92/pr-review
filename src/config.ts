@@ -287,6 +287,15 @@ export interface LoadConfigOpts {
   includeRepoConfig?: boolean;
 }
 
+const warnedRepoHosts = new Set<string>();
+function warnRepoHostsOnce(repoPath: string): void {
+  if (warnedRepoHosts.has(repoPath)) return;
+  warnedRepoHosts.add(repoPath);
+  process.stderr.write(
+    `[config] hosts: in ${repoPath} ignored — a checkout-local host map is untrusted (it decides where a credential is sent); move it to ~/.pr-review/config.yaml\n`,
+  );
+}
+
 export function loadConfig(opts: LoadConfigOpts = {}): { config: Config; sources: Record<string, string> } {
   const cwd = opts.cwd ?? process.cwd();
   const repoRoot = opts.repoRoot ?? cwd;
@@ -301,9 +310,18 @@ export function loadConfig(opts: LoadConfigOpts = {}): { config: Config; sources
   }
 
   const repoPath = join(repoRoot, '.pr-review.yaml');
-  if (opts.includeRepoConfig !== false && existsSync(repoPath)) {
-    applyRaw(config, readYamlFile(repoPath), repoRoot);
-    sources.repo = repoPath;
+  if (existsSync(repoPath)) {
+    const repoRaw = readYamlFile(repoPath);
+    // hosts: decides where a credential is sent, so a checkout-local map is never
+    // merged — not even for `config show` — and its presence is reported once.
+    if (repoRaw.hosts !== undefined) {
+      delete repoRaw.hosts;
+      warnRepoHostsOnce(repoPath);
+    }
+    if (opts.includeRepoConfig !== false) {
+      applyRaw(config, repoRaw, repoRoot);
+      sources.repo = repoPath;
+    }
   }
 
   // Env overrides files (defaults < global yaml < repo yaml < env < flags).

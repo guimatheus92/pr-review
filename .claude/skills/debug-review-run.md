@@ -38,7 +38,11 @@ Every `pr-review review` writes artifacts to `~/.pr-review/runs/<provider>__<own
 ## Common issues
 
 **Exit code 2 / no findings produced:**
-1. Exit code 2 has four surfaces. **Command-level exception:** gather/auth/config/runtime/finalization threw; stderr is authoritative and run artifacts, including `error.txt`, are not guaranteed. **Prerequisite/no-pass failure:** `runReview` writes `error.txt` before reviewer delivery and may have no `delivery-state.json` or summary. **Incomplete delivery:** a planned pass, companion, required verifier, or enabled Codex did not produce valid attempt-scoped `Finding[]` within its bounded attempts; inspect `delivery-state.json` and attempt files. **Post-delivery operational failure:** complete reviewer output exists, but posting failed or could not be verified; inspect `error.txt` and the summary's Degraded block.
+1. Exit code 2 has four surfaces:
+   - **Command-level exception:** gather/auth/config/runtime/finalization threw; stderr is authoritative and run artifacts, including `error.txt`, are not guaranteed.
+   - **Prerequisite/no-pass failure:** `runReview` writes `error.txt` before reviewer delivery and may have no `delivery-state.json` or summary.
+   - **Incomplete delivery:** a planned pass, companion, required verifier, or enabled Codex did not produce valid attempt-scoped `Finding[]` within its bounded attempts; inspect `delivery-state.json` and attempt files.
+   - **Post-delivery operational failure:** complete reviewer output exists, but posting failed or could not be verified; inspect `error.txt` and the summary's Degraded block.
 2. For incomplete delivery, check `delivery-state.json`, then the named reviewer's latest `reviewer-attempts/.../attempt-N.json`. `single-session-findings.json` exists only after Node completes primary consolidation.
 3. Check stderr output for `[single-session]` messages.
 4. Read `orchestrator-prompt.md` to verify the dispatch instructions look correct.

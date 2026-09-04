@@ -434,7 +434,7 @@ function renderPassFile(pass: ReviewPass): string {
     `# Review pass: ${pass.name}`,
     pass.description ? `_${pass.description}_` : '',
     ``,
-    `Source: \`${pass.source}\` (relative references/ links resolve from its directory)`,
+    `Source: \`${pass.source}\` (provenance only; sibling files are not materialized)`,
     ``,
     PASS_RULES,
     ``,
@@ -444,7 +444,7 @@ function renderPassFile(pass: ReviewPass): string {
   ].join('\n');
 }
 
-/** The union of every dispatched pass body — read by codex, companions, and the verifier. */
+/** Budgeted pass-body union used by Codex, direct companions, and the verifier when no shared project context remains. */
 function renderUnionFile(passes: ReviewPass[]): string {
   const lines: string[] = [
     `# Review skills for this PR (union of all passes)`,
@@ -642,9 +642,9 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
       `[skills] skills-project.md: ${projectSkills.length} project rule(s), ${Math.round(projectBody.length / 1024)} KB — injected whole into every pass\n`,
     );
   } else if (passes.length > 0) {
-    // The union is the authoritative-context FALLBACK (codex/companions/verifier)
-    // when no project skills matched — with project rules present, nothing reads
-    // it, so it is not written.
+    // The union is the authoritative-context fallback for Codex, direct
+    // companions, and the verifier when selection leaves no shared project
+    // context, so it is not written when skills-project.md exists.
     const unionPath = resolve(opts.outDir, 'skills-all.md');
     writeFileSync(unionPath, renderUnionFile(passes), 'utf8');
     skillsFiles['all'] = unionPath;

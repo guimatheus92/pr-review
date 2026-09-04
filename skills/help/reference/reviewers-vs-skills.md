@@ -16,9 +16,9 @@ Any `.md` file of review knowledge — a cheat sheet, a style guide, a team conv
 
 ## Pass
 
-One skill + the shared pipeline rules, run by a **generic agent** (`Task(subagent_type="general-purpose")` on Claude Code, `task(agent_type="general-purpose")` on Copilot CLI) inside the single orchestrator session. When a skill matches the PR it becomes its own review pass and produces its own findings — skills are no longer injected into someone else's prompt.
+One skill + the shared pipeline rules, run by a **generic agent** (`Task(subagent_type="general-purpose")` on Claude Code, `task(agent_type="general-purpose")` on Copilot CLI) inside the single orchestrator session. Selected pack and installed-plugin skills become passes. Matched project skills normally become authoritative shared context; when there are no pack, plugin, or baseline passes, up to ten project skills become the passes themselves and only overflow remains shared context.
 
-Each pass gets a `pass-<name>.md` file in the run dir (`~/.pr-review/runs/<id>/`): the pipeline rules header (severity scale CRITICAL → NIT, only what the PR changes, no duplicates of existing comments, exact `file:line`) plus that ONE skill body and a `Source:` line so the skill's relative references resolve.
+Each pass gets a `pass-<name>.md` file in the run dir (`~/.pr-review/runs/<id>/`): the pipeline rules header (severity scale CRITICAL → NIT, only what the PR changes, no duplicates of existing comments, exact `file:line`) plus that ONE skill body and a `Source:` line retained for provenance. Referenced sibling files are not automatically materialized into the confined runtime.
 
 ## How passes are selected
 
@@ -33,9 +33,9 @@ Pass selection within the packs:
 
 Linguist contributes canonical language names, not aliases as independent technologies. Generic files such as `package.json` or `*.csproj` prove an ecosystem, not Azure Functions, MCP, Copilot SDK, or another product by themselves.
 
-**Cap:** at most `MAX_STACK_PASSES = 6` stack passes dispatch, plus up to `MAX_PLUGIN_PASSES = 2` installed-plugin passes; baselines ride on top (typically 7, so <=15 passes). Overflow, unmatched skills, and index-mode packs land in `skills-index.md` — an on-demand list every pass can read from when an entry is relevant. Indexed skills are surfaced, not ignored.
+**Caps:** selection admits at most `MAX_STACK_PASSES = 6` stack passes, up to `MAX_PLUGIN_PASSES = 2` installed-plugin passes, and every configured baseline. Materialization then applies a normal 16-pass total ceiling, moving excess non-baseline passes to `skills-index.md`; baselines remain contractual and still dispatch when their count alone exceeds that ceiling. Other overflow, unmatched skills, and index-mode packs also land in the on-demand index. Indexed skills are surfaced, not ignored.
 
-Docs-only PRs run only glob/forced passes (never baseline). Zero passes on a code PR is exit 2 with a `packs suggest` hint; on a docs-only PR it's a clean exit 0.
+Docs-only triage retains only glob/forced passes (never baseline). When candidate passes existed but triage removes them all, the docs-only PR exits cleanly with an explanatory summary. An initially empty selection is exit 2 for docs-only and code PRs alike, with a `packs suggest` hint.
 
 ## Skipping passes
 
@@ -49,8 +49,8 @@ Valid `--skip` / `skip_reviewers` names are **pass names** — the full `<pack>/
 ## The rest of the pipeline
 
 - **Verifier** — still a pipeline step, not a skill. Its brief (`VERIFIER_BRIEF` in `src/dispatch/single-session.ts`) is written to `verifier.md` and dispatched as a generic agent when phase 1 produced a CRITICAL/HIGH finding.
-- **Codex** — the optional second-opinion sibling process, unchanged; it reads `skills-all.md` (the union of all pass bodies).
-- **Companion plugins** (pr-review-toolkit, code-review) — unchanged; they also read `skills-all.md`.
+- **Codex** — the optional second-opinion sibling process, unchanged; it reads `skills-project.md` when pass selection leaves shared project context, or the budgeted `skills-all.md` union as fallback.
+- **Companion plugins** — pr-review-toolkit's direct agents receive the same shared file as Codex and the verifier. The `code-review` slash companion receives the PR URL through its command, not a shared skills file.
 
 ## Frontmatter quick reference
 
@@ -66,7 +66,7 @@ tags: [csharp, dotnet]              # optional — exact-matched against stack t
 - `applies_to` (alias `applyTo`, which may be a comma-separated string) routes by changed files.
 - `name` overrides the filename; `tags` feed the tag tier.
 - Files with no frontmatter (e.g. OWASP cheat sheets) get their description from the first `#` heading; filename suffixes are folded (`go.instructions.md` → `go`, `Input_Validation_Cheat_Sheet.md` → `input-validation`).
-- `inject_into` is **deprecated** — it is parsed only to print a stderr warning, then ignored. Every matched skill now runs as its own pass; `applies_to` still scopes it to files.
+- `inject_into` is **deprecated** — it is parsed only to print a stderr warning, then ignored. `applies_to` still scopes the skill before the project-context/pass selection described above.
 
 ## Previewing routing
 
@@ -82,6 +82,6 @@ The `pr-review-summary.md` carries a `## Skills` section: `**Passes:** N · **Pr
 
 ## Common confusion to avoid
 
-- **"Where did the `security`/`quality`/... reviewers go?"** — deleted. Their job is done by pack skills (e.g. `awesome-copilot/security-and-owasp` in the baseline) and your own skills, each running as its own pass.
-- **"Will my team's performance rules be seen?"** — yes: put them in a skill whose `applies_to` globs match a changed file (or whose name/tags match the stack) and it becomes its own pass. Verify with `--context-only`.
+- **"Where did the `security`/`quality`/... reviewers go?"** — deleted. Their job is done by pack skills (e.g. `awesome-copilot/security-and-owasp` in the baseline) and authoritative project context from your own skills.
+- **"Will my team's performance rules be seen?"** — yes: put them in a project skill whose `applies_to` globs match a changed file (or whose name/description matches the change). It becomes authoritative context in every pass, or one of the passes in the no-pack fallback. Verify with `--context-only`.
 - **"My skill didn't run"** — check the `## Passes` table; it may be in the index (cap overflow or no match). Tighten `applies_to` or `tags` to lift it into a higher tier.

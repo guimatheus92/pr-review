@@ -79,6 +79,7 @@ test('passes — one pass-*.md per pass (rules + ONE body), union has all, promp
     const goBody = readFileSync(goFile, 'utf8');
     assert.ok(goBody.includes('# Review pass: awesome-copilot/go'));
     assert.ok(goBody.includes('Severity scale'), 'pipeline rules present');
+    assert.ok(goBody.includes('provenance only; sibling files are not materialized'));
     assert.ok(goBody.includes('BODY_OF_awesome_copilot_go'));
     assert.ok(!goBody.includes('BODY_OF_owasp_error_handling'), 'exactly one skill per pass file');
 
@@ -241,7 +242,7 @@ test('runtime — claude uses Task(subagent_type="general-purpose"), copilot tas
   }
 });
 
-test('codex + companions — both read the union file skills-all.md', () => {
+test('shared context — Codex, direct companions, and verifier use skills-all.md without shared project context', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
     const passes = [pass('p/one'), pass('p/two')];
@@ -259,6 +260,8 @@ test('codex + companions — both read the union file skills-all.md', () => {
       .find((l) => l.includes('agent_type="code-reviewer"'));
     assert.ok(companionLine, 'companion agents dispatched');
     assert.ok(companionLine.includes('skills-all.md'), 'companions read the union');
+    assert.ok(ctx.dispatchPlan?.verifier.promptTemplate?.includes('skills-all.md'), 'verifier reads the union');
+    assert.ok(ctx.dispatchPlan?.codex.skillsPath?.endsWith('skills-all.md'), 'Codex reads the union');
     assert.ok(companionLine.includes('reviewer-attempts'));
     assert.ok(companionLine.includes('attempt-1.json'));
   } finally {
@@ -486,7 +489,7 @@ test('MCP capabilities — context lists names/provenance and copies only the tr
   }
 });
 
-test('project rules — skills-project.md injected into every pass line, companions, verifier, and routing', () => {
+test('project rules — skills-project.md reaches passes, Codex, direct companions, and verifier but not slash companions', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
     const projectSkills = [
@@ -495,11 +498,14 @@ test('project rules — skills-project.md injected into every pass line, compani
     const ctx = prepareSessionContext({
       ...baseOpts(outDir, ['src/app.ts'], [pass('p/one'), pass('p/two')]),
       projectSkills,
+      includeCodex: true,
       invokeCompanions: true,
-      installedCompanions: ['pr-review-toolkit'],
+      installedCompanions: ['pr-review-toolkit', 'code-review'],
     });
     const projectFile = ctx.skillsFiles['project']!;
     assert.ok(projectFile.endsWith('skills-project.md'));
+    assert.equal(ctx.skillsFiles['all'], undefined, 'the pass union is not written when project rules matched');
+    assert.equal(existsSync(join(outDir, 'skills-all.md')), false);
     const body = readFileSync(projectFile, 'utf8');
     assert.ok(body.includes('PROJECT_RULE_MARKER'));
     assert.ok(body.includes('authoritative and OVERRIDE'), 'project rules keep the authoritative wording');
@@ -510,7 +516,11 @@ test('project rules — skills-project.md injected into every pass line, compani
     for (const l of passLines) assert.ok(l.includes('skills-project.md'), 'every pass reads the project rules');
     const companionLine = prompt.split('\n').find((l) => l.includes('agent_type="code-reviewer"'))!;
     assert.ok(companionLine.includes('skills-project.md'), 'companions get the authoritative rules');
+    const slashLine = prompt.split('\n').find((l) => l.includes('/code-review:code-review'))!;
+    assert.ok(slashLine, 'slash companion is dispatched');
+    assert.ok(!slashLine.includes('skills-project.md') && !slashLine.includes('skills-all.md'), 'slash companion receives no shared skills file');
     assert.ok(ctx.dispatchPlan?.verifier.promptTemplate?.includes('skills-project.md'), 'verifier gets the authoritative rules');
+    assert.equal(ctx.dispatchPlan?.codex.skillsPath, projectFile, 'Codex gets the authoritative rules');
 
     assert.equal(ctx.routing.find((r) => r.name === 'pp-regras-plano')?.matchedBy, 'context');
     // --skip drops a project rule from the context file too.

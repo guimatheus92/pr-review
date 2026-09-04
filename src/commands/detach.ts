@@ -1,6 +1,7 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import { closeSync, openSync } from 'node:fs';
 import { basename, join } from 'node:path';
+import { loadConfig } from '../config.js';
 import { resolvePr } from '../providers/index.js';
 import { ensureRunDir } from '../util/tmp.js';
 
@@ -20,23 +21,27 @@ export interface DetachResult {
  * `--detach` and append `--run-dir <dir>` so parent and child share one run dir
  * — the whole child-command transform lives here, in one place.
  *
- * `spawnFn` and `resolveAuthEnv` are test seams.
+ * `spawnFn`, `resolveAuthEnv`, and `homeOverride` are test seams.
  */
 export function detachReview(
   prUrl: string,
   argv: string[],
   spawnFn: typeof nodeSpawn = nodeSpawn,
   resolveAuthEnv?: (url: string) => Record<string, string>,
+  homeOverride?: string,
 ): DetachResult {
-  // Parse the URL first, in the foreground: a bad URL must fail the launch
-  // here — not hand back a run-id whose detached child dies on it minutes
-  // later. Then resolve auth, also foreground: the keyring-backed CLI
+  // Load the trusted config first — global only (`includeRepoConfig: false`), so a
+  // branch-authored .pr-review.yaml cannot remap a self-hosted host — because URL
+  // parsing needs its `hosts:` map. Then parse the URL, in the foreground: a bad URL
+  // must fail the launch here, not hand back a run-id whose detached child dies on
+  // it minutes later. Then resolve auth, also foreground: the keyring-backed CLI
   // fallbacks (`gh auth token`, `az account get-access-token`) can flake in a
-  // detached child. Both are ordered before the run-dir mint so a failed
-  // pre-flight leaves nothing behind.
-  const { provider, ref } = resolvePr(prUrl);
+  // detached child. All three run before the run-dir mint so a failed pre-flight
+  // leaves nothing behind.
+  const trustedConfig = loadConfig({ cwd: process.cwd(), homeOverride, includeRepoConfig: false }).config;
+  const { provider, ref } = resolvePr(prUrl, trustedConfig.hosts);
   const authEnv = resolveAuthEnv ? resolveAuthEnv(prUrl) : provider.authEnv(ref);
-  const outDir = ensureRunDir(ref);
+  const outDir = ensureRunDir(ref, homeOverride);
   const childArgs = argv.filter((a) => a !== '--detach').concat('--run-dir', outDir);
   const log = openSync(join(outDir, 'detached.log'), 'a');
   const cliPath = process.argv[1]!;

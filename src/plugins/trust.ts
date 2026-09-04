@@ -36,9 +36,9 @@ export function prAuthoredPath(changed: Set<string>, rel: string): boolean {
 }
 
 /**
- * A `SKILL.md` owns its directory: every pass is handed a `Source:` line and told
- * that relative `references/` links resolve from there, so the skill's sibling
- * files are reachable review input even though only `SKILL.md` loads as a skill.
+ * A `SKILL.md` owns its directory: its sibling files (`references/`, examples) are
+ * skill-shaped input the branch controls, reachable wherever a runtime can read them,
+ * even though only `SKILL.md` loads as a skill and no sibling is materialized.
  * Trusting the skill because `SKILL.md` itself is unchanged would let a PR ship
  * branch-authored instructions beside it. Flat `<dir>/<name>.md` rules share a
  * directory with unrelated rules, so for those the file stays the unit.

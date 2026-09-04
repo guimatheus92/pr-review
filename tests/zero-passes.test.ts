@@ -182,6 +182,26 @@ test('docs-only PR where triage removes every pass — benign exit 0 with an exp
   }
 });
 
+test('docs-only PR with an initially empty selection — exit 2 rather than a benign triage result', async () => {
+  const s = setup(['README.md']);
+  try {
+    const result = await runReview({
+      ...BASE,
+      homeOverride: s.home,
+      runDir: s.runDir,
+      fromGather: s.gatherFile,
+      provider: fakeProvider(),
+      selectPassesFn: () => emptySelection(),
+    });
+    assert.equal(result.exitCode, 2);
+    assert.match(result.summary, /nothing to review with — no skills matched/);
+    assert.ok(existsSync(join(s.runDir, 'error.txt')));
+    assert.ok(!existsSync(join(s.runDir, 'pr-review-summary.md')));
+  } finally {
+    s.restore();
+  }
+});
+
 test('--from-gather without --dry-run throws before any work', async () => {
   const s = setup(['lib/app.ex']);
   try {
@@ -455,6 +475,54 @@ test('runReview — a changed .pr-review.yaml cannot force rules or exclusions i
     assert.ok(!selectedSkills.includes('malicious'));
     const companions = JSON.parse(readFileSync(join(runDir, 'companions.json'), 'utf8')) as { enabled: boolean };
     assert.equal(companions.enabled, true, 'trusted global config remains active');
+    assert.match(result.summary, /checkout-local configuration ignored as untrusted/);
+  } finally {
+    process.chdir(previous);
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+    rmSync(runDir, { recursive: true, force: true });
+  }
+});
+
+test('runReview — gather receives the provider resolved from trusted config, not a branch host remap', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'pr-trusted-provider-cwd-'));
+  const home = mkdtempSync(join(tmpdir(), 'pr-trusted-provider-home-'));
+  const runDir = mkdtempSync(join(tmpdir(), 'pr-trusted-provider-run-'));
+  const previous = process.cwd();
+  const prUrl = 'https://github.corp.example/pr-review/eval/pull/1';
+  try {
+    mkdirSync(join(home, '.pr-review'), { recursive: true });
+    writeFileSync(
+      join(home, '.pr-review', 'config.yaml'),
+      'skill_packs: []\ninvoke_codex: false\ninvoke_companions: false\ncompanion_warn: false\nhosts:\n  github.corp.example: github\n',
+    );
+    writeFileSync(
+      join(cwd, '.pr-review.yaml'),
+      'hosts:\n  github.corp.example: gitlab\n',
+    );
+    process.chdir(cwd);
+    let gatherProviderName: string | undefined;
+    const result = await runReview({
+      ...BASE,
+      prUrl,
+      homeOverride: home,
+      contextOnly: true,
+      runDir,
+      runGatherFn: async (opts) => {
+        assert.ok(opts.provider, 'gather must receive the provider resolved from trusted config');
+        gatherProviderName = opts.provider.name;
+        const gather = gatherFixture(['.pr-review.yaml', 'src/app.ts']);
+        gather.pr = opts.provider!.parseUrl(opts.prUrl)!;
+        return gather;
+      },
+      selectPassesFn: () => ({
+        passes: [{ name: 'trusted/pass', source: '/trusted.md', body: 'trusted', matchedBy: 'baseline', matchedOn: [] }],
+        projectSkills: [], indexEntries: [], stackTags: [],
+        routes: [{ name: 'trusted/pass', source: '/trusted.md', matchedBy: 'baseline' }], missingBaseline: [],
+      }),
+    });
+    assert.equal(result.exitCode, 0);
+    assert.equal(gatherProviderName, 'github');
     assert.match(result.summary, /checkout-local configuration ignored as untrusted/);
   } finally {
     process.chdir(previous);

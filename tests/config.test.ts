@@ -81,7 +81,9 @@ test('loadConfig — hosts: keys are lowercased (detectProvider looks up lowerca
   const tmp = mkdtempSync(join(tmpdir(), 'pr-review-cfg-'));
   const home = mkdtempSync(join(tmpdir(), 'pr-review-home-'));
   try {
-    writeFileSync(join(tmp, '.pr-review.yaml'), 'hosts:\n  GitHub.Corp.COM: github\n  tfs.corp.com: azuredevops\n  bad.com: bitbucket\n');
+    // hosts: is honoured from the global config only (a checkout-local map is stripped at load), so the fixture lives there.
+    mkdirSync(join(home, '.pr-review'), { recursive: true });
+    writeFileSync(join(home, '.pr-review', 'config.yaml'), 'hosts:\n  GitHub.Corp.COM: github\n  tfs.corp.com: azuredevops\n  bad.com: bitbucket\n');
     const { config } = loadConfig({ cwd: tmp, homeOverride: home });
     assert.equal(config.hosts['github.corp.com'], 'github', 'mixed-case yaml key normalized to lowercase');
     assert.equal(config.hosts['GitHub.Corp.COM'], undefined, 'raw mixed-case key is not kept');
@@ -309,6 +311,24 @@ test('skill_packs — duplicate pack names: first wins with a warning (no shared
     assert.ok(lines.some((l) => l.includes("duplicate skill pack name 'skills'")));
   } finally {
     (process.stderr as unknown as { write: typeof orig }).write = orig;
+    rmSync(tmp, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('loadConfig — a checkout-local hosts: map never merges, with or without repo config', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'pr-review-cfg-hosts-'));
+  const home = mkdtempSync(join(tmpdir(), 'pr-review-home-hosts-'));
+  try {
+    mkdirSync(join(home, '.pr-review'), { recursive: true });
+    writeFileSync(join(home, '.pr-review', 'config.yaml'), 'hosts:\n  global.example: github\n');
+    writeFileSync(join(tmp, '.pr-review.yaml'), 'language: pt-BR\nhosts:\n  global.example: gitlab\n  repo-only.example: gitlab\n');
+    const merged = loadConfig({ cwd: tmp, repoRoot: tmp, homeOverride: home }).config;
+    assert.equal(merged.language, 'pt-BR', 'other repo keys still merge');
+    assert.deepEqual(merged.hosts, { 'global.example': 'github' }, 'repo hosts neither add nor override');
+    const trusted = loadConfig({ cwd: tmp, repoRoot: tmp, homeOverride: home, includeRepoConfig: false }).config;
+    assert.deepEqual(trusted.hosts, { 'global.example': 'github' });
+  } finally {
     rmSync(tmp, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   }

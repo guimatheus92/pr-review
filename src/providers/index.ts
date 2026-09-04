@@ -28,7 +28,8 @@ function shapesHelp(names: Provider[] = Object.keys(URL_SHAPES) as Provider[]): 
 
 function hostsTip(hostname: string): string {
   return [
-    'For a self-hosted server, map the host in ~/.pr-review/config.yaml or .pr-review.yaml:',
+    'For a self-hosted server, map the host in the global config ~/.pr-review/config.yaml',
+    '(a hosts: map in a checkout-local .pr-review.yaml is ignored — it decides where a credential is sent):',
     '  hosts:',
     `    ${hostname}: github   # or: azuredevops | gitlab`,
   ].join('\n');
@@ -63,7 +64,9 @@ export function detectProvider(url: string, hosts?: Record<string, Provider>): P
   if (host === 'github.com' || host === 'www.github.com') return makeProvider('github');
   if (host === 'dev.azure.com' || host.endsWith('.visualstudio.com')) return makeProvider('azuredevops');
   if (host === 'gitlab.com' || host === 'www.gitlab.com') return makeProvider('gitlab');
-  const mapped = (hosts ?? loadConfig().config.hosts)[host];
+  // Trusted default: a checkout-local .pr-review.yaml decides nothing about where a
+  // credential is sent, so the fallback never reads it — global config and env only.
+  const mapped = (hosts ?? loadConfig({ includeRepoConfig: false }).config.hosts)[host];
   if (mapped) return makeProvider(mapped);
   throw new Error(`Unrecognized PR URL: ${url}\nExpected one of:\n${shapesHelp()}\n${hostsTip(host)}`);
 }

@@ -54,12 +54,12 @@ export function controlDirForRun(runDir: string, home = homedir()): string {
  */
 export const ERROR_FILE = 'error.txt';
 
-export function ensureRunDir(ref?: Pick<PrRef, 'provider' | 'owner' | 'repo' | 'number'>): string {
+export function ensureRunDir(ref?: Pick<PrRef, 'provider' | 'owner' | 'repo' | 'number'>, home?: string): string {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const id = ref
     ? `${ref.provider}__${safeOwner(ref)}__${safeSegment(ref.repo)}__${ref.number}__${stamp}`
     : `adhoc__${stamp}`;
-  const outDir = join(RUNS_ROOT, id);
+  const outDir = join(home ? join(home, '.pr-review', 'runs') : RUNS_ROOT, id);
   mkdirSync(outDir, { recursive: true });
   return outDir;
 }

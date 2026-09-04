@@ -1,4 +1,6 @@
 import { test } from 'node:test';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { strict as assert } from 'node:assert';
 import { join } from 'node:path';
 import { detectProvider, resolvePr } from '../src/providers/index.js';
@@ -289,4 +291,34 @@ test('cache paths — GitHub stays stable while ADO is isolated by project', () 
     true,
     'canonical and legacy ADO cloud forms share one authority',
   );
+});
+
+test('detectProvider — the fallback host map reads the global config, never a checkout-local .pr-review.yaml', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'pr-hosts-sink-'));
+  const home = mkdtempSync(join(tmpdir(), 'pr-hosts-sink-home-'));
+  const previous = { cwd: process.cwd(), USERPROFILE: process.env.USERPROFILE, HOME: process.env.HOME };
+  const url = 'https://trusted-sink.example/g/p/-/merge_requests/1';
+  try {
+    writeFileSync(join(cwd, '.pr-review.yaml'), 'hosts:\n  trusted-sink.example: gitlab\n');
+    process.chdir(cwd);
+    // loadConfig resolves homedir() per call, and homedir() follows USERPROFILE/HOME —
+    // so the fallback reads a home this test owns, never the developer's.
+    process.env.USERPROFILE = home;
+    process.env.HOME = home;
+    let err: unknown;
+    try { detectProvider(url); } catch (e) { err = e; }
+    assert.ok(err instanceof Error, 'repo-level hosts must not map an unknown host');
+    assert.match(err.message, /Unrecognized PR URL/);
+    assert.match(err.message, /map the host in the global config ~\/\.pr-review\/config\.yaml/);
+    assert.doesNotMatch(err.message, /or \.pr-review\.yaml/, 'the tip must name the global file only');
+    mkdirSync(join(home, '.pr-review'), { recursive: true });
+    writeFileSync(join(home, '.pr-review', 'config.yaml'), 'hosts:\n  trusted-sink.example: gitlab\n');
+    assert.equal(detectProvider(url).name, 'gitlab', 'the global map is honoured through the fallback');
+  } finally {
+    process.chdir(previous.cwd);
+    if (previous.USERPROFILE === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = previous.USERPROFILE;
+    if (previous.HOME === undefined) delete process.env.HOME; else process.env.HOME = previous.HOME;
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
 });

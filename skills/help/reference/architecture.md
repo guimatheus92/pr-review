@@ -6,6 +6,8 @@ description: "pr-review architecture: execution model, source map, and design de
 
 ## Execution model
 
+The ordered pipeline, as the Node CLI runs it (the README's [How it works](../../../README.md#how-it-works) diagram is this same sequence, drawn):
+
 ```
 User: /pr-review <pr-url>
        │
@@ -34,13 +36,17 @@ Node CLI (deterministic plumbing)
  16. exit code                  → 0 complete, 1 findings ≥ --fail-on, 2 incomplete/operational failure
 ```
 
+The sections below define its delivery, trust, and recovery guarantees.
+
 A single agent session (Copilot CLI or Claude Code, selected by `--runtime` / `runtime:` / `PR_REVIEW_RUNTIME`, default `auto`) dispatches every Phase 1 pass and companion through `task` / `Task`. Every call has a deterministic `description` and an attempt-scoped output path. The orchestrator is dispatch-only: it cannot create Phase 1, decide the verifier, or write consolidated findings. Node validates exact `Finding[]`, promotes write-once canonical sidecars, preserves valid work, and dispatches only the unresolved delta in one automatic recovery session. A schema-v1 `--resume` gets the bounded final targeted attempt under one per-run lease that remains held through finalization.
+
+Every pass reads its own `pass-<name>.md`. When pass selection leaves shared project context, `skills-project.md` carries it to every pass, Codex, direct companion agent, and the verifier. This is normally every matched project rule; in the no-pack fallback, up to ten project rules become the passes and only overflow remains shared context. When no shared project context remains, `skills-all.md` is a budgeted union of selected pass bodies used as the Codex/direct-companion/verifier fallback. The `code-review` slash companion receives the PR URL through its command instead of either shared skills file. The on-demand index remains available separately to each pass.
 
 **Untrusted input.** Anything the branch under review authored cannot instruct its own review: a rule file the PR added or modified is dropped from both the authoritative context and the on-demand index (and named as degraded coverage), a changed `.pr-review.yaml` is ignored in favour of the trusted config, and changed repository MCP configuration is refused. `--force-skill` is the explicit per-file override; directory-level forced sources (`--skills-dir`, `extra_skills_dirs`, `PR_REVIEW_SKILLS_DIR`) bypass it too.
 
-Node assembles Phase 1 in plan order only at complete delivery. HIGH/CRITICAL findings trigger a separate direct verifier runtime that reads the digest-bound Phase 1 file; otherwise state records `skipped-no-severe`. Only after required verifier and optional Codex coverage are valid does Node assemble `single-session-findings.json` and call dedupe/post. Runtime exit 0 alone is never completion, and partial findings never post.
+Node assembles Phase 1 in plan order only at complete Phase 1 delivery. HIGH/CRITICAL findings trigger a separate direct verifier runtime that reads the digest-bound Phase 1 file; otherwise state records `skipped-no-severe`. Node then assembles `single-session-findings.json` from Phase 1 plus any verifier output. Codex remains a separate reviewer output; only after the primary consolidation and enabled Codex coverage are valid does `runReview` call dedupe/post. Runtime exit 0 alone is never completion, and partial findings never post.
 
-`dispatch-plan.json` and `delivery-state.json` in the run dir are diagnostic mirrors. Recovery authority lives under `~/.pr-review/control/<run-id>-<path-hash>/` in HMAC-authenticated envelopes; its key never enters prompts or runtime directories. State binds PR identity/head/base/branches, redacted effective config, bundle/input hashes, execution mode, attempts, canonical reviewer digests, verifier/Codex state, and posting outcome. Runtime sessions receive only materialized run artifacts; large on-demand catalogs split into digest-bound index shards, with every body materialized locally and original-source provenance retained. Shell, web posting, and ambient/built-in MCP tools are unavailable, and checkout instructions are not auto-loaded; read-only file access is deliberately kept, so a pass can still open the code around the diff. Only a complete schema-v1 dry run may be promoted to publishing on resume; an incomplete one is refused, as is any publish-to-dry-run demotion. Previews and no-dispatch runs do not mint recovery authority.
+`dispatch-plan.json` and `delivery-state.json` in the run dir are diagnostic mirrors. Recovery authority lives under `~/.pr-review/control/<run-id>-<path-hash>/` in HMAC-authenticated envelopes; its key never enters prompts or runtime directories. State binds PR identity/head/base/branches, redacted effective config, bundle/input hashes, execution mode, attempts, canonical reviewer digests, verifier/Codex state, and posting outcome. Planned reviewer and verifier sessions are spawned with only the materialized run directory as `--add-dir` — `tests/single-session-retry.test.ts` pins that the checkout root is not added; large on-demand catalogs split into digest-bound index shards, with every body materialized locally and original-source provenance retained. Shell, web posting, ambient/built-in MCP tools, and checkout instructions are unavailable to those sessions, and a skill's sibling files are not materialized. Read-only access to the materialized context and diff is deliberately kept. Only a complete schema-v1 dry run may be promoted to publishing on resume; an incomplete one is refused, as is any publish-to-dry-run demotion. Previews and no-dispatch runs do not mint recovery authority.
 
 When the `codex` CLI is installed, its read-only sibling runs in parallel and writes `codex-attempts/attempt-N.json`. Only exact top-level `Finding[]` JSON is valid. The attempt is reserved in authenticated state before launch, so a crash consumes the slot and a completed attempt can be adopted without rerunning. A failed attempt writes `codex-failure.log` and keeps delivery incomplete rather than disappearing from recovery.
 
@@ -69,7 +75,7 @@ src/
 │   └── config.ts            # `config show`
 ├── providers/
 │   ├── types.ts             # PrProvider interface
-│   ├── github.ts            # @octokit/rest, batched review posting + per-comment retry (inline only — no issue-comment fallback)
+│   ├── github.ts            # @octokit/rest, single-attempt inline review writes (post.ts owns reconciliation/retry; no issue-comment fallback)
 │   ├── azuredevops.ts       # azure-devops-node-api, LCS diff synthesis (per-run PR/git API cache)
 │   ├── gitlab.ts            # plain fetch, per-discussion posting
 │   ├── identity.ts          # canonicalPrAuthority: legacy visualstudio.com / encoded HTTPS / ssh.dev.azure.com remotes → one authority (incl. ADO project)

@@ -62,9 +62,8 @@ test('partitionTrustedProjectSkills — a repo rule resolving outside the checko
 test('partitionTrustedProjectSkills — a SKILL.md is untrusted when the PR changed a file beside it', () => {
   // Live regression (Preco-Pratico/PrecoPratico-Docs#269): the PR changed
   // `.claude/skills/backend-guide/create-database.md` and left SKILL.md alone.
-  // Only SKILL.md loads as a skill, but every pass is handed a `Source:` line
-  // saying relative references resolve from its directory — so the branch-authored
-  // sibling was reachable review input while the rule still injected as authoritative.
+  // The skill directory is the trust unit: changing branch-authored content
+  // beside SKILL.md makes that owning skill untrusted even though only SKILL.md loads.
   const cwd = mkdtempSync(join(tmpdir(), 'pr-review-trust-dir-'));
   try {
     const guide = join(cwd, '.claude', 'skills', 'backend-guide');

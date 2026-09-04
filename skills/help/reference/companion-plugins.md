@@ -33,11 +33,11 @@ Detection depends on the runtime: for the copilot runtime, `pr-review` queries `
 /code-review:code-review https://dev.azure.com/.../pullrequest/12345
 ```
 
-Each companion reviewer is dispatched via `task()` / `Task()` inside the same single review session as the review passes. The findings come back as JSON (the dispatch prompt asks for the standard finding shape; the markdown parser is the fallback) and flow through dedupe and posting like any other reviewer.
+Each companion reviewer is dispatched via `task()` / `Task()` inside the same single review session as the review passes. Every task must write an exact top-level `Finding[]` JSON array to its attempt path; malformed or prose output is invalid delivery. Valid findings flow through Node-owned aggregation, dedupe, and posting like any other reviewer.
 
 **Companions run analysis-only.** Some companion commands are written to post their verdict straight to the PR (the official `code-review` command allows `gh pr comment` and posts a top-level "### Code review" summary on its own). pr-review's dispatch prompt explicitly forbids that: the subagent must skip any post-a-comment step in the companion's instructions and return the review as output instead — the CLI is the only thing that ever writes to the PR (inline-only, deduped, idempotent). If you ever see a top-level summary comment appear during a review, a dispatch path lost this directive — it's pinned by a session-context test.
 
-Skill routing note: companion agents receive `skills-all.md` — the union of every review pass's skill body — as reference context alongside the PR context. They keep their own review criteria; the union file is background, not a mandate.
+Skill routing note: pr-review-toolkit's six direct agents receive the authoritative shared file selected after pass routing: `skills-project.md` when project context remains, or the budgeted `skills-all.md` pass union as fallback. The `code-review` slash companion receives the PR URL through its command and does not receive either shared skills file. The direct-agent prompt treats the shared file as authoritative.
 
 pr-review-toolkit’s six agents each get their own summary row (`companion:pr-review-toolkit/<agent>`); the `code-review` slash companion is one row. `companions.json` records all installed plugins, recognized companion plugins, missing companions, planned dispatches, and completed output rows. A context-only preview has planned dispatches but zero completed dispatches:
 
@@ -51,13 +51,13 @@ pr-review-toolkit’s six agents each get their own summary row (`companion:pr-r
 
 ## Why companions are slow
 
-Each companion plugin's slash command kicks off the plugin's internal orchestrator, which dispatches its own sub-agents inside the review session. pr-review-toolkit runs six agents; code-review runs five. Wall-clock time per companion is typically 5–15 minutes.
+pr-review-toolkit contributes six direct agent tasks to the main session. `code-review` contributes one slash-command task, whose command runs its own multi-agent review. Their wall-clock work overlaps with the selected review passes, but either companion can become the slowest task in the shared session.
 
 There is no per-pass timeout: everything dispatched inside one session shares its 30-minute process timeout. Node independently accounts for each companion attempt; absent/invalid companions are selectively retried and never interpreted as clean empty output.
 
 ## Cost note
 
-Companion plugins roughly **2-3x review cost** because each one runs its entire internal orchestrator inside the review session, spinning up Anthropic's internal agents on top. With pr-review-toolkit + code-review + the codex second-opinion reviewer all present, a run can total up to 24 reviewers (up to 15 review passes — 6 stack + 2 installed-plugin + the 7 default baselines — plus verifier + 7 companion agents + codex). If review cost matters and the review passes are sufficient, opt out:
+Enabling both companion plugins adds seven planned Phase 1 dispatches: six direct pr-review-toolkit agents and one `code-review` slash-command task. Codex is a separate optional sibling and the verifier is conditional; the total review cost depends on the selected stack/plugin passes and every configured baseline. If that additional coverage is not worth the cost, opt out:
 
 ```bash
 pr-review review <url> --no-companions
@@ -89,6 +89,6 @@ pr-review review <url> --no-companions --dry-run   # review passes only
 
 ## When a companion fails
 
-If a companion plugin throws or times out, its row in the summary will show `✗ <error>`. The CLI continues with the review passes — companion failures don't abort the run.
+If a companion task fails, peer tasks can still finish and valid outputs are preserved. Node retries unresolved planned companions with the rest of the incomplete Phase 1 delta; if any remain missing or invalid, the review exits 2 and posts nothing.
 
 There is no per-companion skip (`--skip` takes pass names, plus `verifier` and `codex`); to turn companions off, use `--no-companions` or `invoke_companions: false`.

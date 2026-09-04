@@ -39,7 +39,7 @@ invoke_codex: true               # Codex second-opinion reviewer (auto-skipped i
 companion_warn: true
 dedupe:
   mode: strict                   # strict | loose | off
-hosts:                           # self-hosted hostname → provider (github | azuredevops | gitlab)
+hosts:                           # self-hosted hostname → provider (github | azuredevops | gitlab); global file only — a checkout-local map is ignored
   github.mycorp.com: github
   tfs.corp.com: azuredevops
 ```

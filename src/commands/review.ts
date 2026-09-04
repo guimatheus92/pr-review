@@ -88,6 +88,8 @@ interface ReviewCmdOptions {
   provider?: PrProvider;
   /** Eval hook: read the gather JSON from this file instead of the provider APIs. Requires --dry-run. */
   fromGather?: string;
+  /** Test seam — preserves the production gather contract without provider API calls. */
+  runGatherFn?: typeof runGather;
   /** Test seam — replaces the pass-selection step. */
   selectPassesFn?: typeof selectPasses;
   /** Test seams — replace external companion discovery/session execution. */
@@ -1047,11 +1049,11 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
 
   let gather = opts.fromGather
     ? (JSON.parse(readFileSync(opts.fromGather, 'utf8')) as GatherOutput)
-    : await runGather({
+    : await (opts.runGatherFn ?? runGather)({
         prUrl: opts.prUrl,
         useCache: opts.useCache,
         extraExcludes: trustedConfig.diffExcludes,
-        provider: opts.provider,
+        provider,
       });
   const repoConfigChanged = gatherChangesRepoConfig(gather);
   const config = repoConfigChanged
@@ -1065,7 +1067,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   // CLI --skip replaces the config list for the run (same rule the session uses).
   const effectiveSkip = opts.skip?.length ? opts.skip : config.skipReviewers;
 
-  // Packs + Linguist resolve alongside gather/companion detection. Review-time is
+  // Packs + Linguist resolve after gather (alongside companion and Codex detection). Review-time is
   // clone-if-missing ONLY (`packs sync` is the explicit update path); every
   // failure is a warning — a review runs with whatever is on disk.
   const packsPromise = Promise.resolve().then(() => ensurePacks(config.skillPacks, { home: opts.homeOverride }));

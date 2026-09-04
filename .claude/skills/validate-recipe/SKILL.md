@@ -23,6 +23,12 @@ TypeScript CLI (Node >= 20), esbuild single-file bundle at dist/cli.cjs; tests v
 - Live smokes (gated on credentials — gh/az): `--context-only` against 1 real GitHub PR and 1 real ADO PR — must exit 0, `## Stack` plausible for the diff, `## Passes` non-empty with the expected glob hits.
 - Real (dispatching) reviews need provider auth AND a runtime on PATH — treat as not locally verifiable unless both exist.
 
+## Docs / README changes
+- Anchors: `gh api "repos/guimatheus92/pr-review/readme?ref=<branch>" -H "Accept: application/vnd.github.html" | grep -o 'id="user-content-[^"]*"'` lists the ids GitHub actually generates; diff against `grep -o '](#[^)]*)' README.md`.
+- Badges: `curl -s https://img.shields.io/<path> | grep -o '<title>[^<]*</title>'` — the title is the rendered text (`CI: passing`, `release: v0.10.0`).
+- Render: Playwright MCP on `https://github.com/<owner>/<repo>/blob/<branch>/README.md` (add `#<anchor>` to land on a section). It blocks `file:` URLs — serve local previews with a one-line node http server. Screenshots may only be written under `<repo>/.playwright-mcp/`; move them to the scratchpad and `rm -rf .playwright-mcp` before committing. GitHub serves a cached blob for a minute after a push — load `blob/<sha>/README.md` to see the new commit.
+- Mermaid: GitHub strips HTML entities in labels; write `#lt;`/`#gt;` for angle brackets.
+
 ## Gotchas
 - Provider tests are pure-logic; nothing in tests/ hits the network.
 - Pre-fix regression worktrees need node_modules — junction the repo's own, but use PowerShell `New-Item -ItemType Junction -Path <wt>
@@ -32,4 +38,4 @@ ode_modules).Delete()` before `git worktree remove`, or the junction takes the r
 - Exit codes: pipe the CLI to `head` and you capture `head`'s status, not the CLI's. Run it bare with `>/dev/null 2>&1; echo $?` when the code is the evidence.
 - Posting behaviour is best proven with a small `tsx` script driving `runPost` against a stateful fake provider that records writes AND throws — a test that only asserts counts cannot show duplication. Copy it into a base worktree to get the before/after comment counts.
 
-Last verified: 2026-08-26 (branch feat/routing-trust-and-delivery)
+Last verified: 2026-09-04 (branch docs/brandkit-readme, f67d60e)

@@ -69,12 +69,20 @@ function parseDoc(): DocEntry[] {
   return entries;
 }
 
-const entries = parseDoc();
+// Parsed lazily: at import time a missing INVARIANTS.md would throw before any
+// test ran, and the "must exist" assertion below would never be the thing that
+// reported it.
+let cached: DocEntry[] | null = null;
+function doc(): DocEntry[] {
+  if (!cached) cached = parseDoc();
+  return cached;
+}
 
 test('INVARIANTS.md — parses into well-formed entries', () => {
   assert.ok(existsSync(DOC), 'INVARIANTS.md must exist at the repo root');
+  const entries = doc();
   assert.ok(entries.length > 0, 'no invariant blocks parsed — the heading format changed');
-  for (const entry of entries) {
+  for (const entry of doc()) {
     assert.ok(entry.check !== '', `${entry.id} has no **Check:** field`);
     assert.ok(
       entry.id.startsWith(`INV-${entry.area}-`),
@@ -86,7 +94,7 @@ test('INVARIANTS.md — parses into well-formed entries', () => {
 });
 
 test('INVARIANTS.md — the doc and the check registry hold the same ID set, both ways', () => {
-  const docIds = entries.map((e) => e.id).sort();
+  const docIds = doc().map((e) => e.id).sort();
   const registryIds = [...CHECKS.map((c) => c.id), ...Object.keys(TEST_ONLY)].sort();
   assert.deepEqual(
     docIds,
@@ -99,7 +107,7 @@ test('INVARIANTS.md — the doc and the check registry hold the same ID set, bot
 
 test('INVARIANTS.md — the Check class matches where the ID is registered', () => {
   const byId = new Map(CHECKS.map((c) => [c.id, c]));
-  for (const entry of entries) {
+  for (const entry of doc()) {
     if (entry.check === 'tests-only' || entry.check === 'human') {
       assert.ok(
         TEST_ONLY[entry.id],
@@ -120,7 +128,7 @@ test('INVARIANTS.md — the Check class matches where the ID is registered', () 
 });
 
 test('INVARIANTS.md — every cited source and test path exists', () => {
-  for (const entry of entries) {
+  for (const entry of doc()) {
     for (const path of [...entry.enforced, ...entry.verified]) {
       assert.ok(
         existsSync(join(REPO_ROOT, path)),
@@ -131,7 +139,7 @@ test('INVARIANTS.md — every cited source and test path exists', () => {
 });
 
 test('INVARIANTS.md — every entry names both where it is enforced and what verifies it', () => {
-  for (const entry of entries) {
+  for (const entry of doc()) {
     assert.ok(entry.enforced.length > 0, `${entry.id} names no enforcing source file`);
     assert.ok(entry.verified.length > 0, `${entry.id} names no verifying test`);
   }

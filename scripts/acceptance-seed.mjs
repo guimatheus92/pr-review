@@ -30,14 +30,29 @@ const argv = process.argv.slice(2);
 const dryRun = argv.includes('--dry-run');
 const only = (() => {
   const i = argv.indexOf('--provider');
-  return i === -1 ? PROVIDERS : argv[i + 1].split(',').map((s) => s.trim());
+  if (i === -1) return PROVIDERS;
+  const value = argv[i + 1];
+  if (value === undefined || value.startsWith('--')) {
+    console.error('--provider needs a value, e.g. --provider gitlab');
+    process.exit(2);
+  }
+  return value.split(',').map((s) => s.trim()).filter(Boolean);
 })();
 
-/** Never let a token reach stdout, stderr, or an exception message. */
+/**
+ * Never let a token reach stdout, stderr, or an exception message.
+ *
+ * Masks the percent-encoded form as well as the raw one: the push URL carries
+ * the credential encoded, so masking only the raw token would leave the exact
+ * string an error message actually prints.
+ */
 function mask(text, ...secrets) {
   let out = String(text);
   for (const secret of secrets) {
-    if (secret) out = out.split(secret).join('***');
+    if (!secret) continue;
+    for (const form of new Set([secret, encodeURIComponent(secret)])) {
+      out = out.split(form).join('***');
+    }
   }
   return out;
 }
@@ -171,12 +186,15 @@ async function seedProvider(provider, matrix) {
 
   try {
     git(['init', '-q', '-b', 'main'], work, secrets);
-    git(['remote', 'add', 'origin', remote], work, secrets);
+    // The credentialed URL is passed to each push, never stored as a remote:
+    // `git remote add` writes it into .git/config, so the PAT would sit in
+    // plaintext on disk for the life of the working copy.
+    const push = (...refs) => git(['push', '--force', remote, ...refs], work, secrets);
 
     // main: the base tree.
     copyTree(join(ACCEPTANCE, 'repo'), work);
     commitTree(work, 'chore: acceptance fixture base', secrets);
-    if (!dryRun) git(['push', '--force', 'origin', 'main'], work, secrets);
+    if (!dryRun) push('main');
 
     const urls = {};
     for (const [runtime, branch] of Object.entries(matrix.branches)) {
@@ -185,7 +203,7 @@ async function seedProvider(provider, matrix) {
       copyTree(join(ACCEPTANCE, 'defects'), work);
       commitTree(work, 'feat: add user lookup and the nightly report job', secrets);
       if (!dryRun) {
-        git(['push', '--force', 'origin', branch], work, secrets);
+        push(branch);
         urls[runtime] = await ensurePr(provider, cfg, token, branch, `Acceptance: user lookup + nightly report (${runtime})`);
         console.log(`  ${provider}/${runtime}: ${urls[runtime]}`);
       }
@@ -206,7 +224,7 @@ async function seedProvider(provider, matrix) {
       }
       commitTree(work, `chore: ${WIDE_FILES} files to exceed the diff cap`, secrets);
       if (!dryRun) {
-        git(['push', '--force', 'origin', branch], work, secrets);
+        push(branch);
         wide = await ensurePr(provider, cfg, token, branch, `Acceptance: ${WIDE_FILES}-file change (file-list gate)`);
         console.log(`  ${provider}/wide: ${wide}`);
       }

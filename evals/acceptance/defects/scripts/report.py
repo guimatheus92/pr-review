@@ -5,10 +5,7 @@ import sys
 
 
 def export_report(customer: str) -> str:
-    """Export one customer's rows.
-
-    Planted defect: the customer name reaches a shell command unquoted.
-    """
+    """Export one customer's orders to a CSV on disk."""
     sql = f"SELECT * FROM orders WHERE customer = '{customer}'"
     result = subprocess.run(
         f"psql -tAc \"{sql}\" > /tmp/report.csv", shell=True, capture_output=True, text=True

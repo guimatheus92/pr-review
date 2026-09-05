@@ -32,6 +32,12 @@ untrusted input and gets dropped from the review (INV-TRUST-01) — so a PR that
 edited its own skill would silently disarm the strongest assertion in the suite.
 That is why `defects/` contains no `.claude/` path.
 
+**The defect files must never describe their own defects.** No comment may say
+"planted defect", name the vulnerability, or mention `ACC-LOG-002`. A reviewer
+that can read the answer out of the diff satisfies `must_find` without applying
+any knowledge at all, and the suite goes green while proving nothing. The
+defects are ordinary-looking code; what they are is documented *here* instead.
+
 ## One-time setup
 
 Only the account and repo creation is manual. Everything after is one command.

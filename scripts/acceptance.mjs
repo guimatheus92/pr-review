@@ -98,7 +98,13 @@ function checkoutFor(provider) {
     throw new Error(`evals/acceptance/matrix.yaml has no clone URL for ${provider} — run scripts/acceptance-seed.mjs`);
   }
   const dir = checkoutRoot ? join(checkoutRoot, provider) : mkdtempSync(join(tmpdir(), `acc-${provider}-`));
-  if (!existsSync(join(dir, '.git'))) {
+  if (existsSync(join(dir, '.git'))) {
+    // A reused --checkout is stale by construction: the seeder force-pushes the
+    // fixture branches, so a clone from a previous run would review last week's
+    // content while asserting against today's expected.yaml.
+    execFileSync('git', ['fetch', '--force', 'origin'], { cwd: dir, stdio: ['ignore', 'pipe', 'inherit'] });
+    execFileSync('git', ['reset', '--hard', 'origin/main'], { cwd: dir, stdio: ['ignore', 'pipe', 'inherit'] });
+  } else {
     mkdirSync(dir, { recursive: true });
     execFileSync('git', ['clone', '--no-single-branch', clone, dir], { stdio: ['ignore', 'pipe', 'inherit'] });
   }
@@ -202,7 +208,13 @@ async function runDefectsCell(provider, runtime) {
     posted = marker?.posted ?? 0;
     const pr = parsePrUrl(prUrl);
     const live = await listComments(pr, resolveToken(pr.provider, pr.host));
-    if (live.length < posted) failures.push(`${posted} comment(s) reported posted but only ${live.length} are on the PR`);
+    // Exact, not a lower bound. The cell reset the PR to zero comments before
+    // the run, so anything other than `posted` is either a lost write or a
+    // duplicate — and a lower bound passes the duplicate case, which is the
+    // failure the whole posting discipline exists to prevent.
+    if (live.length !== posted) {
+      failures.push(`${posted} comment(s) reported posted but ${live.length} are on the PR (reset left it empty, so the counts must match)`);
+    }
     const bodies = live.map((c) => c.body).join('\n---\n');
     const landed = (expected.must_find ?? []).some((p) => new RegExp(p, 'is').test(bodies));
     if (!landed) failures.push('no posted comment body matches any must_find pattern — findings were retained but not delivered');
@@ -327,21 +339,43 @@ const cliVersion = (() => {
   }
 })();
 
-writeFileSync(join(outDir, 'acceptance-report.json'), JSON.stringify({ startedAt, cliVersion, dryRun, results }, null, 2), 'utf8');
+writeFileSync(
+  join(outDir, 'acceptance-report.json'),
+  JSON.stringify({ startedAt, cliVersion, dryRun, requested: { providers: wantProviders, runtimes: wantRuntimes, cases: wantCases }, results }, null, 2),
+  'utf8',
+);
+
+// A cell that did not run is reported as a skipped ROW, never left out. The
+// docs promise the matrix is always the full 3x2 grid, and an omitted row reads
+// as coverage nobody had — which is the whole failure mode this suite exists to
+// make impossible.
+const notRun = [];
+for (const provider of PROVIDERS) {
+  for (const runtime of RUNTIMES) {
+    if (results.some((r) => r.provider === provider && r.runtime === runtime && r.case === 'defects')) continue;
+    const why = !wantProviders.includes(provider)
+      ? 'provider not requested'
+      : runtime === 'claude'
+        ? 'no Anthropic credential here by design — run `npm run acceptance -- --runtime claude` locally'
+        : 'runtime not requested';
+    notRun.push({ provider, runtime, case: 'defects', skipped: why });
+  }
+}
+
+const cell = (r) =>
+  r.skipped
+    ? `| ${r.provider} | ${r.runtime} | ${r.case} | ⏭️ skip | - | - | ${r.skipped} |`
+    : `| ${r.provider} | ${r.runtime} | ${r.case} | ${r.ok ? '✅ pass' : '❌ fail'} | ${r.findings ?? '-'} | ${r.posted ?? '-'} | ${
+        r.ok ? '' : r.failures.join('<br>').replace(/\|/g, '\\|')
+      } |`;
 
 const md = [
   `# Acceptance matrix — ${cliVersion}${dryRun ? ' (dry-run)' : ''}`,
   '',
   '| provider | runtime | case | result | findings | posted | detail |',
   '|---|---|---|---|---|---|---|',
-  ...results.map(
-    (r) =>
-      `| ${r.provider} | ${r.runtime} | ${r.case} | ${r.ok ? '✅ pass' : '❌ fail'} | ${r.findings ?? '-'} | ${r.posted ?? '-'} | ${
-        r.ok ? '' : r.failures.join('<br>').replace(/\|/g, '\\|')
-      } |`,
-  ),
+  ...[...results, ...notRun].map(cell),
   '',
-  ...(wantRuntimes.includes('claude') ? [] : ['> claude cells were not requested in this run.']),
 ].join('\n');
 writeFileSync(join(outDir, 'acceptance-report.md'), md + '\n', 'utf8');
 

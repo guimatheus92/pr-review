@@ -33,9 +33,11 @@ Run these in order. Do not skip a step because the previous one looked fine.
    ```bash
    node dist/cli.cjs verify --pr <pr-url>
    ```
-   Exit 0 = every invariant PASS or SKIP. Exit 2 = at least one FAIL, and a
-   FAIL is a product defect until proven otherwise. `--offline` skips the live
-   PR read (every row that needs it reports SKIP); `--json` for machine use.
+   Exit 0 = every invariant PASS or SKIP. **Exit 1 = the audit could not be
+   completed** (the PR read-back failed) — report that as "not verified", never
+   as "clean". Exit 2 = at least one FAIL, and a FAIL is a product defect until
+   proven otherwise. `--offline` skips the live PR read on purpose (every row
+   that needs it reports SKIP, and the exit stays 0); `--json` for machine use.
 
 4. **The matrix, only when asked for cross-provider or cross-runtime coverage.**
    ```bash

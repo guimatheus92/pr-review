@@ -32,7 +32,11 @@ Every invariant has a stable ID and five fields:
 - **`human`** — a judgment call no check can make. Printed as SKIP too.
 
 `verify` renders **one row per ID, always the full list**. A check that throws
-renders FAIL, never a missing row.
+renders FAIL, never a missing row. It exits `0` when every row passed or
+skipped, `1` when the audit itself could not be completed (an unresolvable run,
+or a live read-back failure that was not asked for with `--offline`), and `2`
+when an invariant FAILed. An audit that could not read the PR is incomplete,
+never clean — the same "unknown is not empty" rule INV-POST-04 lives by.
 
 ## The ID rule
 
@@ -266,14 +270,17 @@ nothing to specialize on. The note is what separates the two.
 
 ### INV-CTX-02 — Skills, plugins and MCP servers are always discovered and recorded
 
-**Always:** Every run records what it found: `capabilities.json` (installed
-plugins with their MCP servers, the discovered server inventory, warnings) and
-`passes.json` (every known skill and where it was routed — dispatched, context,
-index, or skipped). Finding nothing is a valid result. Not recording is not.
+**Always:** Every run records what it found: `capabilities.json` (the resolved
+runtime, installed plugins with their MCP servers, the discovered server
+inventory, warnings) and `passes.json` (every known skill and where it was
+routed — dispatched, context, index, or skipped). Finding nothing is a valid
+result. Not recording is not.
 
 **Why:** "Why didn't it apply my rule?" is unanswerable without the routing
 table, and an unrecorded capability inventory means a run cannot be audited
-after the fact for what it could have reached.
+after the fact for what it could have reached. The runtime is part of that:
+under `--runtime auto` no caller can tell from its own arguments which agent CLI
+hosted the session, so without the record nothing on disk can prove it.
 
 **Enforced:** `src/commands/review.ts`, `src/plugins/loader.ts`,
 `src/plugins/installed.ts`, `src/dispatch/pass-select.ts`

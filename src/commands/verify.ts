@@ -93,6 +93,8 @@ export interface VerifyContext {
   plan: DispatchPlan | null;
   state: DeliveryState | null;
   finalization: FinalizationRecord | null;
+  /** Set when a finalization record exists but failed authentication. */
+  finalizationError: string | null;
   marker: PostedMarker | 'corrupt' | null;
   findings: FindingsArtifact | null;
   stack: StackArtifact | null;
@@ -247,31 +249,34 @@ export const CHECKS: InvariantCheck[] = [
     needs: 'run+pr',
     run(ctx) {
       const topLevel = ctx.liveWindow!.filter((c) => !c.file);
-      if (ctx.selfAuthor) {
-        const ours = topLevel.filter((c) => c.author === ctx.selfAuthor);
-        return ours.length === 0
-          ? pass(
-              `0 top-level comments authored by ${ctx.selfAuthor} in the run window` +
-                (topLevel.length > 0 ? ` (${topLevel.length} by others, ignored)` : ''),
-            )
-          : fail(
-              `${ours.length} top-level comment(s) authored by ${ctx.selfAuthor}: ` +
-                sample(ours.map((c) => `${c.id} ${JSON.stringify(c.body.slice(0, 60))}`), 3),
-            );
-      }
-      // No confirmed write to derive our identity from (zero findings, or a
-      // dry-run). Fall back to a shape tripwire that can only FAIL, never
-      // PASS by accident: matching a finding body, or the literal shape of the
-      // companion verdict incident, is ours whoever the API says wrote it.
+
+      // The shape tripwire runs ALWAYS, not only when the identity is unknown.
+      // A dispatched agent authenticates with the runtime's own credential, so
+      // the very violation this invariant exists for — the companion posting a
+      // "### Code review" verdict — arrives under a DIFFERENT author than the
+      // CLI's. An author-scoped check alone would call that clean.
       const bodies = new Set((ctx.findings?.finalFindings ?? []).map((f) => f.body.trim()));
       const suspects = topLevel.filter(
         (c) => bodies.has(c.body.trim()) || /^\s*(#\s*PR Review Summary|###\s*Code review)\b/i.test(c.body),
       );
       if (suspects.length > 0) {
         return fail(
-          `${suspects.length} top-level comment(s) match this tool's output shape: ` +
+          `${suspects.length} top-level comment(s) carry this tool's output shape: ` +
             sample(suspects.map((c) => `${c.id} by ${c.author}`), 3),
         );
+      }
+
+      if (ctx.selfAuthor) {
+        const ours = topLevel.filter((c) => c.author === ctx.selfAuthor);
+        return ours.length === 0
+          ? pass(
+              `0 top-level comments authored by ${ctx.selfAuthor} in the run window` +
+                (topLevel.length > 0 ? ` (${topLevel.length} by others, shape-checked)` : ''),
+            )
+          : fail(
+              `${ours.length} top-level comment(s) authored by ${ctx.selfAuthor}: ` +
+                sample(ours.map((c) => `${c.id} ${JSON.stringify(c.body.slice(0, 60))}`), 3),
+            );
       }
       return skip(
         'no confirmed write from this run to derive the posting identity from; ' +
@@ -340,9 +345,17 @@ export const CHECKS: InvariantCheck[] = [
     needs: 'run+pr',
     run(ctx) {
       if (ctx.plan?.execution.dryRun) return skip('dry-run: nothing was attempted');
-      if (!ctx.marker) return skip('no publish attempt was recorded for this run');
+      const retainedCount = ctx.findings?.finalFindings?.length ?? 0;
+      if (!ctx.marker) {
+        // Every publish attempt writes the marker. Absent WITH findings to post
+        // means either the attempt was never recorded or the record was lost —
+        // the exact artifact state that let a duplicated post go unnoticed.
+        return ctx.plan?.execution.publish && retainedCount > 0
+          ? fail(`a publish run retained ${retainedCount} finding(s) but recorded no posting state`)
+          : skip('no publish attempt was recorded for this run');
+      }
       if (ctx.marker === 'corrupt') return fail('posted.marker is corrupt — the outcome of the publish attempt is unknown');
-      const retained = ctx.findings?.finalFindings?.length ?? 0;
+      const retained = retainedCount;
       if (ctx.marker.attempted !== retained) {
         return fail(`${retained} finding(s) retained but ${ctx.marker.attempted} attempted — the difference was neither posted nor reported`);
       }
@@ -390,20 +403,11 @@ export const CHECKS: InvariantCheck[] = [
       const withPatch = ctx.gather.changedFiles.filter((f) => !f.excluded && f.status !== 'deleted' && f.patch).length;
       if (withPatch === 0) return fail('no in-scope changed file carries a patch — passes would review paths without content');
       if (!Array.isArray(ctx.gather.existingComments)) return fail('pr-review-gather.json holds no existing-comment list');
-      // The real "reviewers lost context" failure: a comment that predates the
-      // gather and is absent from it was never shown to any pass.
-      const gatheredAt = Date.parse(ctx.gather.gatheredAt);
-      let missedPrior = 0;
-      if (ctx.liveAll && Number.isFinite(gatheredAt)) {
-        const known = new Set(ctx.gather.existingComments.map((c) => c.id));
-        missedPrior = ctx.liveAll.filter((c) => {
-          const at = Date.parse(c.createdAt);
-          return Number.isFinite(at) && at < gatheredAt && !known.has(c.id);
-        }).length;
-      }
-      if (missedPrior > 0) {
-        return fail(`${missedPrior} comment(s) older than the gather are absent from it — passes reviewed without that context`);
-      }
+      // Deliberately NOT checked here: "a comment older than the gather that
+      // the gather missed". The live read is scoped with `since` so the
+      // provider never returns those, and a clause that cannot fire is worse
+      // than no clause — it reads as coverage. Proving it would need a second,
+      // unscoped fetch of the PR's whole comment history on every audit.
       return pass(
         `title, author, base/head, state, ${withPatch} patch(es), ${ctx.gather.existingComments.length} prior comment(s)`,
       );
@@ -456,12 +460,15 @@ export const CHECKS: InvariantCheck[] = [
       const c = ctx.capabilities;
       const shaped = Array.isArray(c.installedPlugins) && Array.isArray(c.selectedPluginSkills) && Array.isArray(c.mcpServers) && Array.isArray(c.warnings);
       if (!shaped) return fail('capabilities.json is malformed (installedPlugins/selectedPluginSkills/mcpServers/warnings must all be arrays)');
+      if (!c.runtime) {
+        return fail('capabilities.json records no runtime — nothing on disk says which agent CLI hosted the session');
+      }
       if (!ctx.routes) return fail('passes.json is missing or malformed — the run has no record of how skills were routed');
       if (ctx.routes.length === 0) return fail('passes.json is empty — no skill was even considered');
       const by = (kind: string) => ctx.routes!.filter((r) => r.matchedBy === kind).length;
       const dispatched = ctx.routes.filter((r) => !['context', 'index', 'skipped'].includes(r.matchedBy)).length;
       return pass(
-        `${(c.installedPlugins as unknown[]).length} plugin(s), ${c.mcpServers!.length} MCP server(s), ` +
+        `runtime ${c.runtime}, ${(c.installedPlugins as unknown[]).length} plugin(s), ${c.mcpServers!.length} MCP server(s), ` +
           `${ctx.routes.length} skill(s) routed (${dispatched} dispatched / ${by('context')} context / ${by('index')} index / ${by('skipped')} skipped)`,
       );
     },
@@ -470,7 +477,11 @@ export const CHECKS: InvariantCheck[] = [
     id: 'INV-CTX-03',
     needs: 'run',
     run(ctx) {
-      const dispatched = (ctx.routes ?? []).filter((r) => !['context', 'index', 'skipped'].includes(r.matchedBy));
+      // A missing or malformed passes.json is unknown, not zero — INV-CTX-02
+      // already fails it, and reporting "zero passes dispatched" here would
+      // name the wrong defect.
+      if (!ctx.routes) return skip('passes.json is missing or malformed — pass count unknown (see INV-CTX-02)');
+      const dispatched = ctx.routes.filter((r) => !['context', 'index', 'skipped'].includes(r.matchedBy));
       if (dispatched.length > 0) return skip(`${dispatched.length} pass(es) ran — the zero-pass gate was not reached`);
       const exitCode = ctx.finalization?.exitCode;
       if (exitCode === 2 || ctx.errorTxt) return pass(`zero passes and the run failed loudly (${ctx.errorTxt ? 'error.txt present' : `exit ${exitCode}`})`);
@@ -529,11 +540,18 @@ export const CHECKS: InvariantCheck[] = [
     id: 'INV-TRUST-01',
     needs: 'run',
     run(ctx) {
-      const changed = new Set(ctx.gather.changedFiles.map((f) => f.path.replace(/\\/g, '/')));
-      const touchedRule = [...changed].filter((p) =>
-        /(^|\/)(\.claude|\.copilot|\.github|\.agents)\/(skills|rules|instructions)\//.test(p),
+      // Case- and Unicode-folded, on every platform. The invariant exists
+      // because a PR committing `.Agents/skills` bypassed a macOS reviewer, so
+      // a case-sensitive audit would report SKIP for the exact bypass it is
+      // supposed to catch.
+      const changed = ctx.gather.changedFiles.map((f) => f.path.replace(/\\/g, '/'));
+      const folded = new Set(changed.map((p) => p.normalize('NFC').toLowerCase()));
+      const touchedRule = changed.filter((p) =>
+        /(^|\/)(\.claude|\.copilot|\.github|\.agents)\/(skills|rules|instructions)\//i.test(p.normalize('NFC')),
       );
-      const touchedConfig = ['.pr-review.yaml', '.pr-review.yml', '.mcp.json', '.vscode/mcp.json'].filter((p) => changed.has(p));
+      const touchedConfig = ['.pr-review.yaml', '.pr-review.yml', '.mcp.json', '.vscode/mcp.json'].filter((p) =>
+        folded.has(p),
+      );
       if (touchedRule.length === 0 && touchedConfig.length === 0) {
         return skip('the PR changed no rule file, .pr-review.yaml or MCP config');
       }
@@ -550,7 +568,8 @@ export const CHECKS: InvariantCheck[] = [
         return fail(`${admitted.length} PR-authored rule file(s) reached the review: ${sample(admitted.map((r) => r.name))}`);
       }
       const summary = readFileSafe(join(ctx.runDir, 'pr-review-summary.md')) ?? '';
-      if (touchedConfig.length > 0 && !/untrusted|ignored|degraded/i.test(summary)) {
+      const degradedBlock = /^>\s*\*\*Degraded:\*\*[\s\S]*?(?:\n\n|$)/m.exec(summary)?.[0] ?? '';
+      if (touchedConfig.length > 0 && !/untrusted|ignored|degraded/i.test(degradedBlock)) {
         return fail(`the PR changed ${sample(touchedConfig)} but the summary names no degraded coverage`);
       }
       return pass(
@@ -620,6 +639,9 @@ export const CHECKS: InvariantCheck[] = [
     id: 'INV-OUT-01',
     needs: 'run',
     run(ctx) {
+      if (ctx.finalizationError) {
+        return fail(`the finalization record failed authentication (${ctx.finalizationError}) — its exit code cannot be trusted`);
+      }
       if (!ctx.finalization) return skip('no authenticated finalization record (run did not complete, or predates the record)');
       const { exitCode } = ctx.finalization;
       if (![0, 1, 2].includes(exitCode)) return fail(`finalization recorded exit ${exitCode}`);
@@ -712,7 +734,15 @@ function resolveRunId(opts: { runId?: string; prUrl?: string; home?: string }): 
     for (const id of candidates) {
       const gather = readJson<GatherOutput>(join(runsRoot(opts.home), id, 'pr-review-gather.json'));
       if (gather?.pr?.url === opts.prUrl) return id;
-      if (gather && gather.pr.provider === ref.provider && gather.pr.repo === ref.repo && gather.pr.number === ref.number) {
+      // Owner included: without it a run for another org's same-named repo at
+      // the same PR number resolves, and the audit grades the wrong PR.
+      if (
+        gather &&
+        gather.pr.provider === ref.provider &&
+        gather.pr.owner === ref.owner &&
+        gather.pr.repo === ref.repo &&
+        gather.pr.number === ref.number
+      ) {
         return id;
       }
     }
@@ -739,13 +769,16 @@ export async function loadVerifyContext(opts: {
   const plan = control?.plan ?? null;
   const state = control?.state ?? null;
   let finalization: FinalizationRecord | null = null;
+  let finalizationError: string | null = null;
   if (plan) {
     try {
       finalization = readAuthoritativeFinalization(runDir, opts.home, plan);
-    } catch {
-      // A record that fails authentication is not a record; the OUT-01 row
-      // reports the absence rather than trusting a tampered one.
+    } catch (error) {
+      // A record that fails authentication is NOT the same as an absent one:
+      // one means "this run never finished", the other means "someone changed
+      // what it recorded". Conflating them is how tampering reads as history.
       finalization = null;
+      finalizationError = (error as Error).message;
     }
   }
 
@@ -850,6 +883,7 @@ export async function loadVerifyContext(opts: {
     plan,
     state,
     finalization,
+    finalizationError,
     marker,
     findings,
     stack: readJson<StackArtifact>(join(runDir, 'stack.json')),
@@ -899,9 +933,21 @@ export function runChecks(ctx: VerifyContext): VerifyRow[] {
   return rows;
 }
 
+/**
+ * One row is one line, always.
+ *
+ * Evidence is built from artifact content — pass names, file paths, comment
+ * bodies written by whoever opened the PR. A newline in any of them would let a
+ * crafted finding print a forged `INV-POST-02  PASS` line, or push a real FAIL
+ * off the visible report.
+ */
+function flattenEvidence(evidence: string): string {
+  return evidence.replace(/[\r\n\u2028\u2029]+/g, ' ⏎ ').replace(/[\u0000-\u001f\u007f]/g, '');
+}
+
 function renderText(ctx: VerifyContext, rows: VerifyRow[]): string {
   const width = Math.max(...rows.map((r) => r.id.length));
-  const lines = rows.map((r) => `${r.id.padEnd(width)}  ${r.status.toUpperCase().padEnd(4)}  ${r.evidence}`);
+  const lines = rows.map((r) => `${r.id.padEnd(width)}  ${r.status.toUpperCase().padEnd(4)}  ${flattenEvidence(r.evidence)}`);
   const counts = { pass: 0, fail: 0, skip: 0 };
   for (const r of rows) counts[r.status]++;
   return [
@@ -911,9 +957,17 @@ function renderText(ctx: VerifyContext, rows: VerifyRow[]): string {
     ...lines,
     '',
     `${rows.length} invariants: ${counts.pass} PASS, ${counts.skip} SKIP, ${counts.fail} FAIL`,
+    ...(!ctx.offline && ctx.liveWindow === null
+      ? [`AUDIT INCOMPLETE — ${ctx.liveUnavailable ?? 'the PR could not be read back'}; every invariant needing it went ungraded`]
+      : []),
   ].join('\n');
 }
 
+/**
+ * Exit: 0 every row passed or skipped · 1 the audit could not be completed
+ * (unresolvable run, or a live read-back failure when `--offline` was not asked
+ * for) · 2 at least one invariant FAILed.
+ */
 export async function runVerify(opts: {
   runId?: string;
   prUrl?: string;
@@ -923,7 +977,12 @@ export async function runVerify(opts: {
 }): Promise<number> {
   const ctx = await loadVerifyContext(opts);
   const rows = runChecks(ctx);
-  const exitCode = rows.some((r) => r.status === 'fail') ? 2 : 0;
+  // An audit that could not read the PR is INCOMPLETE, not clean. Exiting 0
+  // would tell CI that posting was checked and fine when nothing about posting
+  // was checked at all — the same "unknown is not empty" rule the poster lives
+  // by. `--offline` is an explicit request for a partial audit, so it stays 0.
+  const incomplete = !ctx.offline && ctx.liveWindow === null;
+  const exitCode = rows.some((r) => r.status === 'fail') ? 2 : incomplete ? 1 : 0;
   process.stdout.write(
     opts.json
       ? JSON.stringify({ runId: ctx.runId, prUrl: ctx.gather.pr.url, rows, exitCode }, null, 2) + '\n'

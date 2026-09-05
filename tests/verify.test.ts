@@ -71,6 +71,10 @@ function healthyRun(over: {
   deliveryKind?: DeliveryState['kind'];
   headSha?: string;
   repoRoot?: string;
+  /** Applied before the plan is signed, so the mutation is authentic, not tampering. */
+  mutatePlan?: (plan: Record<string, unknown>) => void;
+  /** Applied before the state is signed. Keeps planFingerprint intact. */
+  mutateState?: (state: DeliveryState) => void;
 } = {}): Fixture {
   const home = mkdtempSync(join(tmpdir(), 'pr-review-verify-'));
   const runDir = join(home, '.pr-review', 'runs', RUN_ID);
@@ -149,6 +153,7 @@ function healthyRun(over: {
     verifier: { enabled: false, maxAttempts: 3 },
     codex: { enabled: false, contextPath: join(runDir, 'pr-context.md'), attemptsDir: join(runDir, 'codex-attempts'), maxAttempts: 3 },
   });
+  over.mutatePlan?.(plan as unknown as Record<string, unknown>);
   writeDispatchPlan(plan, join(runDir, 'dispatch-plan.json'), join(controlDir, 'dispatch-plan.json'));
 
   const state: DeliveryState = {
@@ -182,6 +187,7 @@ function healthyRun(over: {
     codex: { state: 'disabled', attempts: 0 },
     reasonCodes: [],
   } as unknown as DeliveryState;
+  over.mutateState?.(state);
   writeDeliveryState(state, join(runDir, 'delivery-state.json'), join(controlDir, 'delivery-state.json'));
 
   if (!dryRun) {
@@ -613,6 +619,196 @@ test('verify — with no run-id, the newest run wins by time, not by name', asyn
   } finally {
     f.cleanup();
   }
+});
+
+test('verify — INV-TRUST-01 folds case, because the bypass it exists for was a case difference', async () => {
+  const f = healthyRun({ repoRoot: 'C:\\repo' });
+  try {
+    const path = join(f.runDir, 'pr-review-gather.json');
+    const gather = JSON.parse(readFileSync(path, 'utf8'));
+    // The real bypass: a PR committing `.Agents/skills` slipped past a
+    // case-sensitive check on macOS.
+    gather.changedFiles.push({ path: '.Agents/Skills/team-rules.md', status: 'modified', additions: 1, deletions: 0, patch: PATCH });
+    gather.metadata.changedFileCount = 2;
+    writeFileSync(path, JSON.stringify(gather), 'utf8');
+    f.metadata = { ...f.metadata, changedFileCount: 2 } as PrMetadata;
+    routeSource(f, 'C:\\repo\\.Agents\\Skills\\team-rules.md');
+
+    const trust = row(await rowsFor(f), 'INV-TRUST-01');
+    assert.equal(trust.status, 'fail', 'a case-sensitive audit would SKIP the exact bypass it guards');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — a failed PR read-back is an incomplete audit, not a clean one', async () => {
+  const f = healthyRun();
+  try {
+    const broken = { ...stubProvider(f), fetchExistingComments: async () => { throw new Error('502 upstream'); } } as PrProvider;
+    const ctx = await loadVerifyContext({ runId: RUN_ID, home: f.home, providerOverride: broken });
+    assert.equal(ctx.liveWindow, null, 'unknown, never empty');
+    const rows = runChecks(ctx);
+    assert.equal(rows.filter((r) => r.status === 'fail').length, 0, 'an unreadable PR is not a violation');
+    // …but it must not grade as clean either: exit 0 would tell CI that posting
+    // was checked when nothing about posting was checked.
+    assert.match(row(rows, 'INV-POST-01').evidence, /could not be read back/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+/**
+ * A check with no failing-path test can be passing vacuously and no one would
+ * know. One mutation per remaining check, each asserting the row it targets
+ * flips and — for the artifact rows — that it flips for the stated reason.
+ */
+test('verify — INV-POST-03 catches a severity prefix on a posted body', async () => {
+  const f = healthyRun();
+  try {
+    f.comments.push(comment({ body: 'HIGH: something is wrong here', file: 'src/a.ts', line: 2 }));
+    const three = row(await rowsFor(f), 'INV-POST-03');
+    assert.equal(three.status, 'fail');
+    assert.match(three.evidence, /severity prefix or bot chrome/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — INV-POST-07 catches findings that were neither posted nor reported', async () => {
+  const f = healthyRun();
+  try {
+    // Two findings retained, one attempted: the difference is in no tally.
+    writePostedMarker(f.runDir, { posted: 1, attempted: 1, verified: true }, f.home);
+    const seven = row(await rowsFor(f), 'INV-POST-07');
+    assert.equal(seven.status, 'fail');
+    assert.match(seven.evidence, /neither posted nor reported/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — INV-POST-07 catches an unverified publish', async () => {
+  const f = healthyRun();
+  try {
+    writePostedMarker(f.runDir, { posted: 2, attempted: 2, verified: false }, f.home);
+    assert.equal(row(await rowsFor(f), 'INV-POST-07').status, 'fail');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — INV-FETCH-02 catches a gather that lost the PR metadata or the patches', async () => {
+  const f = healthyRun();
+  try {
+    const path = join(f.runDir, 'pr-review-gather.json');
+    const gather = JSON.parse(readFileSync(path, 'utf8'));
+    delete gather.changedFiles[0].patch;
+    writeFileSync(path, JSON.stringify(gather), 'utf8');
+    const two = row(await rowsFor(f), 'INV-FETCH-02');
+    assert.equal(two.status, 'fail');
+    assert.match(two.evidence, /carries a patch/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — INV-FETCH-02 does NOT claim to catch a prior comment the gather missed', async () => {
+  const f = healthyRun();
+  try {
+    // The live read is scoped with `since`, so a comment older than the window
+    // never comes back and such a clause could never fire. Pinning the absence
+    // deliberately: a check that cannot fail is worse than no check, because it
+    // reads as coverage. Restoring it would need a second, unscoped fetch of
+    // the PR's whole comment history on every audit.
+    f.comments.push(comment({ body: 'discussed already', file: 'src/a.ts', line: 2, createdAt: '2023-12-31T00:00:00.000Z' }));
+    const two = row(await rowsFor(f), 'INV-FETCH-02');
+    assert.equal(two.status, 'pass');
+    assert.doesNotMatch(two.evidence, /older than the gather/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — INV-CTX-03 catches zero passes that did not exit 2', async () => {
+  const f = healthyRun();
+  try {
+    writeFileSync(join(f.runDir, 'passes.json'), JSON.stringify([{ name: 'x', matchedBy: 'index' }]), 'utf8');
+    const three = row(await rowsFor(f), 'INV-CTX-03');
+    assert.equal(three.status, 'fail');
+    assert.match(three.evidence, /empty review rendered as a clean PR/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — INV-CTX-04 catches a project skill that consumed a pass slot', async () => {
+  const f = healthyRun();
+  try {
+    // `pack/security` is planned for dispatch; routing it as context means a
+    // project skill took a slot instead of injecting everywhere.
+    writeFileSync(
+      join(f.runDir, 'passes.json'),
+      JSON.stringify([{ name: 'pack/security', matchedBy: 'context', source: 'x' }]),
+      'utf8',
+    );
+    const four = row(await rowsFor(f), 'INV-CTX-04');
+    assert.equal(four.status, 'fail');
+    assert.match(four.evidence, /consumed a pass slot/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — INV-DEL-02 catches more than one initial dispatch session', async () => {
+  // Two initial sessions means Phase 1 dispatched twice — the single-session
+  // guarantee gone, and the second one's accounting unowned.
+  const f = healthyRun({
+    mutateState: (state) => {
+      state.runtimeAttempts = [...state.runtimeAttempts, { ...state.runtimeAttempts[0]!, number: 2 }];
+    },
+  });
+  try {
+    const two = row(await rowsFor(f), 'INV-DEL-02');
+    assert.equal(two.status, 'fail');
+    assert.match(two.evidence, /Phase 1 must dispatch exactly once/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — INV-OUT-01 catches exit 2 with no error.txt, and exit 0 with a stale one', async () => {
+  const unnamed = healthyRun({ exitCode: 2 });
+  try {
+    const row1 = row(await rowsFor(unnamed), 'INV-OUT-01');
+    assert.equal(row1.status, 'fail');
+    assert.match(row1.evidence, /without error\.txt/);
+  } finally {
+    unnamed.cleanup();
+  }
+  const stale = healthyRun({ exitCode: 0, errorTxt: true });
+  try {
+    const row2 = row(await rowsFor(stale), 'INV-OUT-01');
+    assert.equal(row2.status, 'fail');
+    assert.match(row2.evidence, /stale failure was not cleared/);
+  } finally {
+    stale.cleanup();
+  }
+});
+
+test('verify — INV-FETCH-03 cannot be broken through the writer: the plan refuses to be written at all', () => {
+  // Not a gap in coverage — the stronger result. `writeDispatchPlan` validates
+  // the same containment before signing, so a plan naming a path outside its
+  // run dir never reaches disk. The verify row is the second line of defence,
+  // for a control store that was corrupted after the fact.
+  assert.throws(
+    () =>
+      healthyRun({
+        mutatePlan: (plan) => {
+          plan.artifacts = [{ path: join(tmpdir(), 'elsewhere.md'), sha256: 'x' }];
+        },
+      }),
+    /path outside its run directory/,
+  );
 });
 
 test('verify — a check that throws renders FAIL rather than vanishing from the report', async () => {

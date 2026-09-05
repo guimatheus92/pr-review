@@ -352,8 +352,11 @@ pr-review review <pr-url> [flags]            # full pipeline
 #   --from-gather <path>    (eval harness) read the gather JSON from a file
 #                           instead of the provider APIs; requires --dry-run
 pr-review status <run-id>                    # live progress, summary, or the recovery command (exit 0/20/21/22; 1 = unknown run-id)
-pr-review verify [run-id] [--pr <url>]       # audit a finished run against INVARIANTS.md (read-only; exit 2 on any FAIL)
-#   --offline               skip the live PR read-back; rows that need it report SKIP
+pr-review verify [run-id] [--pr <url>]       # audit a finished run against INVARIANTS.md (read-only)
+#                           exit 0 every row PASS/SKIP · 1 the audit could not be
+#                           completed (run unresolvable, or the PR read-back failed)
+#                           · 2 at least one invariant FAILed
+#   --offline               skip the live PR read-back; rows that need it report SKIP (exit stays 0)
 #   --json                  emit the rows as JSON for CI
 pr-review gather <pr-url> [--out <path>]     # fetch + cache metadata only
 pr-review post <pr-url> --findings <path>    # post pre-computed findings

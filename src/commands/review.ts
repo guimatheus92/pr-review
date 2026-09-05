@@ -782,7 +782,7 @@ export async function finalizeReview(a: {
  * Unreadable or absent is not a failure: runs predating the artifact resume
  * fine, and inventing a failure from a missing file would block recovery.
  */
-function resumedCompanionFailures(outDir: string): string[] {
+export function resumedCompanionFailures(outDir: string): string[] {
   const path = join(outDir, 'companions.json');
   if (!existsSync(path)) return [];
   try {
@@ -796,8 +796,12 @@ function resumedCompanionFailures(outDir: string): string[] {
       ...names(parsed.missingReviewers).map((name) => `planned companion '${name}' produced no output`),
       ...names(parsed.duplicateReviewers).map((name) => `companion '${name}' produced duplicate outputs`),
     ];
-  } catch {
-    return [];
+  } catch (error) {
+    // An unreadable artifact is unknown, never "no failures". Swallowing it
+    // here would reinstate exactly the bug this function exists to fix: a
+    // resumed run reporting a clean pipeline over delivery it cannot account
+    // for. An ABSENT file is different — see above — and stays benign.
+    return [`companions.json is unreadable (${(error as Error).message}) — companion delivery cannot be accounted for`];
   }
 }
 

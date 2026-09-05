@@ -298,7 +298,7 @@ program
 program
   .command('verify [run-id]')
   .description(
-    'Audit a finished run against INVARIANTS.md: one PASS/FAIL/SKIP row per invariant, from the run artifacts plus a live read of the PR. Read-only. Exit: 0 clean, 2 any FAIL.',
+    'Audit a finished run against INVARIANTS.md: one PASS/FAIL/SKIP row per invariant, from the run artifacts plus a live read of the PR. Read-only. Exit: 0 clean, 1 audit incomplete, 2 any FAIL.',
   )
   .option('--pr <url>', 'Audit the most recent run for this PR instead of naming a run-id')
   .option('--offline', 'Skip the live PR read-back; every invariant that needs it reports SKIP', false)

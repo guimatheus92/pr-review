@@ -1123,6 +1123,9 @@ async function spawnPlannedBatch(
     const attemptPath = resolve(reviewer.attemptsDir, `attempt-${attempt}.json`);
     try {
       if (existsSync(attemptPath)) unlinkSync(attemptPath);
+      // A re-dispatched pass that writes no sidecar must not inherit the previous attempt's
+      // evidence: readCapabilityUsage would read it as this attempt's own observation.
+      if (reviewer.capabilityPath && existsSync(reviewer.capabilityPath)) unlinkSync(reviewer.capabilityPath);
     } catch {
       // A failed cleanup leaves a detectable invalid/colliding attempt; never clear canonical output here.
     }

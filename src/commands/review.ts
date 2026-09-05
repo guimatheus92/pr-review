@@ -261,6 +261,20 @@ export function readCapabilityUsage(files: Record<string, string>): { usage: Cap
         used,
         notes: typeof parsed.notes === 'string' ? parsed.notes : '',
       });
+      // The sidecar is a pass's self-report, not something Node observed: a non-empty array is
+      // either the denial leak the brief asks a pass to name, or a fabrication, and nothing here can
+      // tell them apart. Warn on both; never fail the run over a string the model wrote. Naming the
+      // servers is what makes the warning actionable — the same run dir carries what classifies it
+      // (capabilities.json: the inventory; dispatch-plan.json: runtime + disabledMcpServers).
+      const reported = ([['available', available], ['attempted', attempted], ['used', used]] as const)
+        .filter(([, names]) => names.length > 0)
+        .map(([field, names]) => `${field}: ${names.map((name) => safeSummaryValue(name)).join(', ')}`);
+      if (reported.length > 0) {
+        warnings.push(
+          `installed-plugin pass ${safeSummaryValue(reviewer)} reported MCP servers under a runtime ` +
+          `that denies them (${reported.join('; ')}) — a denial leak or fabricated evidence, unverified`,
+        );
+      }
     } catch (error) {
       warnings.push(`installed-plugin pass ${safeSummaryValue(reviewer)} wrote invalid MCP usage evidence (${safeSummaryValue((error as Error).message)})`);
     }
@@ -1444,6 +1458,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   const outputs = session.outputs;
   const capabilityAudit = readCapabilityUsage(sessionCtx.capabilityFiles);
   degraded.push(...capabilityAudit.warnings);
+  for (const warning of capabilityAudit.warnings) process.stderr.write(`[mcp] ${warning}\n`);
   writeCapabilities(capabilityAudit.usage, capabilityAudit.warnings);
   const plannedPassReviewers = sessionCtx.passes.map((pass) => pass.name);
   const plannedPassSet = new Set(plannedPassReviewers);

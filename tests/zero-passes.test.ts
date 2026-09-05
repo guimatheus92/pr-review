@@ -96,6 +96,65 @@ const BASE = {
   runtime: 'copilot' as const,
 };
 
+test('capability audit — a plugin pass claiming MCP use reaches the Degraded block and capabilities.json', async () => {
+  const s = setup(['src/app.ts']);
+  try {
+    const result = await runReview({
+      ...BASE,
+      homeOverride: s.home,
+      runDir: s.runDir,
+      fromGather: s.gatherFile,
+      provider: fakeProvider(),
+      selectPassesFn: () => ({
+        passes: [{
+          name: 'model-tools/model-review',
+          source: '/model-review.md',
+          body: 'review',
+          matchedBy: 'plugin',
+          matchedOn: [],
+          origin: 'plugin',
+          plugin: 'model-tools',
+          mcpServers: ['model-inspector'],
+        }],
+        projectSkills: [], indexEntries: [], stackTags: ['typescript'],
+        routes: [{ name: 'model-tools/model-review', source: '/model-review.md', matchedBy: 'plugin' }],
+        missingBaseline: [],
+      }),
+      // The reviewerName MUST match the pass name, or the run exits 2 on
+      // "planned pass … produced no output" and the Degraded assertion below reads the wrong line.
+      runSingleSessionFn: async (_sessionOpts, ctx) => {
+        writeFileSync(ctx.capabilityFiles['model-tools/model-review']!, JSON.stringify({
+          reviewer: 'model-tools/model-review',
+          available: ['model-inspector'],
+          attempted: ['model-inspector'],
+          used: ['model-inspector'],
+          notes: 'claimed',
+        }), 'utf8');
+        return {
+          outputs: [{
+            reviewerName: 'model-tools/model-review',
+            model: 'm', findings: [], rawOutput: '[]', durationMs: 1, exitCode: 0,
+          }],
+          rawOrchestratorOutput: '', rawOrchestratorStderr: '', exitCode: 0, durationMs: 1,
+          findingsUnavailable: false,
+        };
+      },
+    });
+
+    assert.equal(result.exitCode, 0, 'an unverifiable claim annotates the run; it never fails it');
+    assert.match(result.summary, /Degraded[\s\S]*reported MCP servers under a runtime that denies them/);
+    assert.match(result.summary, /available: .*model&#45;inspector/);
+    const capabilities = JSON.parse(readFileSync(join(s.runDir, 'capabilities.json'), 'utf8')) as {
+      warnings: string[];
+      usage: Array<{ reviewer: string; used: string[] }>;
+    };
+    assert.ok(capabilities.warnings.some((warning) => warning.includes('reported MCP servers')));
+    assert.deepEqual(capabilities.usage[0]?.used, ['model-inspector'], 'the raw claim survives for triage');
+  } finally {
+    s.restore();
+  }
+});
+
 test('zero passes on a code PR — exit 2, error.txt written, NO done-state summary file', async () => {
   const s = setup(['lib/app.ex']);
   try {

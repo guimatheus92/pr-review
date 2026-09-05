@@ -202,7 +202,7 @@ test('discoverMcpCapabilities — merges trusted repo, user, and plugin names; c
   }
 });
 
-test('readCapabilityUsage — records proven MCP use and degrades missing evidence', () => {
+test('readCapabilityUsage — a claimed MCP call is recorded verbatim AND flagged; a missing sidecar degrades', () => {
   const root = mkdtempSync(join(tmpdir(), 'pr-review-capability-usage-'));
   try {
     const valid = join(root, 'valid.json');
@@ -217,6 +217,7 @@ test('readCapabilityUsage — records proven MCP use and degrades missing eviden
       'plugin/model-review': valid,
       'plugin/missing-review': join(root, 'missing.json'),
     });
+    // The raw claim is still archived unchanged — the audit annotates evidence, never edits it.
     assert.deepEqual(result.usage, [{
       reviewer: 'plugin/model-review',
       available: ['model-inspector'],
@@ -224,8 +225,59 @@ test('readCapabilityUsage — records proven MCP use and degrades missing eviden
       used: ['model-inspector'],
       notes: 'Read-only validation completed.',
     }]);
+    assert.equal(result.warnings.length, 2);
+    const claim = result.warnings.find((warning) => warning.includes('reported MCP servers'));
+    assert.ok(claim, 'a non-empty sidecar must raise a warning of its own');
+    // safeSummaryValue escapes every sidecar-supplied string before it reaches the summary.
+    assert.match(claim, /plugin&#47;model&#45;review/, 'the warning names the pass, escaped');
+    assert.match(claim, /available: .*model&#45;inspector/, 'it names the field and the server');
+    assert.match(claim, /attempted: .*model&#45;inspector/);
+    assert.match(claim, /used: .*model&#45;inspector/);
+    assert.match(claim, /denial leak or fabricated evidence, unverified/);
+    assert.ok(result.warnings.some((warning) => /produced no MCP usage evidence/.test(warning)));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('readCapabilityUsage — the all-empty sidecar the denial produces is silent', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pr-review-capability-clean-'));
+  try {
+    const clean = join(root, 'clean.json');
+    writeFileSync(clean, JSON.stringify({
+      reviewer: 'plugin/model-review',
+      available: [],
+      attempted: [],
+      used: [],
+      notes: 'No mcp__* tool was callable; nothing attempted.',
+    }));
+    const result = readCapabilityUsage({ 'plugin/model-review': clean });
+    assert.deepEqual(result.warnings, [], 'the healthy path must not warn — a noisy alarm gets trained away');
+    assert.equal(result.usage.length, 1);
+    assert.equal(result.usage[0]?.notes, 'No mcp__* tool was callable; nothing attempted.');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('readCapabilityUsage — a leak reported only in available still warns', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pr-review-capability-leak-'));
+  try {
+    const leak = join(root, 'leak.json');
+    // The brief tells a pass that finds a callable mcp__* tool to name it in available and to
+    // fill used only after a successful result — so this is the shape a real leak arrives in.
+    writeFileSync(leak, JSON.stringify({
+      reviewer: 'plugin/model-review',
+      available: ['video-analyzer'],
+      attempted: [],
+      used: [],
+      notes: 'mcp__video-analyzer__get_metadata was listed in my tool surface.',
+    }));
+    const result = readCapabilityUsage({ 'plugin/model-review': leak });
     assert.equal(result.warnings.length, 1);
-    assert.match(result.warnings[0] ?? '', /produced no MCP usage evidence/);
+    assert.match(result.warnings[0] ?? '', /available: .*video&#45;analyzer/);
+    assert.doesNotMatch(result.warnings[0] ?? '', /attempted:/, 'empty fields stay out of the message');
+    assert.doesNotMatch(result.warnings[0] ?? '', /used:/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -485,20 +485,52 @@ test('MCP capabilities — context advertises no server, and only the trusted re
     assert.doesNotMatch(context, /bicep \(repo\)/);
     assert.ok(existsSync(join(outDir, '.mcp.json')));
     assert.match(ctx.capabilityFiles['plugin/model-review'] ?? '', /capability-plugin_model-review--[0-9a-f]{12}\.json$/);
+    assert.deepEqual(JSON.parse(readFileSync(join(outDir, '.mcp.json'), 'utf8')), trustedMcpConfig);
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('MCP capabilities — the capability brief asks what the pass observed, never for a fixed answer', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const ctx = prepareSessionContext({
+      ...baseOpts(outDir, ['models/table.tmdl'], [pass('plugin/model-review', { origin: 'plugin', plugin: 'model-tools', mcpServers: ['modelInspector'] })]),
+      mcpServers: [{ name: 'modelInspector', source: 'plugin:model-tools' }],
+    });
     assert.ok(ctx.orchestratorPrompt.includes('\\"available\\":[],\\"attempted\\":[],\\"used\\":[]'));
     assert.match(ctx.orchestratorPrompt, /arrays of server-name strings, never booleans/);
     assert.match(ctx.orchestratorPrompt, /modelInspector/);
-    // The brief must not tell a pass to call tools the runtime denies, and must leave
-    // no room to guess what `available` holds — without these, reverting the reword is green.
     assert.match(ctx.orchestratorPrompt, /denies MCP at the process level/);
-    assert.match(ctx.orchestratorPrompt, /MUST ALL be empty arrays/);
+    // Not categorical: copilot's denial reaches only what discoverMcpCapabilities enumerated.
+    assert.match(ctx.orchestratorPrompt, /categorically under claude/);
+    // The escape hatch is the point — an artifact whose content is fixed by construction
+    // cannot report the one condition it exists to detect (a denial that stopped working).
+    assert.match(ctx.orchestratorPrompt, /denial leak worth reporting/);
+    assert.doesNotMatch(ctx.orchestratorPrompt, /MUST ALL be empty arrays/);
     assert.doesNotMatch(ctx.orchestratorPrompt, /read-only MCP inspection\/validation tools/);
-    // Removing the context block left `mcpServers` with ONE observable consumer: the
-    // disabledMcpServers list that becomes copilot's --disable-mcp-server argv. Without a
-    // positive assertion here, pruning `mcpServers` as "now unused" un-denies every
-    // inventoried server under copilot with a green suite. Also pins the dedupe + sort.
+    // No double space where the brief joins the preceding segment.
+    assert.doesNotMatch(ctx.orchestratorPrompt, /  This installed-plugin pass/);
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('MCP capabilities — dispatch plan denies every inventoried server, deduped and sorted', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    // `mcpServers` has ONE observable consumer left: the disabledMcpServers list that
+    // becomes copilot's --disable-mcp-server argv. Without this, pruning `mcpServers` as
+    // "now unused" un-denies every inventoried server under copilot with a green suite.
+    const ctx = prepareSessionContext({
+      ...baseOpts(outDir, ['models/table.tmdl'], [pass('plugin/model-review', { origin: 'plugin', plugin: 'model-tools', mcpServers: ['modelInspector'] })]),
+      mcpServers: [
+        { name: 'modelInspector', source: 'plugin:model-tools' },
+        { name: 'bicep', source: 'repo' },
+        { name: 'bicep', source: 'plugin:infra' },
+      ],
+    });
     assert.deepEqual(ctx.dispatchPlan?.disabledMcpServers, ['bicep', 'modelInspector']);
-    assert.deepEqual(JSON.parse(readFileSync(join(outDir, '.mcp.json'), 'utf8')), trustedMcpConfig);
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }

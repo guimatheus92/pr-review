@@ -78,11 +78,11 @@ export interface SingleSessionOptions {
   runtime?: Runtime;
   /** Accepted for parity with the caller; the codex sibling is wired in review.ts. */
   includeCodex?: boolean;
-  /** Checkout root available to read-only tools and MCPs. */
+  /** Checkout root added as a readable directory for the file tools. */
   repoRoot?: string;
   /** Sanitized capability inventory; names and provenance only. */
   mcpServers?: McpCapability[];
-  /** Unchanged checkout MCP definitions normalized for the isolated runtime. */
+  /** Unchanged checkout MCP definitions, written to the run dir as provenance only — no runtime loads them. */
   trustedMcpConfig?: { mcpServers: Record<string, unknown> };
   /** Node-owned recovery authority outside the runtime's writable run directory. */
   controlDir?: string;
@@ -347,8 +347,17 @@ function passTaskPrompt(
   outputPath: string,
   capabilityAudit?: { path: string; reviewer: string; servers: string[] },
 ): string {
+  // No leading space: the preceding segment already supplies the separator.
+  // Deliberately NOT categorical: claude's denial is, copilot's covers built-ins plus
+  // every INVENTORIED server, so a server `discoverMcpCapabilities` never enumerated can
+  // still be live there. The sidecar is the only channel that could ever surface such a
+  // leak, so the brief asks the pass to record what it OBSERVES — an artifact whose
+  // content is fixed by construction cannot report the one condition it exists to detect.
+  const declaredNames = capabilityAudit && capabilityAudit.servers.length > 0
+    ? ' The declared names above belong in notes rather than in available.'
+    : '';
   const audit = capabilityAudit
-    ? ` This installed-plugin pass declares MCP servers: ${capabilityAudit.servers.join(', ') || '(none)'}. This runtime denies MCP at the process level, so no MCP tool is callable from your session and there is nothing to attempt. Report that honestly rather than claiming a call you could not make: available, attempted and used MUST ALL be empty arrays, and the server names above belong in notes, not in available. Before returning, write a JSON object to \`${capabilityAudit.path}\` using exactly this shape: {"reviewer":"${capabilityAudit.reviewer}","available":[],"attempted":[],"used":[],"notes":"evidence"}. They are arrays of server-name strings, never booleans, and under this runtime all three stay exactly as shown: empty. `
+    ? `This installed-plugin pass declares MCP servers: ${capabilityAudit.servers.join(', ') || '(none)'}. This runtime denies MCP at the process level — categorically under claude, and for every inventoried server under copilot — so expect no mcp__* tool to be callable and nothing to attempt. Record what you actually observe, never a call you could not make: normally available, attempted and used are all empty arrays.${declaredNames} If an mcp__* tool IS nonetheless callable, name its server in available (and in used only after a successful result) and say so in notes — that is a denial leak worth reporting, and this sidecar is the only place it can surface. Before returning, write a JSON object to \`${capabilityAudit.path}\` using exactly this shape: {"reviewer":"${capabilityAudit.reviewer}","available":[],"attempted":[],"used":[],"notes":"evidence"}. All three are arrays of server-name strings, never booleans. `
     : '';
   return (
     `Read the PR context at \`${contextPath}\`, then read your review pass at \`${passPath}\` and apply ONLY that pass's rules to the diff.` +
@@ -520,6 +529,16 @@ function renderIndexManifest(shards: Array<{ path: string; count: number }>): st
     ``,
     ...shards.map((shard, index) => `- Shard ${index + 1}: ${shard.count} skill(s) — \`${shard.path}\``),
   ].join('\n');
+}
+
+/**
+ * The inventoried server names copilot switches off one at a time via
+ * `--disable-mcp-server`. Two spawn paths need it (the dispatch plan and the main
+ * session), and a byte-copy between them is how one silently drifts: an edit at
+ * either site alone un-denies every ambient server under copilot.
+ */
+function inventoriedMcpServerNames(mcpServers: readonly McpCapability[] | undefined): string[] {
+  return [...new Set((mcpServers ?? []).map((server) => server.name))].sort();
 }
 
 /**
@@ -726,7 +745,7 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
     runtime,
     runtimeBinary: runtimeBinary(runtime, opts.copilotBinary),
     repoRoot: opts.repoRoot,
-    disabledMcpServers: [...new Set((opts.mcpServers ?? []).map((server) => server.name))].sort(),
+    disabledMcpServers: inventoriedMcpServerNames(opts.mcpServers),
     model,
     timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     phase1Path,
@@ -1736,7 +1755,7 @@ async function attemptOrchestrator(
     timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     addDir: opts.outDir,
     repoRoot: opts.repoRoot,
-    disabledMcpServers: [...new Set((opts.mcpServers ?? []).map((server) => server.name))].sort(),
+    disabledMcpServers: inventoriedMcpServerNames(opts.mcpServers),
   });
 
   const durationMs = Date.now() - start;

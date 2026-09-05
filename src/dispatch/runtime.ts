@@ -1,30 +1,42 @@
 import { execFileSync } from 'node:child_process';
 
-/** The agent CLI that hosts the orchestrator session. */
-export type Runtime = 'copilot' | 'claude';
+/**
+ * The agent CLIs that can host the orchestrator session. The array is the source
+ * of truth and the union derives from it (same shape as `PROVIDERS`/`Provider` in
+ * `src/types.ts`) — a hand-written `Runtime[]` can silently go stale when the union
+ * grows, and this list is what the process-level MCP denial test walks.
+ */
+export const RUNTIMES = ['copilot', 'claude'] as const;
+export type Runtime = (typeof RUNTIMES)[number];
 
 /** What users may ask for: a concrete runtime, or 'auto' = probe PATH. Single source for config/CLI/review. */
 export type RuntimeChoice = Runtime | 'auto';
 
-export const RUNTIMES: Runtime[] = ['copilot', 'claude'];
-
-export const RUNTIME_CHOICES: RuntimeChoice[] = ['copilot', 'claude', 'auto'];
+export const RUNTIME_CHOICES: RuntimeChoice[] = [...RUNTIMES, 'auto'];
 
 /**
- * The flag that stops a runtime from STARTING ambient MCP servers, per runtime.
- * Denying the `mcp__*` tools is not enough: the servers still boot (a cmd.exe +
+ * Per runtime, the flag that switches ambient MCP off at the PROCESS level —
+ * categorical under claude, built-ins only under copilot (see below). Denying the
+ * `mcp__*` tools is not enough on its own: the servers still boot (a cmd.exe +
  * conhost + npx + node each on win32, every console window leaking) only to be
- * unreachable. Typed `Record<Runtime, ...>` on purpose — a new runtime fails to
- * compile until it declares its switch, which a hand-written test cannot enforce.
+ * unreachable.
  *
- * The two are not symmetric: claude's is categorical (every MCP config source is
- * ignored), copilot's covers built-ins and is completed per name by
- * `--disable-mcp-server`, so its reach is bounded by `discoverMcpCapabilities`.
+ * The two are NOT symmetric. claude's `--strict-mcp-config` ignores every MCP config
+ * source. copilot's `--disable-builtin-mcps` covers only the built-ins; its ambient
+ * (user/repo/plugin-configured) servers are switched off one name at a time by the
+ * `--disable-mcp-server` list built from `discoverMcpCapabilities`, which is NOT part
+ * of this record — so that plumbing is load-bearing under copilot, not redundant.
+ *
+ * `satisfies Record<Runtime, ...>` so a runtime added later fails to compile rather
+ * than merely failing the suite after the fact; `as const` because a mutable export
+ * holding a process-isolation switch can be blanked by any importer, and the
+ * RUNTIMES-driven test would read the mutated value and stay green. The argv side is
+ * covered by that test in `tests/runtime.test.ts`.
  */
-export const MCP_PROCESS_DENIAL: Record<Runtime, string> = {
+export const MCP_PROCESS_DENIAL = {
   claude: '--strict-mcp-config',
   copilot: '--disable-builtin-mcps',
-};
+} as const satisfies Record<Runtime, string>;
 
 /** Exported for `pr-review doctor`. */
 export function binaryOnPath(name: string): boolean {
@@ -65,32 +77,45 @@ export function runtimeSpawnArgs(
   disabledMcpServers: readonly string[] = [],
 ): string[] {
   const repoArg = repoRoot && repoRoot !== addDir ? ['--add-dir', repoRoot] : [];
-  if (runtime === 'claude') {
-    return [
-      '-p',
-      '--model', model,
-      '--permission-mode', 'dontAsk',
-      '--tools', 'Read,Write,Edit,Glob,Grep,Task,Agent',
-      '--allowedTools', 'Read,Write,Edit,Glob,Grep,Task,Agent',
-      '--disallowedTools', 'Bash,PowerShell,WebFetch,WebSearch,mcp__*',
-      MCP_PROCESS_DENIAL.claude,
-      '--setting-sources', 'user',
-      '--add-dir', addDir,
-      ...repoArg,
-    ];
+  // A switch, not `if (claude) … return <copilot argv>`: under a fall-through a runtime
+  // added later inherits copilot's ENTIRE command line — its tool flags, its `-s`, and
+  // copilot's denial flag instead of its own. The `never` assignment below turns that
+  // into a compile error at the place that actually builds the argv.
+  switch (runtime) {
+    case 'claude':
+      return [
+        '-p',
+        '--model', model,
+        '--permission-mode', 'dontAsk',
+        '--tools', 'Read,Write,Edit,Glob,Grep,Task,Agent',
+        '--allowedTools', 'Read,Write,Edit,Glob,Grep,Task,Agent',
+        '--disallowedTools', 'Bash,PowerShell,WebFetch,WebSearch,mcp__*',
+        MCP_PROCESS_DENIAL[runtime],
+        '--setting-sources', 'user',
+        '--add-dir', addDir,
+        ...repoArg,
+        // `disabledMcpServers` is deliberately unread here: `--strict-mcp-config` is
+        // categorical, so the per-server list is redundant under claude — and the claude
+        // CLI has no `--disable-mcp-server` flag, so "completing" this branch with one
+        // would kill every review at spawn.
+      ];
+    case 'copilot':
+      return [
+        '--model', model,
+        '--allow-all-tools',
+        '--deny-tool=shell',
+        MCP_PROCESS_DENIAL[runtime],
+        '--no-custom-instructions',
+        '--no-ask-user',
+        '--add-dir', addDir,
+        ...repoArg,
+        // Not redundant with MCP_PROCESS_DENIAL.copilot — see its docblock.
+        ...disabledMcpServers.flatMap((server) => ['--disable-mcp-server', server]),
+        '-s',
+      ];
   }
-  return [
-    '--model', model,
-    '--allow-all-tools',
-    '--deny-tool=shell',
-    MCP_PROCESS_DENIAL.copilot,
-    '--no-custom-instructions',
-    '--no-ask-user',
-    '--add-dir', addDir,
-    ...repoArg,
-    ...disabledMcpServers.flatMap((server) => ['--disable-mcp-server', server]),
-    '-s',
-  ];
+  const unreachable: never = runtime;
+  throw new Error(`unsupported runtime: ${String(unreachable)}`);
 }
 
 /**

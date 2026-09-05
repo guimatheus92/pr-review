@@ -32,6 +32,19 @@ test('runtimeSpawnArgs — per-runtime argv shape', () => {
     '--strict-mcp-config',
     '--setting-sources', 'user', '--add-dir', '/dir',
   ]);
+  // Claude WITH a repoRoot and a non-empty server list — the arguments that tempt an
+  // edit. `--strict-mcp-config` is categorical, so the per-server list must NOT be
+  // expanded here: the claude CLI has no `--disable-mcp-server`, and "completing" the
+  // branch would kill every review at spawn. This also pins that no `--mcp-config` is
+  // emitted, which is the premise of "the run-dir .mcp.json is provenance only".
+  assert.deepEqual(runtimeSpawnArgs('claude', 'opus', '/run', '/repo', ['ado', 'bicep']), [
+    '-p', '--model', 'opus', '--permission-mode', 'dontAsk',
+    '--tools', 'Read,Write,Edit,Glob,Grep,Task,Agent',
+    '--allowedTools', 'Read,Write,Edit,Glob,Grep,Task,Agent',
+    '--disallowedTools', 'Bash,PowerShell,WebFetch,WebSearch,mcp__*',
+    '--strict-mcp-config',
+    '--setting-sources', 'user', '--add-dir', '/run', '--add-dir', '/repo',
+  ]);
   assert.deepEqual(runtimeSpawnArgs('copilot', 'm1', '/run', '/repo', ['ado', 'bicep']), [
     '--model', 'm1', '--allow-all-tools', '--deny-tool=shell', '--disable-builtin-mcps',
     '--no-custom-instructions', '--no-ask-user', '--add-dir', '/run', '--add-dir', '/repo',
@@ -40,11 +53,11 @@ test('runtimeSpawnArgs — per-runtime argv shape', () => {
 });
 
 test('runtimeSpawnArgs — EVERY runtime carries its process-level MCP denial', () => {
-  // Denying the mcp__* tools is not enough: the servers still start (a cmd.exe +
-  // conhost + npx + node each on win32) only to be unreachable. Driven off RUNTIMES
-  // rather than naming claude and copilot by hand — the argv-shape test above already
-  // pins those two byte-for-byte, so the value here is covering a runtime added later,
-  // which would otherwise fall through to copilot's branch with a green suite.
+  // Why this matters lives on MCP_PROCESS_DENIAL; not repeated here so the two cannot
+  // drift. What is unique to this test: it walks RUNTIMES instead of naming the two
+  // runtimes by hand, because the argv-shape test above already pins those byte-for-byte
+  // — the coverage this adds is a runtime added later.
+  assert.ok(RUNTIMES.length > 0, 'RUNTIMES is empty — the loop below would assert nothing');
   for (const runtime of RUNTIMES) {
     const argv = runtimeSpawnArgs(runtime, 'm', '/dir');
     assert.ok(argv.includes(MCP_PROCESS_DENIAL[runtime]), `${runtime} lost ${MCP_PROCESS_DENIAL[runtime]}`);

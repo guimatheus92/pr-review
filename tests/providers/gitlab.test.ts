@@ -6,7 +6,6 @@ import {
   classifyAuthor,
   isTransientGitLabError,
   mapDiff,
-  buildFullDiff,
   positionForLine,
   buildDiscussionPosition,
   mapMrMetadata,
@@ -79,15 +78,6 @@ test('mapDiff — status flags, rename previousPath, +/- counts, empty diff', ()
   assert.equal(renamed.status, 'renamed');
   assert.equal(renamed.previousPath, 'old.ts');
   assert.equal(renamed.patch, undefined, 'empty diff maps to no patch');
-});
-
-test('buildFullDiff — git-style headers, /dev/null for adds and deletes', () => {
-  const out = buildFullDiff([
-    { old_path: 'a.ts', new_path: 'a.ts', new_file: true, deleted_file: false, renamed_file: false, diff: '@@ -0,0 +1 @@\n+x' },
-    { old_path: 'b.ts', new_path: 'b.ts', new_file: false, deleted_file: true, renamed_file: false, diff: '@@ -1 +0,0 @@\n-y' },
-  ]);
-  assert.ok(out.includes('diff --git a/a.ts b/a.ts\n--- /dev/null\n+++ b/a.ts'));
-  assert.ok(out.includes('diff --git a/b.ts b/b.ts\n--- a/b.ts\n+++ /dev/null'));
 });
 
 // The position math that keeps GitLab from rejecting discussions with

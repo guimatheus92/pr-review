@@ -41,7 +41,6 @@ function gatherFixture(paths: string[]): GatherOutput {
       deletions: 0,
       patch: '@@ -1,1 +1,2 @@\n context\n+added',
     })),
-    fullDiff: '',
     existingComments: [],
     gatheredAt: '2026-01-01T00:00:00Z',
   };
@@ -54,7 +53,6 @@ function fakeProvider(): PrProvider {
     parseUrl: (url: string): PrRef => ({ provider: 'github', url, owner: 'pr-review', repo: 'eval', number: 1 }),
     fetchMetadata: async () => gatherFixture([]).metadata,
     fetchChangedFiles: async () => [],
-    fetchFullDiff: async () => '',
     fetchExistingComments: async () => [],
     isTransientError: () => false,
     postLineComment: async () => null,
@@ -274,7 +272,6 @@ test('runReview — stack detection uses the authoritative project hydrated into
       }),
       fetchMetadata: async () => gather.metadata,
       fetchChangedFiles: async () => [],
-      fetchFullDiff: async () => '',
       fetchExistingComments: async () => [],
       isTransientError: () => false,
       postLineComment: async () => null,

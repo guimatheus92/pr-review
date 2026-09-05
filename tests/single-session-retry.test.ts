@@ -215,7 +215,7 @@ test('runSingleSession — exit 0 with 18/22 sidecars selectively recovers four,
         labels: [], linkedItems: [], createdAt: '', updatedAt: '', isDraft: false, state: 'open' as const,
       },
       changedFiles: [{ path: 'src/app.ts', status: 'modified' as const, additions: 1, deletions: 0, patch: '@@ -1 +1 @@\n-old\n+new' }],
-      fullDiff: '', existingComments: [], gatheredAt: '',
+      existingComments: [], gatheredAt: '',
     };
     const opts = {
       prUrl: gather.pr.url,
@@ -310,7 +310,7 @@ test('runSingleSession — selective recovery rejects mutation of an already-val
         labels: [], linkedItems: [], createdAt: '', updatedAt: '', isDraft: false, state: 'open' as const,
       },
       changedFiles: [{ path: 'src/app.ts', status: 'modified' as const, additions: 1, deletions: 0, patch: '@@ -1 +1 @@\n-old\n+new' }],
-      fullDiff: '', existingComments: [], gatheredAt: '',
+      existingComments: [], gatheredAt: '',
     };
     const opts = {
       prUrl: gather.pr.url, gather,
@@ -351,7 +351,7 @@ test('runSingleSession — enabled Codex reserves attempt 1 before reviewer disp
     const gather = {
       pr: { provider: 'github' as const, url: 'https://github.com/o/r/pull/1', owner: 'o', repo: 'r', number: 1 },
       metadata: { title: 'Test', description: 'complete description', author: 'a', headSha: 'h', baseSha: 'b', baseBranch: 'main', headBranch: 'f', labels: [], linkedItems: [], createdAt: '', updatedAt: '', isDraft: false, state: 'open' as const },
-      changedFiles: [{ path: 'a.ts', status: 'modified' as const, additions: 1, deletions: 0, patch: '@@ -1 +1 @@\n-a\n+b' }], fullDiff: '', existingComments: [], gatheredAt: '',
+      changedFiles: [{ path: 'a.ts', status: 'modified' as const, additions: 1, deletions: 0, patch: '@@ -1 +1 @@\n-a\n+b' }], existingComments: [], gatheredAt: '',
     };
     const opts = { prUrl: gather.pr.url, gather, passes: [{ name: 'one', source: '/one', body: 'review', matchedBy: 'baseline' as const, matchedOn: [], baseline: true }], indexEntries: [], stackTags: [], installedCompanions: [], skipReviewers: ['verifier'], outDir: dir, controlDir, includeCodex: true, invokeCompanions: false, runtime: 'copilot' as const };
     const ctx = prepareSessionContext(opts);
@@ -376,7 +376,7 @@ test('resumePlannedSession — matching reserved provisional re-binds a canonica
     const gather = {
       pr: { provider: 'github' as const, url: 'https://github.com/o/r/pull/1', owner: 'o', repo: 'r', number: 1 },
       metadata: { title: 'Test', description: 'complete description', author: 'a', headSha: 'h', baseSha: 'b', baseBranch: 'main', headBranch: 'f', labels: [], linkedItems: [], createdAt: '', updatedAt: '', isDraft: false, state: 'open' as const },
-      changedFiles: [{ path: 'a.ts', status: 'modified' as const, additions: 1, deletions: 0, patch: '@@ -1 +1 @@\n-a\n+b' }], fullDiff: '', existingComments: [], gatheredAt: '',
+      changedFiles: [{ path: 'a.ts', status: 'modified' as const, additions: 1, deletions: 0, patch: '@@ -1 +1 @@\n-a\n+b' }], existingComments: [], gatheredAt: '',
     };
     const ctx = prepareSessionContext({ prUrl: gather.pr.url, gather, passes: [{ name: 'one', source: '/one', body: 'review', matchedBy: 'baseline', matchedOn: [], baseline: true }], indexEntries: [], stackTags: [], installedCompanions: [], skipReviewers: ['verifier'], outDir: dir, controlDir, invokeCompanions: false, runtime: 'copilot' });
     const plan = ctx.dispatchPlan!;
@@ -403,7 +403,7 @@ test('resumePlannedSession — forged verifier canonical without reserved attemp
     const gather = {
       pr: { provider: 'github' as const, url: 'https://github.com/o/r/pull/1', owner: 'o', repo: 'r', number: 1 },
       metadata: { title: 'Test', description: 'complete description', author: 'a', headSha: 'h', baseSha: 'b', baseBranch: 'main', headBranch: 'f', labels: [], linkedItems: [], createdAt: '', updatedAt: '', isDraft: false, state: 'open' as const },
-      changedFiles: [{ path: 'a.ts', status: 'modified' as const, additions: 1, deletions: 0, patch: '@@ -1 +1 @@\n-a\n+b' }], fullDiff: '', existingComments: [], gatheredAt: '',
+      changedFiles: [{ path: 'a.ts', status: 'modified' as const, additions: 1, deletions: 0, patch: '@@ -1 +1 @@\n-a\n+b' }], existingComments: [], gatheredAt: '',
     };
     const ctx = prepareSessionContext({ prUrl: gather.pr.url, gather, passes: [{ name: 'one', source: '/one', body: 'review', matchedBy: 'baseline', matchedOn: [], baseline: true }], indexEntries: [], stackTags: [], installedCompanions: [], skipReviewers: [], outDir: dir, controlDir, invokeCompanions: false, runtime: 'copilot' });
     const plan = ctx.dispatchPlan!;

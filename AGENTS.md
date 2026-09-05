@@ -6,7 +6,7 @@ Generic, plugin-based PR review tool for GitHub, Azure DevOps, and GitLab, packa
 
 ```bash
 npm run build          # tsc + esbuild → dist/cli.cjs
-npm run test           # node scripts/test.mjs → node --test over tests/**/*.test.ts (599 tests, ~25s)
+npm run test           # node scripts/test.mjs → node --test over tests/**/*.test.ts (598 tests, ~25s)
 npm run build:watch    # tsc watch (re-run `npm run bundle` for esbuild)
 ```
 
@@ -25,7 +25,7 @@ The bundle at `dist/cli.cjs` is the single-file distribution artifact. The slash
 - `src/util/progress.ts` / `src/util/posted-marker.ts` — the phase/heartbeat feed and posting idempotency guard. Schema-v1 decisions use authenticated authority; `posted.marker` in the run dir is diagnostic only.
 - `src/dispatch/codex.ts` — optional read-only Codex sibling; strict attempt-scoped `Finding[]` output and crash-safe attempt accounting (opt out: `--no-codex`)
 - `src/dispatch/line-snap.ts` — snaps finding line numbers to the nearest valid diff line before posting
-- `src/providers/github.ts` / `azuredevops.ts` / `gitlab.ts` — PR data fetchers + comment posters (GitHub inline comments go out as one review batch — ONE attempt, `runPost` owns retry because only it can reconcile — with per-comment fallback; GitLab posts per-discussion via plain fetch). Each one delivers a COMPLETE file list or says so: GitHub carries the PR's `changed_files` as `PrMetadata.changedFileCount` (its `pulls/:n/files` stops at 3000 entries silently) and no longer fetches the whole-PR text diff (`pulls.get` with the diff media type 406s above 300 files; nothing reads `fullDiff`); Azure DevOps pages iteration changes to completion (`$top=2000`, `nextSkip`, a cursor that does not advance throws) and drops folder entries; GitLab maps `changes_count` (`"N+"` = `changedFileListTruncated`, because `/diffs` serves exactly the capped set)
+- `src/providers/github.ts` / `azuredevops.ts` / `gitlab.ts` — PR data fetchers + comment posters (GitHub inline comments go out as one review batch — ONE attempt, `runPost` owns retry because only it can reconcile — with per-comment fallback; GitLab posts per-discussion via plain fetch). Each one delivers a COMPLETE file list or says so: GitHub carries the PR's `changed_files` as `PrMetadata.changedFileCount` (its `pulls/:n/files` stops at 3000 entries silently) and fetches no whole-PR text diff (`pulls.get` with the diff media type 406s above 300 files, so it is unusable exactly on the PRs that would need it); Azure DevOps pages iteration changes to completion (`$top=2000`, `nextSkip`, a cursor that does not advance throws) and drops folder entries; GitLab maps `changes_count` (`"N+"` = `changedFileListTruncated`, because `/diffs` serves exactly the capped set)
 - `src/dispatch/parsers.ts` — JSON / bracketed-markdown / section-header output parsers
 - `src/dedupe.ts` — Jaccard token similarity, strict/loose/off modes
 - `src/config.ts` — 5-level config merge (flags > env > repo yaml > global yaml > defaults)

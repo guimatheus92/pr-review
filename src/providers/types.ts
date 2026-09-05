@@ -21,8 +21,6 @@ export interface PrProvider {
   fetchMetadata(ref: PrRef): Promise<PrMetadata>;
   /** MUST paginate to completion. An incomplete list is unknown, never empty: it feeds every trust gate keyed on changed paths. */
   fetchChangedFiles(ref: PrRef): Promise<ChangedFile[]>;
-  /** Whole-PR text diff, kept in `pr-review-gather.json` only; nothing in the pipeline reads it and a provider may return `''`. */
-  fetchFullDiff(ref: PrRef): Promise<string>;
   /**
    * Existing comments on the PR. `since`, when given, asks the provider to
    * return only comments created/updated at or after it: the reconciliation

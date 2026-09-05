@@ -10,7 +10,7 @@ function seed(root: string, scope: string, ref: PrRef): string {
   const dir = join(root, 'azuredevops', scope, String(ref.number));
   mkdirSync(dir, { recursive: true });
   const gather = {
-    pr: ref, metadata: { headSha: 'abcdef1234567890' }, changedFiles: [], fullDiff: '',
+    pr: ref, metadata: { headSha: 'abcdef1234567890' }, changedFiles: [],
     existingComments: [], gatheredAt: '',
   } as unknown as GatherOutput;
   writeFileSync(join(dir, 'abcdef123456-none.json'), JSON.stringify(gather), 'utf8');

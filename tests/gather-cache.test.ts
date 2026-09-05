@@ -14,7 +14,7 @@ test('refreshCachedGatherIdentity — authoritative ADO project upgrades a stale
       provider: 'azuredevops', url: 'https://dev.azure.com/org/_git/repo/pullrequest/9',
       owner: 'org', organization: 'org', repo: 'repo', number: 9,
     },
-    metadata: {}, changedFiles: [], fullDiff: '', existingComments: [], gatheredAt: '',
+    metadata: {}, changedFiles: [], existingComments: [], gatheredAt: '',
   } as unknown as GatherOutput;
   const current = {
     ...stale.pr,
@@ -83,7 +83,7 @@ test('runGather — filtered legacy cache is bypassed and replaced with raw prov
       { path: '.pr-review.yaml', status: 'modified' as const, additions: 1, deletions: 0, patch: '@@\n+x' },
       { path: 'src/app.ts', status: 'modified' as const, additions: 1, deletions: 0, excluded: true, excludedReason: 'old' },
     ],
-    fullDiff: 'old', existingComments: [], gatheredAt: '',
+    existingComments: [], gatheredAt: '',
   };
   let fetches = 0;
   let cached: GatherOutput | undefined;
@@ -187,7 +187,9 @@ test('runGather — a provider-declared truncation ("N+") is refused even when t
 test('runGather — a cache entry without the completeness marker predates the gate and is refetched once', async () => {
   // 0.6–0.10 cached ADO lists cut at 100 files raw, under a key the upgrade does not rotate.
   const { provider, fetches } = fakeGithub(META, [file('a.ts'), file('b.ts')]);
-  const stale = { pr: GH_REF, metadata: META, changedFiles: [file('a.ts')], fullDiff: '', existingComments: [], gatheredAt: '' };
+  // `fullDiff` is not on GatherOutput any more (#26). A <= 0.11 entry still has one,
+  // and both readers are unchecked JSON casts — so it must round-trip untouched.
+  const stale = { pr: GH_REF, metadata: META, changedFiles: [file('a.ts')], fullDiff: 'legacy-whole-pr-diff', existingComments: [], gatheredAt: '' };
   let cached: GatherOutput | undefined;
   const result = await runGather({
     prUrl: GH_REF.url, provider,
@@ -200,8 +202,9 @@ test('runGather — a cache entry without the completeness marker predates the g
 
   const fresh = fakeGithub(META, [file('a.ts'), file('b.ts')]);
   const hit = { ...stale, changedFiles: [file('a.ts'), file('b.ts')], changedFilesComplete: true as const };
-  await runGather({ prUrl: GH_REF.url, provider: fresh.provider, readGatherCacheFn: () => ({ data: hit, path: 'hit.json', ageMs: 1 }), writeGatherCacheFn: () => 'x' });
+  const served = await runGather({ prUrl: GH_REF.url, provider: fresh.provider, readGatherCacheFn: () => ({ data: hit, path: 'hit.json', ageMs: 1 }), writeGatherCacheFn: () => 'x' });
   assert.equal(fresh.fetches(), 0, 'a marked entry is served as before');
+  assert.equal((served as { fullDiff?: string }).fullDiff, 'legacy-whole-pr-diff', 'a <= 0.11 entry keeps its undeclared fullDiff — no cache clear needed');
 });
 
 // Completing a truncated list from the local checkout.

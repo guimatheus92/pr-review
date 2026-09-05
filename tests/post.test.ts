@@ -100,7 +100,6 @@ function gatherFixture() {
       createdAt: '', updatedAt: '', isDraft: false, state: 'open' as const,
     },
     changedFiles: FILES,
-    fullDiff: '',
     existingComments: [],
     gatheredAt: '',
   };

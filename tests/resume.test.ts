@@ -40,7 +40,7 @@ function gatherFixture() {
       labels: [], linkedItems: [], createdAt: '', updatedAt: '', isDraft: false, state: 'open' as const,
     },
     changedFiles: [{ path: 'src/a.ts', status: 'modified' as const, additions: 2, deletions: 1, patch: PATCH }],
-    fullDiff: '', existingComments: [], gatheredAt: '',
+    existingComments: [], gatheredAt: '',
   };
 }
 

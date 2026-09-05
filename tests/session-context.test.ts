@@ -33,7 +33,6 @@ function fixtureGather(paths: string[]): GatherOutput {
       deletions: 0,
       patch: '@@ -1,1 +1,2 @@\n context\n+added',
     })),
-    fullDiff: '',
     existingComments: [],
     gatheredAt: '2026-01-01T00:00:00Z',
   };

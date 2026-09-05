@@ -125,7 +125,7 @@ export function cwdMatchesPr(
   return sameOwner && sameRepo && sameProject && sameAuthority;
 }
 
-function defaultGitRemote(cwd: string): string | null {
+export function defaultGitRemote(cwd: string): string | null {
   try {
     return execFileSync('git', ['remote', 'get-url', 'origin'], {
       cwd,

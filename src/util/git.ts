@@ -45,17 +45,25 @@ function findRepoRoot(dir: string): string | null {
   }
 }
 
-/** Throws when git fails or hangs: a failure must never read as an empty (clean) tree. */
-function gitZ(root: string, args: string[]): string[] {
+/**
+ * Run git in `root` and return stdout. Throws when git fails or hangs: a failure
+ * must never read as empty output (an empty tree, an empty diff). Read-only by
+ * convention — nothing in pr-review fetches, checks out or writes a ref in the
+ * reviewer's checkout.
+ */
+export function gitOut(root: string, args: string[]): string {
   return execFileSync('git', ['--no-optional-locks', ...args], {
     cwd: root,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     maxBuffer: 64 * 1024 * 1024,
     timeout: 30_000,
-  })
-    .split('\0')
-    .filter(Boolean);
+  });
+}
+
+/** NUL-split stdout for `-z` listings: paths arrive raw, never C-quoted. */
+export function gitZ(root: string, args: string[]): string[] {
+  return gitOut(root, args).split('\0').filter(Boolean);
 }
 
 /** `status --porcelain -z`: `XY path`; a rename/copy carries the old path as the next token. */

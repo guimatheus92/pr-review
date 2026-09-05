@@ -79,6 +79,8 @@ interface GitLabMr {
   updated_at: string;
   draft?: boolean;
   work_in_progress?: boolean;
+  /** A STRING: numeric, `"N+"` once the stored diff overflowed (files, lines or bytes), empty while a new MR's diff is still computing. */
+  changes_count?: string | null;
 }
 
 interface GitLabNote {
@@ -213,6 +215,9 @@ export function buildDiscussionPosition(
 
 /** Exported for tests: the branch-y MR → PrMetadata mapping (state collapse, draft alias, SHA fallbacks). */
 export function mapMrMetadata(mr: GitLabMr, linkedItems: PrMetadata['linkedItems']): PrMetadata {
+  // "N+" is the overflow flag, not a floor: /diffs pages over the STORED diff,
+  // which is exactly the capped set, so the list has exactly N entries.
+  const count = /^(\d+)(\+)?$/.exec(mr.changes_count ?? '');
   return {
     title: mr.title,
     description: mr.description ?? '',
@@ -227,6 +232,7 @@ export function mapMrMetadata(mr: GitLabMr, linkedItems: PrMetadata['linkedItems
     updatedAt: mr.updated_at,
     isDraft: mr.draft ?? mr.work_in_progress ?? false,
     state: mr.state === 'merged' ? 'merged' : mr.state === 'closed' ? 'closed' : 'open',
+    ...(count ? { changedFileCount: Number(count[1]), changedFileListTruncated: count[2] === '+' } : {}),
   };
 }
 

@@ -1,7 +1,7 @@
 import * as azdev from 'azure-devops-node-api';
 import { execFileSync, execSync } from 'node:child_process';
 import pLimit from 'p-limit';
-import type { GitPullRequest, GitPullRequestCommentThread, Comment } from 'azure-devops-node-api/interfaces/GitInterfaces.js';
+import type { GitPullRequest, GitPullRequestChange, GitPullRequestCommentThread, Comment } from 'azure-devops-node-api/interfaces/GitInterfaces.js';
 import type { ChangedFile, ExistingComment, Finding, PrMetadata, PrRef } from '../types.js';
 import type { PrProvider } from './types.js';
 import { withRetry } from '../util/retry.js';
@@ -13,6 +13,9 @@ const ADO_AZURE_AD_RESOURCE_ID = '499b84ac-1321-427f-aa17-267ca6975798';
 
 // Concurrent per-file content fetches during diff synthesis.
 const FILE_FETCH_CONCURRENCY = 5;
+// Iteration changes are paged: $top defaults to 100 (max 2000). One unpaged call
+// silently reviewed a >100-file PR on its first 100 files.
+const ADO_CHANGES_PAGE = 2000;
 
 // azure-devops-node-api VersionControlChangeType bit flags. changeType is a
 // bitmask, not a single value — an edit arrives OR'd with rename/encoding/etc.
@@ -361,18 +364,35 @@ export class AzureDevOpsProvider implements PrProvider {
     const iterations = await git.getPullRequestIterations(repoId, ref.number, ref.project);
     const latest = iterations[iterations.length - 1];
     if (!latest) return [];
-    const changes = await git.getPullRequestIterationChanges(
-      repoId,
-      ref.number,
-      latest.id!,
-      ref.project,
-    );
+    const entries: GitPullRequestChange[] = [];
+    for (let skip = 0; ; ) {
+      const page = await git.getPullRequestIterationChanges(repoId, ref.number, latest.id!, ref.project, ADO_CHANGES_PAGE, skip);
+      const batch = page.changeEntries ?? [];
+      entries.push(...batch);
+      // Every documented sample response OMITS nextSkip rather than sending 0, so
+      // termination cannot hinge on it: a short or empty page ends the list, a full
+      // page without a cursor is probed once more, and a cursor that does not
+      // advance is an error — never a silent stop on a possibly-truncated list.
+      const next = page.nextSkip ?? 0;
+      if (batch.length === 0 || (next === 0 && batch.length < ADO_CHANGES_PAGE)) break;
+      const advance = next || skip + batch.length;
+      if (advance <= skip) {
+        throw new Error(
+          '[ado] iteration-changes cursor did not advance (skip=' + skip + ', nextSkip=' + next + ') after ' + entries.length + ' entries — file list incomplete',
+        );
+      }
+      skip = advance;
+    }
     const limit = pLimit(FILE_FETCH_CONCURRENCY);
     const results = await Promise.all(
-      (changes.changeEntries ?? []).map((change) =>
+      entries.map((change) =>
         limit(async (): Promise<ChangedFile | null> => {
           const path = change.item?.path?.replace(/^\//, '') ?? '';
-          if (!path) return null;
+          // A folder entry (directory add, or an ancestor of an edited file) has no
+          // content and is not a reviewable file; it would count against the file
+          // guard and cost a getItem call. isFolder is the wire boolean; gitObjectType
+          // arrives as a raw string, never the SDK enum.
+          if (!path || change.item?.isFolder) return null;
           const { status, basePath } = classifyChange(
             change.changeType,
             path,

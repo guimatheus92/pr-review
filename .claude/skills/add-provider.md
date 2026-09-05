@@ -8,8 +8,9 @@ description: How to add a new PR hosting provider (e.g. GitLab, Bitbucket) to pr
 
 1. **Create provider file** at `src/providers/<name>.ts` implementing the `PrProvider` interface from `src/providers/types.ts`:
    - `parseUrl(url)` — extract owner, repo, PR number from the URL
-   - `fetchMetadata(ref)` — title, author, description, labels, linked items
-   - `fetchChangedFiles(ref)` — file paths, status, additions, deletions, patches
+   - `fetchMetadata(ref)` — title, author, description, labels, linked items; set `changedFileCount` whenever the API offers an exact count and `changedFileListTruncated` when it signals a cap (GitLab `"N+"`) — gather refuses a list of any other length and completes it from git
+   - `fetchChangedFiles(ref)` — file paths, status, additions, deletions, patches. MUST paginate to completion (ADO `$top=2000` + `nextSkip`, GitHub `paginate.iterator`, GitLab `x-next-page`) and never return a first page as the list: an incomplete list is unknown, never empty, because it feeds the rule-trust and MCP gates
+   - `fetchFullDiff(ref)` — may return `''`; nothing in the pipeline reads it (GitHub returns `''`: the diff media type 406s above 300 files)
    - `fetchExistingComments(ref)` — existing inline comments (for dedupe)
    - `postLineComment(ref, finding)` — post ONE inline comment at file:line. Makes a single attempt and throws; see step 4.
    - `isTransientError(err)` — required. Is this error worth another attempt? Delegate to your provider's own predicate (`isTransientGitHubError` etc.). `runPost` uses it to decide whether to re-issue a write after reconciling.
@@ -26,6 +27,6 @@ description: How to add a new PR hosting provider (e.g. GitLab, Bitbucket) to pr
 
 ## Reference implementations
 
-- GitHub: `src/providers/github.ts` — uses `@octokit/rest`, `gh auth token` fallback; posts inline comments as one batched review (`POST /pulls/:n/reviews`, event COMMENT), ONE attempt, with a per-comment fallback that `runPost` enters only after reconciling against the PR. `fetchExistingComments` forwards `since` to both list endpoints so a read-back is one page, not the PR's whole history
-- Azure DevOps: `src/providers/azuredevops.ts` — uses `azure-devops-node-api`, concurrent LCS diff synthesis; `createThread` makes one attempt (retry lives in `runPost`), and the PR object + git API are cached per run
-- GitLab: `src/providers/gitlab.ts` — plain `fetch` against REST v4 (no client lib, no batch endpoint); `positionForLine` supplies `old_line` for context-line discussion positions (skipping it 400s); owner keeps namespace slashes, flattened by `safeOwner` for run-dir/cache names
+- GitHub: `src/providers/github.ts` — uses `@octokit/rest`, `gh auth token` fallback; posts inline comments as one batched review (`POST /pulls/:n/reviews`, event COMMENT), ONE attempt, with a per-comment fallback that `runPost` enters only after reconciling against the PR. `fetchExistingComments` forwards `since` to both list endpoints so a read-back is one page, not the PR's whole history; `fetchMetadata` carries `changed_files` as `changedFileCount` (`pulls/:n/files` stops at 3000 entries silently) and `fetchFullDiff` returns `''` (the diff media type 406s above 300 files)
+- Azure DevOps: `src/providers/azuredevops.ts` — uses `azure-devops-node-api`, concurrent LCS diff synthesis; `createThread` makes one attempt (retry lives in `runPost`), and the PR object + git API are cached per run; iteration changes are paged to completion (`$top=2000`, `nextSkip`; a cursor that does not advance throws) and folder entries are dropped before any content fetch
+- GitLab: `src/providers/gitlab.ts` — plain `fetch` against REST v4 (no client lib, no batch endpoint); `positionForLine` supplies `old_line` for context-line discussion positions (skipping it 400s); owner keeps namespace slashes, flattened by `safeOwner` for run-dir/cache names; `changes_count` is parsed — a numeric string is `changedFileCount`, `"N+"` sets `changedFileListTruncated` because `/diffs` serves exactly the capped set

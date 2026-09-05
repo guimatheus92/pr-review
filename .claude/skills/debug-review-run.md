@@ -1,5 +1,5 @@
 ---
-description: How to debug a pr-review run that produced unexpected results (missing findings, parse errors, empty output, companion failures).
+description: How to debug a pr-review run that produced unexpected results (missing findings, parse errors, empty output, companion failures, "file list truncated" / provider count mismatch, stale cache entries).
 ---
 
 # Debugging a Review Run
@@ -10,7 +10,7 @@ Every `pr-review review` writes artifacts to `~/.pr-review/runs/<provider>__<own
 
 | File | Contains |
 |---|---|
-| `pr-review-gather.json` | Raw PR metadata, diff, comments |
+| `pr-review-gather.json` | Raw PR metadata, per-file patches, comments (`fullDiff` is empty on GitHub — nothing reads it); `changedFilesComplete` marks a verified file list |
 | `pr-context.md` | The shared context file read by the review passes (not by the orchestrator itself) — includes the `## Stack` tags and a `## More skills (on-demand)` pointer to the index |
 | `pass-<name>.md` | One file per dispatched pass: the pipeline rules header + ONE skill body + a `Source:` line retained for provenance. Referenced sibling files are not materialized automatically |
 | `skills-project.md` | Post-selection shared project context, injected whole into every pass and also read by Codex, direct companion agents, and the verifier. In the no-pack fallback, only project skills beyond the 10-pass cap remain here |
@@ -51,6 +51,12 @@ Every `pr-review review` writes artifacts to `~/.pr-review/runs/<provider>__<own
 7. No candidate passes at selection is exit 2 for any PR, with `error.txt` and the "nothing to review with — no skills matched" message. A docs-only PR exits 0 only when candidate passes existed and docs-only triage removed all of them. Check `packs list` (are the packs cloned/synced?) and `pr-review packs suggest <url>`.
 8. The early-exit gate (no title, oversized PR) now exits **2** with `error.txt`, not 0 with a summary — a failed prerequisite is not a clean review.
 9. Exit **0** does not mean zero findings. Without `--fail-on`, retained findings do not change the status; stderr says how many were retained and why the code is 0.
+
+**`file list truncated` (exit 2; `error.txt` in detached mode):**
+1. The provider listed fewer (or more) files than the PR has — GitHub's `pulls/:n/files` stops at 3000 silently, GitLab reports `changes_count: "N+"` when its stored diff overflowed — and the run could not complete the list from git. The message names the counts and the exact fix.
+2. Completion needs the current directory to be a checkout of the PR's repository (remote `origin`, same project on ADO) with both `baseSha` and `headSha` present. Run the `git fetch` the message prints (`git fetch origin <base> refs/pull/N/head`, `refs/merge-requests/N/head`, or the ADO branches) in that checkout and re-run; pr-review never fetches for you.
+3. Also refused, by design: a history with two merge bases (criss-cross — git and the provider may diff against different ancestors) and a shallow clone. Nothing is cached until the list is complete; a successful completion logs `[gather] … completed K file(s) from git at <root>`.
+4. A cache entry written before 0.11 has no `changedFilesComplete` marker and is refetched once (`[gather] cache entry predates the file-list completeness check`); that is expected after upgrading, not a fault.
 
 **Parse errors:**
 1. Check the specific reviewer's latest `reviewer-attempts/.../attempt-N.json`; invalid attempts are not promoted to `raw-<name>.json`.

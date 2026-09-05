@@ -221,7 +221,11 @@ test('AzureDevOpsProvider — every public PR operation hydrates a project-omitt
     },
     getPullRequestIterations: async (_repo: string, _id: number, project: string | undefined) => {
       projects.push(project);
-      return [];
+      return [{ id: 1 }];
+    },
+    getPullRequestIterationChanges: async (_repo: string, _id: number, _iteration: number, project: string | undefined) => {
+      projects.push(project);
+      return { changeEntries: [], nextSkip: 0 };
     },
     createThread: async (_thread: unknown, _repo: string, _id: number, project: string | undefined) => {
       projects.push(project);
@@ -242,7 +246,7 @@ test('AzureDevOpsProvider — every public PR operation hydrates a project-omitt
 
   assert.equal(ref.project, 'Platform');
   assert.equal(prFetches, 1, 'the hydrated cache alias prevents a second PR fetch');
-  assert.deepEqual(projects, [undefined, 'Platform', 'Platform', 'Platform', 'Platform']);
+  assert.deepEqual(projects, [undefined, 'Platform', 'Platform', 'Platform', 'Platform', 'Platform']);
 });
 
 test('resolvePr — the field-report URL resolves end to end', () => {

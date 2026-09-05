@@ -347,3 +347,26 @@ test('mapNote — position fallbacks', () => {
   assert.equal(mapNote(n).file, undefined, 'no position → no file');
   assert.equal(mapNote({ ...n, position: { new_path: 'x', old_path: 'y', new_line: 1, old_line: 2 } }).line, 1, 'new side wins');
 });
+
+test('mapMrMetadata — changes_count: a number is exact, "N+" means the stored diff is truncated, empty is unknown', () => {
+  const base = {
+    iid: 1, title: 'x', description: 'd', state: 'opened' as const,
+    source_branch: 's', target_branch: 't', labels: [], sha: 'sha', created_at: 'c', updated_at: 'u',
+  };
+  const exact = mapMrMetadata({ ...base, changes_count: '42' }, []);
+  assert.equal(exact.changedFileCount, 42);
+  assert.equal(exact.changedFileListTruncated, false);
+  // "N+" is the overflow flag: /diffs pages over the STORED diff, which is exactly the capped set, so
+  // for "N+" the list has exactly N entries and a length comparison could never detect the cut.
+  // Overflow also triggers on lines/bytes, so "37+" is as real as "1000+".
+  for (const raw of ['1000+', '37+']) {
+    const capped = mapMrMetadata({ ...base, changes_count: raw }, []);
+    assert.equal(capped.changedFileCount, Number.parseInt(raw, 10), raw);
+    assert.equal(capped.changedFileListTruncated, true, raw);
+  }
+  for (const raw of ['', undefined, null]) {
+    const unknown = mapMrMetadata({ ...base, changes_count: raw as string }, []);
+    assert.equal(unknown.changedFileCount, undefined, `unknown for ${String(raw)}`);
+    assert.equal(unknown.changedFileListTruncated, undefined, `unknown for ${String(raw)}`);
+  }
+});

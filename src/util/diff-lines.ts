@@ -10,9 +10,10 @@
  * starting `+++` or `---` is REAL content: an added line whose text begins
  * `++` (e.g. `++counter;`) or a removed markdown `---` rule. Skipping those
  * desyncs every line cursor downstream (wrong valid-line sets, wrong
- * additions/deletions counts, and GitLab position 400s), so the four diff
- * consumers (line-snap, GitLab mapDiff/positionForLine, the ADO counter)
- * all route through this one filter.
+ * additions/deletions counts, and GitLab position 400s), so every diff
+ * consumer (line-snap, GitLab mapDiff/positionForLine, and countChangedLines
+ * below, which serves the ADO provider and the git completion in gather)
+ * routes through this one filter.
  */
 export function* diffLines(patch: string): Generator<string> {
   let contentStarted = false;
@@ -33,4 +34,16 @@ export function* diffLines(patch: string): Generator<string> {
     if (ln.startsWith('\\')) continue; // "\ No newline at end of file"
     yield ln;
   }
+}
+
+/** Additions and deletions of a patch — content lines only, hunk headers skipped — through the preamble filter above, so a `++counter;` line inside a hunk counts as content and a `+++ b/…` header never does. */
+export function countChangedLines(patch: string): { additions: number; deletions: number } {
+  let additions = 0;
+  let deletions = 0;
+  for (const line of diffLines(patch)) {
+    if (line.startsWith('@@')) continue;
+    if (line.startsWith('+')) additions++;
+    else if (line.startsWith('-')) deletions++;
+  }
+  return { additions, deletions };
 }

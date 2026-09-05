@@ -33,6 +33,18 @@ export interface PrMetadata {
   updatedAt: string;
   isDraft: boolean;
   state: 'open' | 'closed' | 'merged';
+  /**
+   * The provider's own count of changed files, when its API offers one (GitHub
+   * `changed_files`, GitLab `changes_count`). Absent = unknown, which never
+   * blocks; present, gather refuses a list of any other length.
+   */
+  changedFileCount?: number;
+  /**
+   * The provider declares its stored diff truncated (GitLab `"N+"`). No length
+   * comparison can detect that case — the list served IS the capped set — so
+   * gather completes it from git or fails, whatever the count says.
+   */
+  changedFileListTruncated?: boolean;
 }
 
 export interface LinkedItem {
@@ -68,9 +80,20 @@ export interface GatherOutput {
   pr: PrRef;
   metadata: PrMetadata;
   changedFiles: ChangedFile[];
+  /** Whole-PR text diff, kept only for the `pr-review-gather.json` contract; nothing in the pipeline reads it (empty on GitHub — see #26). */
   fullDiff: string;
   existingComments: ExistingComment[];
   gatheredAt: string;
+  /**
+   * Set by gather only once the provider's file list passed the completeness
+   * gate: paginated to completion, count matched, or completed from git and —
+   * when an exact count exists — re-checked against it (a provider-declared
+   * truncation has no count to reach; an absent count never blocks). Absent on
+   * entries cached
+   * before 0.11 — which may hold a truncated list — so a hit without it is
+   * refetched once.
+   */
+  changedFilesComplete?: true;
 }
 
 export interface ReviewerDefinition {

@@ -1054,6 +1054,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
         useCache: opts.useCache,
         extraExcludes: trustedConfig.diffExcludes,
         provider,
+        cwd,
       });
   const repoConfigChanged = gatherChangesRepoConfig(gather);
   const config = repoConfigChanged

@@ -59,7 +59,7 @@ if [ -n "$REPO_DIR" ]; then
   fi
 else
   echo "WARNING: no local checkout matches $PR_URL — running from $(pwd)." >&2
-  echo "WARNING: the CLI will apply no project skills and skip stack detection." >&2
+  echo "WARNING: the CLI will apply no project skills, skip stack detection, and cannot complete a provider-truncated file list from git (GitHub over 3000 files, GitLab N+)." >&2
 fi
 
 node "$CLI" review $ARGUMENTS --detach

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { normalizeModel, resolveRuntime, runtimeSpawnArgs, sanitizeTaskDescription, taskCall } from '../src/dispatch/runtime.js';
+import { MCP_PROCESS_DENIAL, normalizeModel, resolveRuntime, RUNTIMES, runtimeSpawnArgs, sanitizeTaskDescription, taskCall } from '../src/dispatch/runtime.js';
 
 test('normalizeModel — only the copilot-style default maps to opus under claude', () => {
   assert.equal(normalizeModel('claude', 'claude-opus-4.8'), 'opus');
@@ -29,6 +29,7 @@ test('runtimeSpawnArgs — per-runtime argv shape', () => {
     '--tools', 'Read,Write,Edit,Glob,Grep,Task,Agent',
     '--allowedTools', 'Read,Write,Edit,Glob,Grep,Task,Agent',
     '--disallowedTools', 'Bash,PowerShell,WebFetch,WebSearch,mcp__*',
+    '--strict-mcp-config',
     '--setting-sources', 'user', '--add-dir', '/dir',
   ]);
   assert.deepEqual(runtimeSpawnArgs('copilot', 'm1', '/run', '/repo', ['ado', 'bicep']), [
@@ -36,6 +37,18 @@ test('runtimeSpawnArgs — per-runtime argv shape', () => {
     '--no-custom-instructions', '--no-ask-user', '--add-dir', '/run', '--add-dir', '/repo',
     '--disable-mcp-server', 'ado', '--disable-mcp-server', 'bicep', '-s',
   ]);
+});
+
+test('runtimeSpawnArgs — EVERY runtime carries its process-level MCP denial', () => {
+  // Denying the mcp__* tools is not enough: the servers still start (a cmd.exe +
+  // conhost + npx + node each on win32) only to be unreachable. Driven off RUNTIMES
+  // rather than naming claude and copilot by hand — the argv-shape test above already
+  // pins those two byte-for-byte, so the value here is covering a runtime added later,
+  // which would otherwise fall through to copilot's branch with a green suite.
+  for (const runtime of RUNTIMES) {
+    const argv = runtimeSpawnArgs(runtime, 'm', '/dir');
+    assert.ok(argv.includes(MCP_PROCESS_DENIAL[runtime]), `${runtime} lost ${MCP_PROCESS_DENIAL[runtime]}`);
+  }
 });
 
 test('taskCall — tool vocabulary per runtime', () => {

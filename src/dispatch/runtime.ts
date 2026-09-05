@@ -7,7 +7,24 @@ export type Runtime = 'copilot' | 'claude';
 export type RuntimeChoice = Runtime | 'auto';
 
 export const RUNTIMES: Runtime[] = ['copilot', 'claude'];
+
 export const RUNTIME_CHOICES: RuntimeChoice[] = ['copilot', 'claude', 'auto'];
+
+/**
+ * The flag that stops a runtime from STARTING ambient MCP servers, per runtime.
+ * Denying the `mcp__*` tools is not enough: the servers still boot (a cmd.exe +
+ * conhost + npx + node each on win32, every console window leaking) only to be
+ * unreachable. Typed `Record<Runtime, ...>` on purpose — a new runtime fails to
+ * compile until it declares its switch, which a hand-written test cannot enforce.
+ *
+ * The two are not symmetric: claude's is categorical (every MCP config source is
+ * ignored), copilot's covers built-ins and is completed per name by
+ * `--disable-mcp-server`, so its reach is bounded by `discoverMcpCapabilities`.
+ */
+export const MCP_PROCESS_DENIAL: Record<Runtime, string> = {
+  claude: '--strict-mcp-config',
+  copilot: '--disable-builtin-mcps',
+};
 
 /** Exported for `pr-review doctor`. */
 export function binaryOnPath(name: string): boolean {
@@ -56,6 +73,7 @@ export function runtimeSpawnArgs(
       '--tools', 'Read,Write,Edit,Glob,Grep,Task,Agent',
       '--allowedTools', 'Read,Write,Edit,Glob,Grep,Task,Agent',
       '--disallowedTools', 'Bash,PowerShell,WebFetch,WebSearch,mcp__*',
+      MCP_PROCESS_DENIAL.claude,
       '--setting-sources', 'user',
       '--add-dir', addDir,
       ...repoArg,
@@ -65,7 +83,7 @@ export function runtimeSpawnArgs(
     '--model', model,
     '--allow-all-tools',
     '--deny-tool=shell',
-    '--disable-builtin-mcps',
+    MCP_PROCESS_DENIAL.copilot,
     '--no-custom-instructions',
     '--no-ask-user',
     '--add-dir', addDir,

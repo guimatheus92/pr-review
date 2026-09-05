@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 import type { ReviewerDefinition, SkillDefinition } from '../types.js';
+import { printable } from '../util/text.js';
 
 interface Frontmatter {
   name?: unknown;
@@ -71,11 +72,6 @@ export function parseGlobList(v: unknown): string[] {
   return [];
 }
 
-/** Strip control characters before echoing third-party (pack) strings to the terminal. */
-export function printable(s: string): string {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/[\u0000-\u001f\u007f]/g, '');
-}
 
 /** First `# heading` of the body — the description fallback for files with no frontmatter (OWASP cheat sheets). */
 function firstHeading(body: string): string | undefined {

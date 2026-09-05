@@ -1,7 +1,8 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { loadSkillFile, printable } from './builtin.js';
+import { loadSkillFile } from './builtin.js';
+import { printable } from '../util/text.js';
 import type { SkillDefinition } from '../types.js';
 import { realpathCanonical } from '../util/realpath.js';
 

@@ -262,11 +262,18 @@ export function classifyChange(
   sourceServerItem: string | undefined,
 ): { status: ChangedFile['status']; basePath: string } {
   const ct = changeType ?? 0;
-  const status: ChangedFile['status'] =
-    (ct & VC_DELETE) !== 0 ? 'deleted' : (ct & VC_ADD) !== 0 ? 'added' : 'modified';
-  const basePath =
-    (ct & VC_RENAME) !== 0 ? sourceServerItem?.replace(/^\//, '') || newPath : newPath;
-  return { status, basePath };
+  // The pre-rename path, when ADO reported both the bit and a source item.
+  const renamedFrom = (ct & VC_RENAME) !== 0 ? sourceServerItem?.replace(/^\//, '') : undefined;
+  // `renamed` only replaces the `modified` fallback: delete and add keep winning,
+  // so the content fetches guarded by `status !== 'deleted'` / `!== 'added'` below
+  // behave identically for every bitmask — this labels, it does not re-route.
+  // It also requires a usable source path, so `renamed` never means less than it
+  // does on the other providers: a rename here always carries previousPath.
+  let status: ChangedFile['status'] = 'modified';
+  if ((ct & VC_DELETE) !== 0) status = 'deleted';
+  else if ((ct & VC_ADD) !== 0) status = 'added';
+  else if (renamedFrom && renamedFrom !== newPath) status = 'renamed';
+  return { status, basePath: renamedFrom || newPath };
 }
 
 export class AzureDevOpsProvider implements PrProvider {
@@ -412,7 +419,17 @@ export class AzureDevOpsProvider implements PrProvider {
             patch = synthesizePatch(path, baseContent, headContent, baseSha ?? '', headSha);
           }
           const { additions, deletions } = countChangedLines(patch ?? '');
-          return { path, status, additions, deletions, patch };
+          // Keyed on basePath, not on the label: ADD|RENAME and DELETE|RENAME are
+          // labelled added/deleted (see classifyChange) yet still carry a previous
+          // path, and the repo-config trust gate reads it.
+          return {
+            path,
+            status,
+            ...(basePath !== path ? { previousPath: basePath } : {}),
+            additions,
+            deletions,
+            patch,
+          };
         }),
       ),
     );

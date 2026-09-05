@@ -13,7 +13,8 @@ import { gitOut, gitOutAsync, gitTopLevel, gitZ } from '../util/git.js';
 
 const PATCH_CONCURRENCY = 8;
 const HEX_ID = /^[0-9a-f]{7,64}$/i;
-const GIT_STATUS: Record<string, ChangedFile['status']> = { A: 'added', C: 'added', D: 'deleted', R: 'renamed' };
+/** Exported so `tests/changed-file-status.test.ts` can check this producer's vocabulary alongside the three providers'. */
+export const GIT_STATUS: Record<string, ChangedFile['status']> = { A: 'added', C: 'added', D: 'deleted', R: 'renamed' };
 
 /** The copy-paste hint quotes a ref only when it must: a refname may carry shell metacharacters (dollar, semicolon, pipe), rarely a quote; a plain one stays bare so the command also pastes into cmd.exe. */
 const PLAIN_REF = /^[A-Za-z0-9._/-]+$/;

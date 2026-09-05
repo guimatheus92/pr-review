@@ -262,8 +262,17 @@ export function classifyChange(
   sourceServerItem: string | undefined,
 ): { status: ChangedFile['status']; basePath: string } {
   const ct = changeType ?? 0;
+  // Rename only replaces the `modified` fallback: delete and add keep winning, so
+  // the content fetches guarded by `status !== 'deleted'` / `!== 'added'` below
+  // behave identically for every bitmask — this labels, it does not re-route.
   const status: ChangedFile['status'] =
-    (ct & VC_DELETE) !== 0 ? 'deleted' : (ct & VC_ADD) !== 0 ? 'added' : 'modified';
+    (ct & VC_DELETE) !== 0
+      ? 'deleted'
+      : (ct & VC_ADD) !== 0
+        ? 'added'
+        : (ct & VC_RENAME) !== 0
+          ? 'renamed'
+          : 'modified';
   const basePath =
     (ct & VC_RENAME) !== 0 ? sourceServerItem?.replace(/^\//, '') || newPath : newPath;
   return { status, basePath };
@@ -412,7 +421,20 @@ export class AzureDevOpsProvider implements PrProvider {
             patch = synthesizePatch(path, baseContent, headContent, baseSha ?? '', headSha);
           }
           const { additions, deletions } = countChangedLines(patch ?? '');
-          return { path, status, additions, deletions, patch };
+          // Keyed on basePath, NOT on `status === 'renamed'`: delete and add keep
+          // precedence over the rename bit (above), so ADD|RENAME (9) and
+          // DELETE|RENAME (24) are labelled added/deleted while still being
+          // renames. basePath differs from path exactly when ADO reported the
+          // rename bit AND gave a sourceServerItem, which is precisely when a
+          // previous path exists — and the repo-config trust gate reads it.
+          return {
+            path,
+            status,
+            ...(basePath !== path ? { previousPath: basePath } : {}),
+            additions,
+            deletions,
+            patch,
+          };
         }),
       ),
     );

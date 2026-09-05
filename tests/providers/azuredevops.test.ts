@@ -98,3 +98,41 @@ test('fetchChangedFiles — a PR with no iterations is an error, never an empty 
   (provider as unknown as { gitApis: Map<string, Promise<unknown>> }).gitApis.set(orgUrlFor(ref), Promise.resolve(git));
   await assert.rejects(() => provider.fetchChangedFiles(ref), /no iterations/);
 });
+
+test('fetchChangedFiles — a rename carries previousPath, including when the rename bit is OR-ed with add or delete', async () => {
+  // ADO reported every rename as a plain modify and never set previousPath, so
+  // gatherChangesRepoConfig — which checks the PREVIOUS path too — could not see a
+  // .pr-review.yaml renamed away on ADO alone. previousPath is keyed on the source
+  // path rather than on the `renamed` label, because delete and add keep precedence
+  // over the rename bit: ADD|RENAME (9) is labelled `added` and is still a rename.
+  const RENAME = 8;
+  const ADD = 1;
+  const { provider, ref } = stubbedProvider(() => ({
+    changeEntries: [
+      { changeType: RENAME, item: { path: '/moved.ts' }, sourceServerItem: '/original.ts' },
+      { changeType: RENAME | 2, item: { path: '/edited-and-moved.ts' }, sourceServerItem: '/was-here.ts' },
+      { changeType: ADD | RENAME, item: { path: '/added-and-moved.ts' }, sourceServerItem: '/came-from.ts' },
+      { changeType: DELETED | RENAME, item: { path: '/gone.ts' }, sourceServerItem: '/used-to-be.ts' },
+      { changeType: RENAME, item: { path: '/no-source.ts' } },
+      { changeType: 2, item: { path: '/plain.ts' } },
+    ],
+  }));
+  const files = await provider.fetchChangedFiles(ref);
+  const by = (path: string) => files.find((f) => f.path === path)!;
+
+  assert.equal(by('moved.ts').status, 'renamed');
+  assert.equal(by('moved.ts').previousPath, 'original.ts');
+  assert.equal(by('edited-and-moved.ts').status, 'renamed');
+  assert.equal(by('edited-and-moved.ts').previousPath, 'was-here.ts');
+
+  // Labels stay add/delete so the content fetches guarded by `status !== 'added'`
+  // / `!== 'deleted'` are unchanged — but the trust gate still gets the old path.
+  assert.equal(by('added-and-moved.ts').status, 'added');
+  assert.equal(by('added-and-moved.ts').previousPath, 'came-from.ts');
+  assert.equal(by('gone.ts').status, 'deleted');
+  assert.equal(by('gone.ts').previousPath, 'used-to-be.ts');
+
+  // No source path to report: basePath fell back to the new path, so no previousPath.
+  assert.equal(by('no-source.ts').previousPath, undefined);
+  assert.equal(by('plain.ts').previousPath, undefined);
+});

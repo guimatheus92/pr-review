@@ -43,20 +43,22 @@ test('classifyChange — add/edit/delete map by bit, base path is the new path',
   assert.deepEqual(classifyChange(undefined, 'a.ts', undefined), { status: 'modified', basePath: 'a.ts' });
 });
 
-test('classifyChange — a pure rename fetches base from the OLD (source) path', () => {
+test('classifyChange — a pure rename is "renamed" and fetches base from the OLD (source) path', () => {
   const { status, basePath } = classifyChange(8, 'new/name.tmdl', '/old/name.tmdl');
-  assert.equal(status, 'modified');
+  assert.equal(status, 'renamed');
   assert.equal(basePath, 'old/name.tmdl'); // leading slash stripped; base read from the pre-rename path
 });
 
 test('classifyChange — rename OR-ed with edit (10) is still a rename, not a plain modify', () => {
   const { status, basePath } = classifyChange(10, 'new/name.tmdl', '/old/name.tmdl');
-  assert.equal(status, 'modified');
+  assert.equal(status, 'renamed');
   assert.equal(basePath, 'old/name.tmdl');
 });
 
 test('classifyChange — rename bit with a missing sourceServerItem falls back to the new path', () => {
-  assert.deepEqual(classifyChange(8, 'a.ts', undefined), { status: 'modified', basePath: 'a.ts' });
+  // Still labelled renamed — the bit is what ADO reported; only the base path
+  // degrades. fetchChangedFiles drops previousPath in exactly this case.
+  assert.deepEqual(classifyChange(8, 'a.ts', undefined), { status: 'renamed', basePath: 'a.ts' });
 });
 
 test('lcsLineDiff — caps the DP matrix on huge inputs (coarse replace, no OOM, new-side lines intact)', () => {

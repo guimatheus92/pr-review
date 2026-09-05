@@ -5,6 +5,7 @@ import type { BatchComment, PrProvider } from './types.js';
 
 import { execErrorDetail } from '../util/exec-error.js';
 import { parseHttpUrl } from '../util/url.js';
+import { printable } from '../plugins/builtin.js';
 
 const CLOUD_API = 'https://api.github.com';
 
@@ -96,6 +97,54 @@ export function parseGitHubUrl(url: string): PrRef | null {
  */
 export function apiBaseFor(ref: PrRef): string {
   return ref.baseUrl ?? parseGitHubUrl(ref.url)?.baseUrl ?? CLOUD_API;
+}
+
+/**
+ * The seven statuses `pulls/:n/files` can report, onto the four
+ * `ChangedFile['status']` holds.
+ *
+ * `copied` reads as an add, the same call git's own mapping makes (`C: 'added'`
+ * in src/commands/gather.ts): a copy has no base content at this path.
+ * `unchanged` is mapped rather than dropped — a dropped row would shorten
+ * `changedFiles`, and `listIsIncomplete` compares its length to the PR's
+ * `changed_files` with strict equality, so skipping would send the PR down the
+ * complete-from-git path or refuse it outright.
+ *
+ * A `Map`, not an object literal: the key is a raw API string, and a plain
+ * object would resolve `constructor` or `toString` through Object.prototype and
+ * hand back a function as a status.
+ *
+ * Cast-free by design. A cast used to launder GitHub's other three values
+ * straight into the union, so every GitHub deletion arrived as `removed` (#29).
+ */
+const GITHUB_STATUS = new Map<string, ChangedFile['status']>([
+  ['added', 'added'],
+  ['copied', 'added'],
+  ['modified', 'modified'],
+  ['changed', 'modified'],
+  ['unchanged', 'modified'],
+  ['removed', 'deleted'],
+  ['renamed', 'renamed'],
+]);
+
+/** One line per distinct unknown value, not per file: a 3000-file PR would otherwise bury its own log. */
+const warnedGitHubStatuses = new Set<string>();
+
+/**
+ * Exported so the mapping is unit-testable without the API — the same reason
+ * `classifyChange` and `mapDiff` are exported in the other two providers.
+ */
+export function mapGitHubStatus(raw: string): ChangedFile['status'] {
+  const mapped = GITHUB_STATUS.get(raw);
+  if (mapped) return mapped;
+  // An eighth value must not kill a review over a field whose only consumer
+  // renders it as prose — but it must not diverge in silence either.
+  if (!warnedGitHubStatuses.has(raw)) {
+    warnedGitHubStatuses.add(raw);
+    // printable(): the value is remote text, and a newline in it would forge a log line.
+    process.stderr.write(`[gather] unknown GitHub file status '${printable(raw)}' — treated as modified\n`);
+  }
+  return 'modified';
 }
 
 export class GitHubProvider implements PrProvider {
@@ -197,7 +246,7 @@ export class GitHubProvider implements PrProvider {
       for (const f of data) {
         files.push({
           path: f.filename,
-          status: f.status as ChangedFile['status'],
+          status: mapGitHubStatus(f.status),
           previousPath: f.previous_filename,
           additions: f.additions,
           deletions: f.deletions,

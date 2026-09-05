@@ -2,7 +2,7 @@ import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import type { SkillDefinition } from '../types.js';
 import { foldPath, realpathCanonical } from '../util/realpath.js';
 import { gitProvenance, gitProvenanceError, newProvenanceCache, type ProvenanceCache } from '../util/git.js';
-import { printable } from './builtin.js';
+import { printable } from '../util/text.js';
 
 export { foldPath };
 

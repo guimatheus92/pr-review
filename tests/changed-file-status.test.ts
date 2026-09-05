@@ -13,21 +13,40 @@ import type { ChangedFile } from '../src/types.js';
  */
 const VOCABULARY = new Set<ChangedFile['status']>(['added', 'modified', 'deleted', 'renamed']);
 
+/** The unknown-status path writes to stderr by design; without this the suite prints real `[gather]` warnings that read as failures. */
+function captureStderr(fn: () => void): string[] {
+  const written: string[] = [];
+  const original = process.stderr.write.bind(process.stderr);
+  (process.stderr as { write: unknown }).write = (chunk: string | Uint8Array): boolean => {
+    written.push(String(chunk));
+    return true;
+  };
+  try {
+    fn();
+  } finally {
+    (process.stderr as { write: unknown }).write = original;
+  }
+  return written;
+}
+
 /**
- * Every producer of a ChangedFile, at its narrowest testable seam. `status` is a
- * closed 4-value union, but each provider derives it from its own wider
- * vocabulary — GitHub ships SEVEN values, and a cast used to launder the other
- * three straight into the type (#29). The type system only guards the literals a
- * provider writes down; the raw strings and bitmasks it receives are checked here.
+ * Every producer of a ChangedFile, at its narrowest testable seam, with the raw
+ * vocabulary each one derives `status` from — GitHub's seven strings, ADO's
+ * bitmask, GitLab's booleans, git's name-status letters. A cast used to launder
+ * GitHub's four non-union values straight into the type (#29).
  *
- * The other half of the guarantee is compile-time: `src/providers/github.ts` maps
- * instead of casting, so a new provider assigning an off-vocabulary literal fails
- * `npm run build` rather than reaching this file.
+ * Read this as the inventory, not as the enforcement. Every seam here declares
+ * `ChangedFile['status']` as its return type, so tsc already rejects an
+ * off-vocabulary literal — what a row can still catch is a value produced by a
+ * path the type cannot see (an internal cast, or a lookup resolving through
+ * Object.prototype, which has its own test below). The teeth are the per-provider
+ * `fetchChangedFiles` tests, which cover the call sites where the bug actually was.
  */
 test('every provider maps its own vocabulary onto ChangedFile["status"] — nothing else', () => {
   const emitted: [string, ChangedFile['status']][] = [
     // GitHub — the full documented enum of pulls/:n/files (@octokit/openapi-types,
-    // components["schemas"]["diff-entry"]). Four of these are NOT in ChangedFile.
+    // components["schemas"]["diff-entry"]). Four are NOT in ChangedFile: removed,
+    // copied, changed, unchanged.
     ['github added', mapGitHubStatus('added')],
     ['github removed', mapGitHubStatus('removed')],
     ['github modified', mapGitHubStatus('modified')],
@@ -85,9 +104,11 @@ test('a raw status never resolves through Object.prototype', () => {
   // The lookup key is a remote string. A plain object literal would answer
   // `constructor` with a function and `__proto__` with an object — both truthy,
   // both returned as a status, neither in the union. A Map has no such members.
-  for (const key of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf']) {
-    assert.equal(mapGitHubStatus(key), 'modified', `${key} must degrade, not resolve`);
-  }
+  captureStderr(() => {
+    for (const key of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf']) {
+      assert.equal(mapGitHubStatus(key), 'modified', `${key} must degrade, not resolve`);
+    }
+  });
 });
 
 test('an unrecognized GitHub status degrades to "modified" and says so on stderr', () => {
@@ -98,18 +119,10 @@ test('an unrecognized GitHub status degrades to "modified" and says so on stderr
   // The warn-once Set is module-global with no reset seam, so this asserts on a
   // value used nowhere else in the file; node:test runs each file in its own
   // process, so no other test file can have warmed it either.
-  const written: string[] = [];
-  const original = process.stderr.write.bind(process.stderr);
-  (process.stderr as { write: unknown }).write = (chunk: string | Uint8Array): boolean => {
-    written.push(String(chunk));
-    return true;
-  };
-  try {
+  const written = captureStderr(() => {
     assert.equal(mapGitHubStatus('exploded'), 'modified');
     assert.equal(mapGitHubStatus('exploded'), 'modified');
-  } finally {
-    (process.stderr as { write: unknown }).write = original;
-  }
+  });
   const warnings = written.filter((line) => line.includes('exploded'));
   assert.equal(warnings.length, 1, 'one warning per distinct unknown status, not one per file');
   assert.match(warnings[0]!, /unknown GitHub file status/);
@@ -118,17 +131,9 @@ test('an unrecognized GitHub status degrades to "modified" and says so on stderr
 test('an unknown status cannot forge a log line', () => {
   // The value is remote text going to stderr; a newline in it would let a crafted
   // status write its own `[gather] …` line. printable() strips control characters.
-  const written: string[] = [];
-  const original = process.stderr.write.bind(process.stderr);
-  (process.stderr as { write: unknown }).write = (chunk: string | Uint8Array): boolean => {
-    written.push(String(chunk));
-    return true;
-  };
-  try {
+  const written = captureStderr(() => {
     assert.equal(mapGitHubStatus('x\n[gather] all files reviewed clean'), 'modified');
-  } finally {
-    (process.stderr as { write: unknown }).write = original;
-  }
+  });
   assert.equal(written.length, 1);
   assert.equal(written[0]!.split('\n').filter(Boolean).length, 1, 'one line out, whatever came in');
   assert.match(written[0]!, /'x\[gather\] all files reviewed clean'/);
@@ -144,4 +149,28 @@ test('Azure DevOps labels a rename "renamed" and carries the old path', () => {
   // fetches guarded by `status !== 'deleted'` / `!== 'added'` behave identically.
   assert.equal(classifyChange(16 | 8, 'a.ts', '/o.ts').status, 'deleted');
   assert.equal(classifyChange(1 | 8, 'a.ts', '/o.ts').status, 'added');
+});
+
+test('an absent or non-string status degrades instead of throwing', () => {
+  // `raw` is typed string but arrives over the wire. printable() on undefined is a
+  // TypeError, which would kill the gather from inside an unrelated module.
+  const written = captureStderr(() => {
+    assert.equal(mapGitHubStatus(undefined), 'modified');
+    assert.equal(mapGitHubStatus(null), 'modified');
+    assert.equal(mapGitHubStatus(7), 'modified');
+  });
+  assert.equal(written.length, 3);
+});
+
+test('the warn-once set is capped, so remote text cannot flood the log it protects', () => {
+  // The dedupe key is provider-controlled: a response with a different bogus status
+  // per entry would otherwise print one line per file — the exact flood the Set
+  // exists to prevent — and retain one string per file for the process's life.
+  const written = captureStderr(() => {
+    for (let i = 0; i < 50; i++) assert.equal(mapGitHubStatus(`bogus-${i}`), 'modified');
+  });
+  const named = written.filter((line) => line.includes('bogus-'));
+  const suppressed = written.filter((line) => line.includes('suppressed'));
+  assert.ok(named.length <= 10, `capped at 10, saw ${named.length}`);
+  assert.equal(suppressed.length, 1, 'says once that it stopped, rather than going quiet');
 });

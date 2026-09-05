@@ -116,3 +116,48 @@ test('fetchFullDiff — never calls the API (the diff media type 406s above 300 
   const provider = withStubClient({ get: async () => { throw new Error('must not be called'); } });
   assert.equal(await provider.fetchFullDiff(REF), '');
 });
+
+test('fetchChangedFiles — maps every GitHub status at the call site, so re-adding the #29 cast fails here', async () => {
+  // mapGitHubStatus was unit-tested from the start, but the line that actually had
+  // the bug — `status: mapGitHubStatus(f.status)` inside this loop — was not. A cast
+  // put back on that line left the whole suite green.
+  const raw: [string, string][] = [
+    ['added', 'added'],
+    ['removed', 'deleted'],
+    ['modified', 'modified'],
+    ['renamed', 'renamed'],
+    ['copied', 'added'],
+    ['changed', 'modified'],
+    ['unchanged', 'modified'],
+  ];
+  // fetchChangedFiles drives paginate.iterator, which hangs off the client itself
+  // rather than off `pulls` — so the client is seeded directly here.
+  const provider = new GitHubProvider();
+  (provider as unknown as { clients: Map<string, unknown> }).clients.set(apiBaseFor(REF), {
+    pulls: { listFiles: () => {} },
+    paginate: {
+      iterator: () => ({
+        async *[Symbol.asyncIterator]() {
+          yield {
+            data: raw.map(([status], i) => ({
+              filename: `f${i}.ts`,
+              status,
+              previous_filename: status === 'renamed' ? 'old.ts' : undefined,
+              additions: 1,
+              deletions: 0,
+              patch: '@@ -0,0 +1 @@\n+x',
+            })),
+          };
+        },
+      }),
+    },
+  });
+
+  const files = await provider.fetchChangedFiles(REF);
+  assert.equal(files.length, raw.length);
+  assert.deepEqual(
+    files.map((f) => f.status),
+    raw.map(([, expected]) => expected),
+  );
+  assert.equal(files.find((f) => f.status === 'renamed')!.previousPath, 'old.ts');
+});

@@ -5,7 +5,7 @@ import type { BatchComment, PrProvider } from './types.js';
 
 import { execErrorDetail } from '../util/exec-error.js';
 import { parseHttpUrl } from '../util/url.js';
-import { printable } from '../plugins/builtin.js';
+import { printable } from '../util/text.js';
 
 const CLOUD_API = 'https://api.github.com';
 
@@ -114,8 +114,8 @@ export function apiBaseFor(ref: PrRef): string {
  * object would resolve `constructor` or `toString` through Object.prototype and
  * hand back a function as a status.
  *
- * Cast-free by design. A cast used to launder GitHub's other three values
- * straight into the union, so every GitHub deletion arrived as `removed` (#29).
+ * Mapped rather than cast: a cast here let GitHub's four non-union values
+ * (`removed`, `copied`, `changed`, `unchanged`) through unchecked (#29).
  */
 const GITHUB_STATUS = new Map<string, ChangedFile['status']>([
   ['added', 'added'],
@@ -127,23 +127,41 @@ const GITHUB_STATUS = new Map<string, ChangedFile['status']>([
   ['renamed', 'renamed'],
 ]);
 
-/** One line per distinct unknown value, not per file: a 3000-file PR would otherwise bury its own log. */
+/**
+ * One line per distinct unknown value, not per file: a 3000-file PR would
+ * otherwise bury its own log. Capped as well as deduped, because the key is
+ * remote text — a response carrying a different bogus status per entry is
+ * exactly the flood the dedupe exists to prevent, and would retain one string
+ * per file for the life of the process.
+ */
 const warnedGitHubStatuses = new Set<string>();
+const MAX_STATUS_WARNINGS = 10;
+let suppressedStatusWarnings = false;
 
 /**
  * Exported so the mapping is unit-testable without the API — the same reason
  * `classifyChange` and `mapDiff` are exported in the other two providers.
+ *
+ * `raw` is typed `string` from Octokit but arrives over the wire: an absent or
+ * non-string value degrades like an unknown one rather than throwing, because a
+ * whole review must not die on a field that today has exactly one consumer
+ * outside the providers (`single-session.ts` renders it as prose).
  */
-export function mapGitHubStatus(raw: string): ChangedFile['status'] {
-  const mapped = GITHUB_STATUS.get(raw);
+export function mapGitHubStatus(raw: unknown): ChangedFile['status'] {
+  const mapped = typeof raw === 'string' ? GITHUB_STATUS.get(raw) : undefined;
   if (mapped) return mapped;
-  // An eighth value must not kill a review over a field whose only consumer
-  // renders it as prose — but it must not diverge in silence either.
-  if (!warnedGitHubStatuses.has(raw)) {
-    warnedGitHubStatuses.add(raw);
-    // printable(): the value is remote text, and a newline in it would forge a log line.
-    process.stderr.write(`[gather] unknown GitHub file status '${printable(raw)}' — treated as modified\n`);
+  const shown = typeof raw === 'string' ? raw : String(raw);
+  if (warnedGitHubStatuses.has(shown)) return 'modified';
+  if (warnedGitHubStatuses.size >= MAX_STATUS_WARNINGS) {
+    if (!suppressedStatusWarnings) {
+      suppressedStatusWarnings = true;
+      process.stderr.write('[gather] further unknown GitHub file statuses suppressed\n');
+    }
+    return 'modified';
   }
+  warnedGitHubStatuses.add(shown);
+  // printable(): the value is remote text, and a newline in it would forge a log line.
+  process.stderr.write(`[gather] unknown GitHub file status '${printable(shown)}' — treated as modified\n`);
   return 'modified';
 }
 

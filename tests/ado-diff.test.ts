@@ -55,10 +55,12 @@ test('classifyChange — rename OR-ed with edit (10) is still a rename, not a pl
   assert.equal(basePath, 'old/name.tmdl');
 });
 
-test('classifyChange — rename bit with a missing sourceServerItem falls back to the new path', () => {
-  // Still labelled renamed — the bit is what ADO reported; only the base path
-  // degrades. fetchChangedFiles drops previousPath in exactly this case.
-  assert.deepEqual(classifyChange(8, 'a.ts', undefined), { status: 'renamed', basePath: 'a.ts' });
+test('classifyChange — the rename bit without a sourceServerItem is not a rename we can describe', () => {
+  // `renamed` must never mean less here than on GitHub and GitLab, where it always
+  // pairs with a previousPath. With no source item there is no previous path to
+  // report, so this stays `modified` — which is also what it was before renames
+  // were labelled at all, so the base fetch is unchanged.
+  assert.deepEqual(classifyChange(8, 'a.ts', undefined), { status: 'modified', basePath: 'a.ts' });
 });
 
 test('lcsLineDiff — caps the DP matrix on huge inputs (coarse replace, no OOM, new-side lines intact)', () => {

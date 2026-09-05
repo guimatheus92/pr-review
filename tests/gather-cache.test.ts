@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { refreshCachedGatherIdentity, runGather } from '../src/commands/gather.js';
-import type { GatherOutput, PrRef } from '../src/types.js';
+import type { ChangedFile, GatherOutput, PrMetadata, PrRef } from '../src/types.js';
 import type { PrProvider } from '../src/providers/types.js';
 
 test('refreshCachedGatherIdentity — authoritative ADO project upgrades a stale cached payload', () => {
@@ -107,16 +111,11 @@ test('runGather — filtered legacy cache is bypassed and replaced with raw prov
   assert.equal(cached?.changedFiles.some((file) => file.excluded), false);
   assert.equal(cached?.changedFiles.find((file) => file.path === 'src/app.ts')?.patch, '@@\n+fresh');
 });
-// --- provider file-list completeness (issue #23) -------------------------------
-// GitHub's pulls/files stops at 3000 entries silently, ADO's iteration changes
-// page at 100 by default and GitLab reports "N+" for a truncated stored diff. The
-// list feeds every trust gate keyed on changedPaths, so a short list is unknown,
-// never "nothing else changed": gather completes it from the local checkout or
-// fails before anything is cached.
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import type { ChangedFile, PrMetadata } from '../src/types.js';
+// Provider file-list completeness (issue #23): GitHub's pulls/files stops at 3000
+// entries silently, ADO's iteration changes page at 100 by default and GitLab
+// reports "N+" for a truncated stored diff. The list feeds every trust gate keyed
+// on changedPaths, so a short list is unknown, never "nothing else changed":
+// gather completes it from the local checkout or fails before anything is cached.
 
 const GH_REF: PrRef = { provider: 'github', url: 'https://github.com/o/r/pull/1', owner: 'o', repo: 'r', number: 1 };
 const META: PrMetadata = {
@@ -195,9 +194,7 @@ test('runGather — a cache entry without the completeness marker predates the g
   assert.equal(fresh.fetches(), 0, 'a marked entry is served as before');
 });
 
-// --- completing a truncated list from the local checkout ------------------------
-import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+// Completing a truncated list from the local checkout.
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync(
@@ -267,19 +264,19 @@ test('runGather — a missing commit names the provider-specific fetch command; 
     const gh = fakeGithub({ ...META, baseSha, headSha: absent, changedFileCount: 6 }, [file('a.ts')]);
     await assert.rejects(
       () => runGather({ prUrl: GH_REF.url, provider: gh.provider, cwd: repo, readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' }),
-      (err: Error) => /is not in this checkout/.test(err.message) && /git fetch origin main refs\/pull\/1\/head/.test(err.message) && /never fetches/.test(err.message),
+      (err: Error) => /is not in this checkout/.test(err.message) && /git fetch origin 'main' 'refs\/pull\/1\/head'/.test(err.message) && /never fetches/.test(err.message),
     );
     const glRef: PrRef = { provider: 'gitlab', url: 'https://gitlab.com/o/r/-/merge_requests/7', owner: 'o', repo: 'r', number: 7 };
     const gl: PrProvider = { ...gh.provider, name: 'gitlab', parseUrl: () => ({ ...glRef }) };
     await assert.rejects(
       () => runGather({ prUrl: glRef.url, provider: gl, cwd: repo, readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' }),
-      /git fetch origin refs\/merge-requests\/7\/head/,
+      /git fetch origin 'refs\/merge-requests\/7\/head'/,
     );
     const adoRef: PrRef = { provider: 'azuredevops', url: 'https://dev.azure.com/o/p/_git/r/pullrequest/3', owner: 'o', organization: 'o', project: 'p', repo: 'r', number: 3 };
     const ado: PrProvider = { ...gh.provider, name: 'azuredevops', parseUrl: () => ({ ...adoRef }) };
     await assert.rejects(
       () => runGather({ prUrl: adoRef.url, provider: ado, cwd: repo, readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' }),
-      /git fetch origin main feature/,
+      /git fetch origin 'main' 'feature'/,
     );
   } finally {
     rmSync(repo, { recursive: true, force: true });
@@ -340,6 +337,7 @@ test('runGather — reviewer diff config and the PR\'s own attributes cannot res
   const prev = process.env.GIT_CONFIG_GLOBAL;
   process.env.GIT_CONFIG_GLOBAL = cfg;
   try {
+    assert.equal(git(repo, 'config', '--get', 'diff.external'), 'echo', 'GIT_CONFIG_GLOBAL is honoured by this git');
     const { provider } = fakeGithub({ ...META, baseSha, headSha, changedFileCount: 6 }, [file('a.ts')]);
     const result = await runGather({ prUrl: GH_REF.url, provider, cwd: join(repo, 'sub'), readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' });
     const by = (p: string) => result.changedFiles.find((f) => f.path === p)!;
@@ -348,6 +346,89 @@ test('runGather — reviewer diff config and the PR\'s own attributes cannot res
     assert.ok(by('b.ts').patch?.startsWith('@@'), 'diff.external / noprefix do not reach the patch');
   } finally {
     if (prev === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = prev;
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('runGather — a git completion that still falls short of the provider\'s count is refused, not marked complete', async () => {
+  // Git can only add what the checkout sees; if the union is still shorter than an exact count, the list is still unknown.
+  const { repo, baseSha, headSha } = prRepo();
+  try {
+    const { provider } = fakeGithub({ ...META, baseSha, headSha, changedFileCount: 7 }, [file('a.ts')]);
+    let writes = 0;
+    await assert.rejects(
+      () => runGather({ prUrl: GH_REF.url, provider, cwd: repo, readGatherCacheFn: () => null, writeGatherCacheFn: () => (writes++, 'x') }),
+      /still short \(6 of 7\)/,
+    );
+    assert.equal(writes, 0);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('runGather — a list LONGER than the provider\'s count is a mismatch too: completed from git when possible, otherwise refused as a disagreement', async () => {
+  // GitHub is documented to report changed_files: 0 for a stuck diff while still listing files.
+  const { repo, baseSha, headSha } = prRepo();
+  try {
+    const { provider } = fakeGithub({ ...META, baseSha, headSha, changedFileCount: 0 }, [file('a.ts')]);
+    const result = await runGather({ prUrl: GH_REF.url, provider, cwd: repo, readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' });
+    assert.equal(result.changedFiles.length, 6, 'git fills in what the count could not vouch for');
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+  const { provider } = fakeGithub({ ...META, changedFileCount: 0 }, [file('a.ts')]);
+  await withNoRepoDir(async (cwd) => {
+    await assert.rejects(
+      () => runGather({ prUrl: GH_REF.url, provider, cwd, readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' }),
+      (err: Error) => /disagrees with the provider's count/.test(err.message) && !/truncated/.test(err.message),
+    );
+  });
+});
+
+test('runGather — a shallow clone and a provider without a base commit are refused before any diff runs', async () => {
+  const { repo, baseSha, headSha } = prRepo();
+  const shallow = mkdtempSync(join(tmpdir(), 'pr-review-shallow-'));
+  try {
+    git(shallow, 'clone', '-q', '--depth', '2', 'file://' + repo.replace(/\\/g, '/'), 'clone');
+    const clone = join(shallow, 'clone');
+    git(clone, 'remote', 'set-url', 'origin', 'https://github.com/o/r.git');
+    assert.equal(git(clone, 'rev-parse', '--is-shallow-repository'), 'true', 'fixture really is shallow');
+    const { provider } = fakeGithub({ ...META, baseSha, headSha, changedFileCount: 6 }, [file('a.ts')]);
+    await assert.rejects(
+      () => runGather({ prUrl: GH_REF.url, provider, cwd: clone, readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' }),
+      /shallow/,
+    );
+    const noBase = fakeGithub({ ...META, baseSha: '', headSha, changedFileCount: 6 }, [file('a.ts')]);
+    await assert.rejects(
+      () => runGather({ prUrl: GH_REF.url, provider: noBase.provider, cwd: repo, readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' }),
+      /has not reported both base and head/,
+    );
+  } finally {
+    rmSync(shallow, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('runGather — unrelated histories and a non-hex commit id are refused with the designed message, never a raw git error', async () => {
+  const { repo, baseSha } = prRepo();
+  try {
+    git(repo, 'checkout', '-q', '--orphan', 'other');
+    git(repo, 'rm', '-rfq', '.');
+    writeFileSync(join(repo, 'z.ts'), 'z\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'orphan');
+    const orphanHead = git(repo, 'rev-parse', 'HEAD');
+    const orphan = fakeGithub({ ...META, baseSha, headSha: orphanHead, changedFileCount: 6 }, [file('a.ts')]);
+    await assert.rejects(
+      () => runGather({ prUrl: GH_REF.url, provider: orphan.provider, cwd: repo, readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' }),
+      (err: Error) => /no common ancestor/.test(err.message) && !/Command failed/.test(err.message),
+    );
+    const odd = fakeGithub({ ...META, baseSha, headSha: '--output=owned', changedFileCount: 6 }, [file('a.ts')]);
+    await assert.rejects(
+      () => runGather({ prUrl: GH_REF.url, provider: odd.provider, cwd: repo, readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' }),
+      /is not a hex commit id/,
+    );
+  } finally {
     rmSync(repo, { recursive: true, force: true });
   }
 });

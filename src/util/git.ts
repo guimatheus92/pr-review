@@ -1,4 +1,5 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { foldPath } from './realpath.js';
@@ -59,6 +60,20 @@ export function gitOut(root: string, args: string[]): string {
     maxBuffer: 64 * 1024 * 1024,
     timeout: 30_000,
   });
+}
+
+const execFileAsync = promisify(execFile);
+
+/** Async twin of `gitOut` for fan-out reads (one process per file): same flags, same throw-on-failure contract, and it does not block the event loop. */
+export async function gitOutAsync(root: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync('git', ['--no-optional-locks', ...args], {
+    cwd: root,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    timeout: 30_000,
+    windowsHide: true,
+  });
+  return stdout;
 }
 
 /** NUL-split stdout for `-z` listings: paths arrive raw, never C-quoted. */

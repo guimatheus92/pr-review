@@ -145,8 +145,9 @@ export class GitHubProvider implements PrProvider {
       updatedAt: pr.updated_at,
       isDraft: pr.draft ?? false,
       state: pr.merged ? 'merged' : (pr.state as 'open' | 'closed'),
-      // pulls/files stops at 3000 entries silently (page 31 is an empty 200); this
-      // is the real total, so gather can tell a capped list from a complete one.
+      // pulls/files stops at 3000 entries silently (page 31 is an empty 200). This is
+      // the total GitHub reports — 0 in a documented stuck-diff state, which is still
+      // a mismatch and still gated — so gather can tell a capped list from a complete one.
       changedFileCount: pr.changed_files,
     };
   }
@@ -209,8 +210,9 @@ export class GitHubProvider implements PrProvider {
 
   /**
    * Deliberately empty: `pulls.get` with the diff media type returns 406 above
-   * 300 files (undocumented) and was the only thing stopping 300–3000-file PRs
-   * from being reviewed; nothing in the pipeline reads `fullDiff` — the per-file
+   * 300 files (undocumented) and was the only thing stopping 300–500-file PRs
+   * from being reviewed (the in-scope file guard still applies above that);
+   * nothing in the pipeline reads `fullDiff` — the per-file
    * patches from `fetchChangedFiles` are the diff.
    */
   async fetchFullDiff(_ref: PrRef): Promise<string> {

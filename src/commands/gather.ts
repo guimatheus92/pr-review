@@ -8,10 +8,36 @@ import { readGatherCache, writeGatherCache } from '../cache/store.js';
 import type { PrProvider } from '../providers/types.js';
 import pLimit from 'p-limit';
 import { cwdMatchesPr, defaultGitRemote } from '../stack/detect.js';
-import { diffLines } from '../util/diff-lines.js';
-import { gitOut, gitTopLevel, gitZ } from '../util/git.js';
+import { countChangedLines } from '../util/diff-lines.js';
+import { gitOut, gitOutAsync, gitTopLevel, gitZ } from '../util/git.js';
 
 const PATCH_CONCURRENCY = 8;
+const HEX_ID = /^[0-9a-f]{7,64}$/i;
+const GIT_STATUS: Record<string, ChangedFile['status']> = { A: 'added', C: 'added', D: 'deleted', R: 'renamed' };
+
+/** Single-quote a ref for the copy-paste hint: a refname may carry shell metacharacters (`import { writeFileSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { resolvePr } from '../providers/index.js';
+import type { ChangedFile, GatherOutput, PrMetadata, PrRef } from '../types.js';
+import { applyDiffExclusions, summarizeExclusions } from '../dispatch/diff-filter.js';
+import { lastCommentIdFrom } from '../cache/keys.js';
+import { readGatherCache, writeGatherCache } from '../cache/store.js';
+import type { PrProvider } from '../providers/types.js';
+import pLimit from 'p-limit';
+import { cwdMatchesPr, defaultGitRemote } from '../stack/detect.js';
+, `;`, `|`), rarely a quote — both stay inert. */
+function shellQuote(ref: string): string {
+  return "'" + ref.split("'").join("'\\''") + "'";
+}
+
+/** What git said, for a refusal: stderr's first line, else the exit status (merge-base exits 1 in silence for unrelated histories), never the raw "Command failed" line. */
+function gitDetail(err: unknown): string {
+  const e = err as { stderr?: string; status?: number | null; message?: string };
+  const line = String(e.stderr ?? '').trim().split('\n')[0];
+  if (line) return line;
+  if (typeof e.status === 'number') return 'git exited with status ' + e.status;
+  return String(e.message ?? err).split('\n')[0] ?? 'git failed';
+}
 
 interface GatherCmdOptions {
   prUrl: string;
@@ -37,21 +63,27 @@ function listIsIncomplete(files: ChangedFile[], m: PrMetadata): boolean {
 }
 
 function truncationSummary(files: ChangedFile[], ref: PrRef, m: PrMetadata): string {
-  return m.changedFileListTruncated
-    ? `${ref.provider} listed ${files.length} changed files and reports the list as truncated (its stored diff overflowed)`
-    : `${ref.provider} listed ${files.length} of ${m.changedFileCount} changed files — file list truncated`;
+  if (m.changedFileListTruncated) {
+    return `${ref.provider} listed ${files.length} changed files and reports the list as truncated (its stored diff overflowed)`;
+  }
+  // Strict equality on purpose: GitHub is documented to report changed_files: 0
+  // for a stuck diff whose list is still cut at 3000 — "shorter than" would call
+  // that complete. A longer list is a disagreement, not a truncation.
+  return files.length < (m.changedFileCount ?? 0)
+    ? `${ref.provider} listed ${files.length} of ${m.changedFileCount} changed files — file list truncated`
+    : `${ref.provider} listed ${files.length} changed files against a reported count of ${m.changedFileCount} — file list disagrees with the provider's count`;
 }
 
 /** GitHub's base.sha is the base-branch TIP (not an ancestor of head), so both refs are named; GitLab's base_sha is the merge base, reachable from the MR head. */
 function fetchHint(ref: PrRef, m: PrMetadata): string {
-  if (ref.provider === 'github') return `git fetch origin ${m.baseBranch} refs/pull/${ref.number}/head`;
-  if (ref.provider === 'gitlab') return `git fetch origin refs/merge-requests/${ref.number}/head`;
-  return `git fetch origin ${m.baseBranch} ${m.headBranch}`;
+  if (ref.provider === 'github') return `git fetch origin ${shellQuote(m.baseBranch)} ${shellQuote(`refs/pull/${ref.number}/head`)}`;
+  if (ref.provider === 'gitlab') return `git fetch origin ${shellQuote(`refs/merge-requests/${ref.number}/head`)}`;
+  return `git fetch origin ${shellQuote(m.baseBranch)} ${shellQuote(m.headBranch)}`;
 }
 
 function refusal(files: ChangedFile[], ref: PrRef, m: PrMetadata, reason: string): Error {
   return new Error(
-    `${truncationSummary(files, ref, m)}; ${reason}. pr-review completes the list from git only from a checkout of ${ref.owner}/${ref.repo} (remote origin) that already has base ${m.baseSha || '<unknown>'} and head ${m.headSha}: run '${fetchHint(ref, m)}' there and retry (pr-review never fetches into your checkout)`,
+    `${truncationSummary(files, ref, m)}; ${reason}. pr-review completes the list from git only from a checkout of ${ref.owner}/${ref.repo} (remote origin) that already has base ${m.baseSha || '<unknown>'} and head ${m.headSha}: run ${fetchHint(ref, m)} there and retry (pr-review never fetches into your checkout)`,
   );
 }
 
@@ -73,10 +105,12 @@ async function completeFromGit(files: ChangedFile[], ref: PrRef, m: PrMetadata, 
     throw refuse('the provider has not reported both base and head commits yet (a fresh PR may still be computing its diff) — retry shortly');
   }
   for (const [name, sha] of [['base', m.baseSha], ['head', m.headSha]] as const) {
+    // Provider-supplied ids become git arguments: only a hex object id gets that far.
+    if (!HEX_ID.test(sha)) throw refuse(name + " commit id '" + sha + "' is not a hex commit id");
     try {
       gitOut(root, ['cat-file', '-e', sha + '^{commit}']);
-    } catch {
-      throw refuse(name + ' commit ' + sha + ' is not in this checkout');
+    } catch (err) {
+      throw refuse(name + ' commit ' + sha + ' is not in this checkout (' + gitDetail(err) + ')');
     }
   }
   if (gitOut(root, ['rev-parse', '--is-shallow-repository']).trim() !== 'false') {
@@ -84,7 +118,12 @@ async function completeFromGit(files: ChangedFile[], ref: PrRef, m: PrMetadata, 
   }
   // One merge base, or git and the provider may have diffed against different
   // ancestors — and the branch under review controls which files that hides.
-  const bases = gitOut(root, ['merge-base', '--all', m.baseSha, m.headSha]).split('\n').map((line) => line.trim()).filter(Boolean);
+  let bases: string[];
+  try {
+    bases = gitOut(root, ['merge-base', '--all', m.baseSha, m.headSha]).split('\n').map((line) => line.trim()).filter(Boolean);
+  } catch (err) {
+    throw refuse('base and head share no common ancestor, or git could not compute their merge base (' + gitDetail(err) + ')');
+  }
   if (bases.length !== 1) {
     throw refuse('base and head have ' + bases.length + " merge bases (criss-cross history), so git cannot reproduce the provider's diff");
   }
@@ -92,7 +131,8 @@ async function completeFromGit(files: ChangedFile[], ref: PrRef, m: PrMetadata, 
 
   const known = new Set(files.map((file) => file.path));
   const missing: ChangedFile[] = [];
-  // -z tokens: `X\0path\0`; a rename or copy is `R100\0old\0new\0` (same shape gitProvenance parses).
+  // -z tokens: `X\0path\0`; a rename or copy is `R100\0old\0new\0` — old path first
+  // (status --porcelain -z, which gitProvenance parses, lists the NEW path first).
   const tokens = gitZ(root, ['diff-tree', '-r', '-M', '-z', '--name-status', mergeBase, m.headSha]);
   for (let i = 0; i < tokens.length; ) {
     const code = tokens[i]![0];
@@ -100,37 +140,40 @@ async function completeFromGit(files: ChangedFile[], ref: PrRef, m: PrMetadata, 
     const path = previousPath ? tokens[i + 2]! : tokens[i + 1]!;
     i += previousPath ? 3 : 2;
     if (known.has(path)) continue; // the provider's entry, with its own patch, wins
-    const status: ChangedFile['status'] = code === 'A' || code === 'C' ? 'added' : code === 'D' ? 'deleted' : code === 'R' ? 'renamed' : 'modified';
-    missing.push({ path, status, ...(previousPath ? { previousPath } : {}), additions: 0, deletions: 0 });
+    missing.push({ path, status: GIT_STATUS[code ?? ''] ?? 'modified', ...(previousPath ? { previousPath } : {}), additions: 0, deletions: 0 });
+  }
+  // Git can only add what this checkout sees. Against an exact count the union
+  // must reach it, or the list is still unknown; "N+" carries no count to reach.
+  const union = [...files, ...missing];
+  if (!m.changedFileListTruncated && m.changedFileCount !== undefined && union.length < m.changedFileCount) {
+    throw new Error(
+      `${truncationSummary(files, ref, m)}; git completed ${missing.length} file(s) from ${root} but the list is still short (${union.length} of ${m.changedFileCount}) — this checkout does not reproduce the provider's diff, refusing to review an unknown file list`,
+    );
   }
 
-  // ponytail: one spawn per missing file (~4 ms effective, 8 wide). A single
-  // pathspec-less diff would need a `diff --git` header parser (headers stay
-  // C-quoted even under -z) and a Windows argv budget; revisit only if a real
-  // PR makes this the slow step.
+  // ponytail: one async spawn per missing file, 8 wide. A single pathspec-less
+  // diff would need a `diff --git` header parser (headers stay C-quoted even
+  // under -z) and a Windows argv budget; revisit only if a real PR makes this
+  // the slow step.
   const limit = pLimit(PATCH_CONCURRENCY);
   await Promise.all(
     missing.map((file) =>
       limit(async () => {
         // Both sides of a rename, or -M sees a bare add; --literal-pathspecs so a
         // `*` or `[` in a file name is a name, not a glob.
-        const out = gitOut(root, [
+        const out = await gitOutAsync(root, [
           '--literal-pathspecs', 'diff-tree', '-r', '-M', '-p', '--no-color', mergeBase, m.headSha, '--',
           file.path, ...(file.previousPath ? [file.previousPath] : []),
         ]);
         const hunk = out.search(/^@@ /m);
         if (hunk < 0) return; // binary, pure rename, mode-only, or a -diff attribute: patch-less, as providers report binaries
         file.patch = out.slice(hunk).trimEnd();
-        for (const line of diffLines(file.patch)) {
-          if (line.startsWith('@@')) continue;
-          if (line.startsWith('+')) file.additions++;
-          else if (line.startsWith('-')) file.deletions++;
-        }
+        Object.assign(file, countChangedLines(file.patch));
       }),
     ),
   );
   process.stderr.write('[gather] ' + truncationSummary(files, ref, m) + '; completed ' + missing.length + ' file(s) from git at ' + root + '\n');
-  return [...files, ...missing];
+  return union;
 }
 
 export function refreshCachedGatherIdentity(gather: GatherOutput, ref: GatherOutput['pr']): GatherOutput {
@@ -185,7 +228,9 @@ export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
     provider.fetchChangedFiles(ref),
     provider.fetchFullDiff(ref),
   ]);
-  // A short list is completed from the checkout or refused — never reviewed, never cached.
+  // A list of any other length than the provider's count, or one declared
+  // truncated, is completed from the checkout or refused — never reviewed as-is,
+  // never cached.
   const changedFilesRaw = listIsIncomplete(changedFilesProvider, metadata)
     ? await completeFromGit(changedFilesProvider, ref, metadata, opts.cwd ?? process.cwd())
     : changedFilesProvider;

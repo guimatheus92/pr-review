@@ -7,7 +7,7 @@ import type { PrProvider } from './types.js';
 import { withRetry } from '../util/retry.js';
 import { execErrorDetail } from '../util/exec-error.js';
 import { parseHttpUrl, safeDecode } from '../util/url.js';
-import { diffLines } from '../util/diff-lines.js';
+import { countChangedLines } from '../util/diff-lines.js';
 
 const ADO_AZURE_AD_RESOURCE_ID = '499b84ac-1321-427f-aa17-267ca6975798';
 
@@ -370,9 +370,11 @@ export class AzureDevOpsProvider implements PrProvider {
       const batch = page.changeEntries ?? [];
       entries.push(...batch);
       // Every documented sample response OMITS nextSkip rather than sending 0, so
-      // termination cannot hinge on it: a short or empty page ends the list, a full
-      // page without a cursor is probed once more, and a cursor that does not
-      // advance is an error — never a silent stop on a possibly-truncated list.
+      // termination cannot hinge on it. The loop ends on an empty page, or on a
+      // page shorter than ADO_CHANGES_PAGE that carries no cursor; a full page
+      // without a cursor is probed once more (skip advances by the batch); a
+      // cursor that does not advance throws — never a silent stop on a
+      // possibly-truncated list.
       const next = page.nextSkip ?? 0;
       if (batch.length === 0 || (next === 0 && batch.length < ADO_CHANGES_PAGE)) break;
       const advance = next || skip + batch.length;
@@ -408,17 +410,9 @@ export class AzureDevOpsProvider implements PrProvider {
             ]);
             patch = synthesizePatch(path, baseContent, headContent, baseSha ?? '', headSha);
           }
-          let additions = 0;
-          let deletions = 0;
-          if (patch) {
-            // diffLines strips only the file-header preamble — `+++…` inside
-            // content is a real added line (text beginning `++`) and counts.
-            for (const line of diffLines(patch)) {
-              if (line.startsWith('@@')) continue;
-              if (line.startsWith('+')) additions++;
-              else if (line.startsWith('-')) deletions++;
-            }
-          }
+          // countChangedLines strips only the file-header preamble — `+++…` inside
+          // content is a real added line (text beginning `++`) and counts.
+          const { additions, deletions } = patch ? countChangedLines(patch) : { additions: 0, deletions: 0 };
           return { path, status, additions, deletions, patch };
         }),
       ),

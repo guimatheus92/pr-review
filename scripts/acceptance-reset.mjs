@@ -1,0 +1,227 @@
+// Token resolution and comment teardown for the acceptance fixture PRs.
+//
+// Deliberately plain `fetch` rather than the product's PrProvider: deleting
+// comments is a test-only verb, and the production interface must not grow one.
+// The URL parsers here are minimal on purpose — they only ever see the fixture
+// URLs in evals/acceptance/matrix.yaml.
+//
+// Token precedence mirrors the providers' own (src/providers/*.ts) so one code
+// path serves CI (env vars set) and local runs (CLI fallback). The one
+// deliberate difference: COPILOT_GITHUB_TOKEN is NOT consulted for GitHub. In
+// Actions that variable holds the Copilot CLI's token, which has no access to
+// the fixture repo, and silently reaching for it would produce a 404 that looks
+// like a missing PR.
+
+import { execFileSync } from 'node:child_process';
+
+const GITHUB_API = 'https://api.github.com';
+
+function cli(file, args) {
+  try {
+    const out = execFileSync(file, args, { stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' }).trim();
+    return out.length > 0 ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+/** @returns {{scheme: 'bearer'|'basic'|'token', value: string}} */
+export function resolveToken(provider, host) {
+  if (provider === 'github') {
+    const env = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
+    const token = env ?? cli('gh', ['auth', 'token']);
+    if (!token) throw new Error('no GitHub token: set GITHUB_TOKEN or run `gh auth login`');
+    return { scheme: 'bearer', value: token };
+  }
+  if (provider === 'gitlab') {
+    const env = process.env.GITLAB_TOKEN ?? process.env.GITLAB_ACCESS_TOKEN;
+    const token = env ?? cli('glab', ['config', 'get', 'token', '-h', host ?? 'gitlab.com']);
+    if (!token) throw new Error('no GitLab token: set GITLAB_TOKEN (scope `api`) or run `glab auth login`');
+    return { scheme: 'bearer', value: token };
+  }
+  if (provider === 'azuredevops') {
+    const pat = process.env.AZURE_DEVOPS_PAT ?? process.env.SYSTEM_ACCESSTOKEN ?? process.env.AZURE_DEVOPS_EXT_PAT;
+    if (pat) return { scheme: 'basic', value: Buffer.from(`:${pat}`).toString('base64') };
+    const bearer =
+      process.env.AZURE_DEVOPS_BEARER ??
+      cli('az', ['account', 'get-access-token', '--resource', '499b84ac-1321-427f-aa17-267ca6975798', '--query', 'accessToken', '-o', 'tsv']);
+    if (!bearer) {
+      throw new Error('no Azure DevOps credential: set AZURE_DEVOPS_PAT (Code read+write, PR Threads read+write) or run `az login`');
+    }
+    return { scheme: 'bearer', value: bearer };
+  }
+  throw new Error(`unknown provider: ${provider}`);
+}
+
+function authHeader(token) {
+  return token.scheme === 'basic' ? `Basic ${token.value}` : `Bearer ${token.value}`;
+}
+
+/** Parse one of the three fixture PR URL shapes into the fields the REST calls need. */
+export function parsePrUrl(url) {
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    throw new Error(`not a URL: ${url}`);
+  }
+  const parts = u.pathname.split('/').filter(Boolean);
+
+  const ado = parts.indexOf('_git');
+  if (ado !== -1) {
+    // dev.azure.com/<org>[/<project>]/_git/<repo>/pullrequest/<id>
+    const lead = parts.slice(0, ado);
+    const org = lead[0];
+    const project = lead[1] ?? lead[0];
+    const repo = parts[ado + 1];
+    const number = Number(parts[ado + 3]);
+    if (!org || !repo || !Number.isInteger(number)) throw new Error(`unrecognised Azure DevOps PR URL: ${url}`);
+    return { provider: 'azuredevops', host: u.host, origin: u.origin, org, project, repo, number };
+  }
+
+  const mr = parts.indexOf('merge_requests');
+  if (mr !== -1) {
+    // <host>/<namespace...>/[-/]merge_requests/<iid>
+    const lead = parts.slice(0, mr).filter((p) => p !== '-');
+    const number = Number(parts[mr + 1]);
+    if (lead.length < 2 || !Number.isInteger(number)) throw new Error(`unrecognised GitLab MR URL: ${url}`);
+    return { provider: 'gitlab', host: u.host, origin: u.origin, project: lead.join('/'), number };
+  }
+
+  const pull = parts.indexOf('pull');
+  if (pull === 2) {
+    const number = Number(parts[3]);
+    if (!Number.isInteger(number)) throw new Error(`unrecognised GitHub PR URL: ${url}`);
+    return { provider: 'github', host: u.host, origin: u.origin, owner: parts[0], repo: parts[1], number };
+  }
+
+  throw new Error(`unrecognised PR URL: ${url}`);
+}
+
+async function api(url, token, init = {}) {
+  const res = await fetch(url, {
+    ...init,
+    headers: {
+      authorization: authHeader(token),
+      accept: 'application/json',
+      'content-type': 'application/json',
+      'user-agent': 'pr-review-acceptance',
+      ...(init.headers ?? {}),
+    },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`${init.method ?? 'GET'} ${url} → ${res.status} ${res.statusText} ${body.slice(0, 300)}`);
+  }
+  return res;
+}
+
+async function githubPaged(url, token) {
+  const out = [];
+  let next = url;
+  while (next) {
+    const res = await api(next, token);
+    out.push(...(await res.json()));
+    const link = res.headers.get('link') ?? '';
+    const match = /<([^>]+)>;\s*rel="next"/.exec(link);
+    next = match ? match[1] : null;
+  }
+  return out;
+}
+
+/**
+ * Every comment on the fixture PR that a run could have written, normalised to
+ * `{ id, kind, body, author, inline }`.
+ *
+ * System/service notes are excluded: GitLab's are undeletable, and Azure DevOps
+ * emits them for every push.
+ */
+export async function listComments(pr, token) {
+  if (pr.provider === 'github') {
+    const base = `${GITHUB_API}/repos/${pr.owner}/${pr.repo}`;
+    const [inline, issue] = await Promise.all([
+      githubPaged(`${base}/pulls/${pr.number}/comments?per_page=100`, token),
+      githubPaged(`${base}/issues/${pr.number}/comments?per_page=100`, token),
+    ]);
+    return [
+      ...inline.map((c) => ({ id: c.id, kind: 'review', body: c.body ?? '', author: c.user?.login ?? '?', inline: true })),
+      ...issue.map((c) => ({ id: c.id, kind: 'issue', body: c.body ?? '', author: c.user?.login ?? '?', inline: false })),
+    ];
+  }
+  if (pr.provider === 'gitlab') {
+    const project = encodeURIComponent(pr.project);
+    const out = [];
+    for (let page = 1; ; page++) {
+      const res = await api(`${pr.origin}/api/v4/projects/${project}/merge_requests/${pr.number}/notes?per_page=100&page=${page}`, token);
+      const batch = await res.json();
+      out.push(...batch);
+      const next = res.headers.get('x-next-page');
+      if (!next) break;
+    }
+    return out
+      .filter((n) => n.system !== true)
+      .map((n) => ({ id: n.id, kind: 'note', body: n.body ?? '', author: n.author?.username ?? '?', inline: Boolean(n.position) }));
+  }
+  // Azure DevOps: threads, each with comments. Deleted comments linger as
+  // tombstones (isDeleted, empty content) — harmless for dedupe, since the
+  // Jaccard of an empty token set against anything is 0, but they must not be
+  // counted as "still dirty" after a reset.
+  const url = `${pr.origin}/${pr.org}/${pr.project}/_apis/git/repositories/${pr.repo}/pullRequests/${pr.number}/threads?api-version=7.1`;
+  const res = await api(url, token);
+  const { value = [] } = await res.json();
+  return value.flatMap((thread) =>
+    (thread.comments ?? [])
+      .filter((c) => c.isDeleted !== true && (c.content ?? '').trim() !== '' && c.commentType !== 'system')
+      .map((c) => ({
+        id: `${thread.id}/${c.id}`,
+        kind: 'thread',
+        body: c.content ?? '',
+        author: c.author?.displayName ?? '?',
+        inline: Boolean(thread.threadContext?.filePath),
+      })),
+  );
+}
+
+export async function deleteComment(pr, token, comment) {
+  if (pr.provider === 'github') {
+    const base = `${GITHUB_API}/repos/${pr.owner}/${pr.repo}`;
+    const path = comment.kind === 'review' ? `pulls/comments/${comment.id}` : `issues/comments/${comment.id}`;
+    await api(`${base}/${path}`, token, { method: 'DELETE' });
+    return;
+  }
+  if (pr.provider === 'gitlab') {
+    const project = encodeURIComponent(pr.project);
+    await api(`${pr.origin}/api/v4/projects/${project}/merge_requests/${pr.number}/notes/${comment.id}`, token, { method: 'DELETE' });
+    return;
+  }
+  const [threadId, commentId] = String(comment.id).split('/');
+  const url = `${pr.origin}/${pr.org}/${pr.project}/_apis/git/repositories/${pr.repo}/pullRequests/${pr.number}/threads/${threadId}/comments/${commentId}?api-version=7.1`;
+  await api(url, token, { method: 'DELETE' });
+}
+
+/**
+ * Clean the fixture PR, then PROVE it is clean.
+ *
+ * Reset runs before a cell, never after — an after-reset is exactly the step a
+ * cancelled run skips, which is how a fixture PR stays dirty for the next run.
+ * The re-read is the load-bearing half: a leftover comment silently drops
+ * `must_find` findings through dedupeAgainstExisting (±3 lines + Jaccard), and
+ * you would spend the afternoon debugging the model instead of the harness.
+ */
+export async function resetPr(url, { log = () => {} } = {}) {
+  const pr = parsePrUrl(url);
+  const token = resolveToken(pr.provider, pr.host);
+  const before = await listComments(pr, token);
+  for (const comment of before) {
+    await deleteComment(pr, token, comment);
+  }
+  const after = await listComments(pr, token);
+  if (after.length > 0) {
+    throw new Error(
+      `${url}: ${after.length} comment(s) survived the reset (${after.slice(0, 3).map((c) => `${c.kind}:${c.id} by ${c.author}`).join(', ')}) — ` +
+        'refusing to review against a poisoned baseline, which would silently dedupe expected findings away',
+    );
+  }
+  log(`reset ${url}: deleted ${before.length} comment(s), 0 remain`);
+  return { deleted: before.length };
+}

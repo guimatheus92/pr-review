@@ -1,0 +1,42 @@
+# Shared by every acceptance cell — all three providers, both runtimes.
+#
+# One expectation file on purpose: the three fixture repos hold byte-identical
+# content, so a cell that fails here while its siblings pass is a provider or
+# runtime defect, never a fixture difference.
+#
+# Schema is the eval harness's (scripts/eval-assertions.mjs).
+
+must_find:
+  # The repo skill reached the session. A missing audit call is not a defect any
+  # generic reviewer invents, and the rule id cannot be guessed — so this string
+  # appearing in a finding is proof that .claude/skills/team-rules.md was loaded
+  # as project context. This is the load-bearing assertion of the whole matrix.
+  - "ACC-LOG-002"
+  # Generic security knowledge, from the packs rather than the repo.
+  - "sql injection|parameteri[sz]|prepared statement|string concatenation into"
+  - "shell=True|command injection|shell metachar|shell injection"
+
+# One generic "this file has problems" finding must not satisfy all three.
+distinct_findings: true
+
+must_not_find:
+  # The control handler is correct on both counts. Flagging it is a false
+  # positive, and without this line a fixture broken enough to flag everything
+  # would still pass.
+  - "greetHandler"
+
+stack:
+  include:
+    - typescript
+    - python
+    - sql
+
+dependencies:
+  include:
+    # express and pg come from the checkout's package.json — they only appear if
+    # the cell ran inside a clone whose origin matches the PR (cwdIsPrRepo).
+    - express
+    - pg
+    # django is added by the PR's own requirements.txt diff, which is a separate
+    # code path from the checkout scan.
+    - django

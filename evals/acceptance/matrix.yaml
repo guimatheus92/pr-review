@@ -1,0 +1,42 @@
+# The acceptance estate: public identifiers only, never secrets.
+#
+# Fill these in once, after creating the three repos (see README.md), then run
+# `node scripts/acceptance-seed.mjs` to create the branches and pull requests.
+# The seeder writes the PR/MR numbers back into this file.
+
+providers:
+  github:
+    # Clone URL the runner uses. Public, so no credential is embedded.
+    clone: https://github.com/CHANGE-ME/pr-review-acceptance.git
+    # Base URL of the repo, used to build PR URLs.
+    web: https://github.com/CHANGE-ME/pr-review-acceptance
+    # Filled in by acceptance-seed.mjs.
+    pulls:
+      claude: null
+      copilot: null
+
+  azuredevops:
+    clone: https://dev.azure.com/CHANGE-ME/acceptance/_git/pr-review-acceptance
+    web: https://dev.azure.com/CHANGE-ME/acceptance/_git/pr-review-acceptance
+    pulls:
+      claude: null
+      copilot: null
+
+  gitlab:
+    clone: https://gitlab.com/CHANGE-ME/pr-review-acceptance.git
+    web: https://gitlab.com/CHANGE-ME/pr-review-acceptance
+    pulls:
+      claude: null
+      copilot: null
+    # GitLab-only: the wide MR that trips the truncated-file-list gate.
+    # 101 files, because GitLab reports changes_count "100+" above 100 — the
+    # only provider where that gate is reachable without thousands of files.
+    wide: null
+
+# Branches the seeder creates. One per runtime so two cells never write to the
+# same pull request: sharing one would need a serialization lock, and the second
+# run would dedupe against the first run's comments.
+branches:
+  claude: acc/defects-claude
+  copilot: acc/defects-copilot
+  wide: acc/wide

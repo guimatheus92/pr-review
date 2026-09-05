@@ -12,6 +12,8 @@
     "build:watch": "tsc --watch",
     "bundle": "node scripts/bundle.mjs",
     "dogfood": "node scripts/dogfood.mjs",
+    "acceptance": "node scripts/acceptance.mjs",
+    "acceptance:seed": "node scripts/acceptance-seed.mjs",
     "test": "node scripts/test.mjs",
     "clean": "rimraf dist",
     "prepare": "npm run build"

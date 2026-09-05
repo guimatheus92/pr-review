@@ -134,6 +134,25 @@ Precedence per [Copilot CLI programmatic reference](https://docs.github.com/en/c
 
 The token must come from an identity holding an active Copilot Business / Enterprise / Pro seat.
 
+## Auditing a run in CI
+
+`pr-review verify --json` grades a finished run against every guarantee in
+`INVARIANTS.md` and exits **2** on any violation. It is read-only — it never
+posts, deletes or rewrites anything — so it is safe to add as a step after the
+review:
+
+```yaml
+- run: pr-review review "$PR_URL"
+- run: pr-review verify --pr "$PR_URL" --json
+  if: always()
+```
+
+Exit 0 means every invariant passed or was explicitly skipped with a reason;
+exit 2 means the run broke a guarantee (a top-level comment appeared, a finding
+never landed, the file list was never proved complete, a planned pass delivered
+nothing). Add `--offline` to grade from the run artifacts alone when you do not
+want the extra provider read.
+
 ## What about `pr-review init`?
 
 `pr-review init` deliberately does NOT generate these YAML files. CI configurations are better hand-authored by the team owning the pipeline; we provide the templates above for reference, not as a generator output.

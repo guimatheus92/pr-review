@@ -116,6 +116,19 @@ export interface VerifyContext {
   liveUnavailable: string | null;
   /** Author of the comments this run provably wrote, when derivable. */
   selfAuthor: string | null;
+  /**
+   * The PR has new commits since the run.
+   *
+   * Location-keyed comparisons stop being sound at that point: GitHub reports
+   * `line: null` for a comment outdated by a push and the provider falls back
+   * to `original_line`, so a comment this run wrote now answers at a different
+   * line than the finding it came from. Rows that key on location downgrade to
+   * SKIP rather than manufacture a FAIL nobody can act on — a verifier that
+   * cries wolf on every merged PR is one people stop reading.
+   */
+  prAdvanced: boolean;
+  /** `<old>→<new>` for the evidence line, when the PR advanced. */
+  advancedFrom: string | null;
 }
 
 const pass = (evidence: string): CheckResult => ({ status: 'pass', evidence });
@@ -193,9 +206,14 @@ export const CHECKS: InvariantCheck[] = [
       const missing = [...remaining.entries()].filter(([, n]) => n > 0);
       const total = [...ctx.expectedKeys.values()].reduce((a, b) => a + b, 0);
       const short = missing.reduce((a, [, n]) => a + n, 0);
-      return missing.length === 0
-        ? pass(`${total}/${total} findings present as inline threads`)
-        : fail(`${total - short}/${total} present; missing: ${sample(missing.map(([key]) => describeKey(key)))}`);
+      if (missing.length === 0) return pass(`${total}/${total} findings present as inline threads`);
+      if (ctx.prAdvanced) {
+        return skip(
+          `${total - short}/${total} matched by location; the rest cannot be graded because the PR advanced ` +
+            `(${ctx.advancedFrom}) and outdated comments answer at their original line`,
+        );
+      }
+      return fail(`${total - short}/${total} present; missing: ${sample(missing.map(([key]) => describeKey(key)))}`);
     },
   },
   {
@@ -273,6 +291,12 @@ export const CHECKS: InvariantCheck[] = [
     needs: 'run+pr',
     run(ctx) {
       if (!ctx.selfAuthor) return skip('no comment from this run identified, so an unplanned write cannot be attributed');
+      if (ctx.prAdvanced) {
+        return skip(
+          `the PR advanced since the run (${ctx.advancedFrom}); a re-anchored comment and an unplanned one are ` +
+            'indistinguishable by location once the diff moves',
+        );
+      }
       const unplanned = ctx.liveWindow!.filter((c) => {
         if (c.author !== ctx.selfAuthor || !c.file) return false;
         return !ctx.expectedKeys.has(commentKey(c.file, c.line, c.body));
@@ -305,15 +329,21 @@ export const CHECKS: InvariantCheck[] = [
     needs: 'run+pr',
     run(ctx) {
       if (ctx.gather.changedFilesComplete !== true) {
+        // A gather carrying NEITHER the marker nor a provider count predates
+        // the completeness gate (0.11.0), which introduced both. That run
+        // cannot prove its list was whole, but it did not break a rule that
+        // did not exist — and the distinction is not defeatable by a current
+        // run: once the gate exists the marker is always written, including on
+        // Azure DevOps, which reports no count at all.
+        if (ctx.gather.metadata.changedFileCount === undefined) {
+          return skip('this run predates the file-list completeness gate (no marker and no provider count recorded)');
+        }
         return fail('pr-review-gather.json has no changedFilesComplete marker — the run reviewed a file list it never proved complete');
       }
       const listed = ctx.gather.changedFiles.length;
       const live = ctx.liveMetadata?.changedFileCount;
-      if (ctx.liveMetadata && ctx.plan && ctx.liveMetadata.headSha !== ctx.plan.metadata.headSha) {
-        return pass(
-          `changedFilesComplete=true over ${listed} file(s); live count not compared — the PR advanced since the run ` +
-            `(${ctx.plan.metadata.headSha.slice(0, 7)} → ${ctx.liveMetadata.headSha.slice(0, 7)})`,
-        );
+      if (ctx.prAdvanced) {
+        return pass(`changedFilesComplete=true over ${listed} file(s); live count not compared — the PR advanced (${ctx.advancedFrom})`);
       }
       if (live === undefined) return pass(`changedFilesComplete=true over ${listed} file(s); the provider reports no count to compare`);
       // gather stamps the marker on the RAW list; exclusions run after, so the
@@ -462,7 +492,7 @@ export const CHECKS: InvariantCheck[] = [
         );
       }
       const covered = ctx.plan.runtime === 'copilot' ? `${inventory.length} inventoried server(s) denied by name` : 'denied categorically (--strict-mcp-config)';
-      return pass(`${ctx.plan.runtime}: ${covered}; ${usage.length} pass sidecar(s) report no MCP reached`);
+      return pass(`${ctx.plan.runtime}: ${covered}; no MCP reached in ${usage.length} pass sidecar(s)`);
     },
   },
   {
@@ -698,12 +728,25 @@ export async function loadVerifyContext(opts: {
     }
   }
 
+  // The window needs a CEILING as well as a floor. `runPost` only ever needs
+  // the floor, because it reads back during its own post — but verify can be
+  // pointed at a run from last week on a PR that has been reviewed three times
+  // since, and without an upper bound every later run's comments read as
+  // "written by this run and never planned". Observed on the first live run of
+  // this command: 33 of 58 comments on a re-reviewed PR.
+  const marker = readPostedMarker(runDir, opts.home);
+  const finishedAt = finalization ? Date.parse(finalization.completedAt) : NaN;
+  const postedAt = marker && marker !== 'corrupt' ? marker.postedAt : NaN;
+  const ceilingSource = Number.isFinite(finishedAt) ? finishedAt : postedAt;
+  const ceiling = Number.isFinite(ceilingSource) ? ceilingSource + CLOCK_SLACK_MS : Infinity;
+
   const liveWindow =
     liveAll === null
       ? null
       : liveAll.filter((c) => {
           const at = Date.parse(c.createdAt);
-          return !Number.isFinite(at) || at >= floor;
+          if (!Number.isFinite(at)) return true;
+          return at >= floor && at <= ceiling;
         });
 
   // Identity by confirmed write: a comment matching a key this run planned to
@@ -720,6 +763,12 @@ export async function loadVerifyContext(opts: {
     selfAuthor = [...votes.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
   }
 
+  const prAdvanced = Boolean(liveMetadata && plan && liveMetadata.headSha !== plan.metadata.headSha);
+  const advancedFrom =
+    prAdvanced && plan && liveMetadata
+      ? `${plan.metadata.headSha.slice(0, 7)} → ${liveMetadata.headSha.slice(0, 7)}`
+      : null;
+
   const capabilityFiles: Record<string, string> = {};
   for (const file of existsSync(runDir) ? readdirSync(runDir) : []) {
     if (file.startsWith('capability-') && file.endsWith('.json')) {
@@ -735,7 +784,7 @@ export async function loadVerifyContext(opts: {
     plan,
     state,
     finalization,
-    marker: readPostedMarker(runDir, opts.home),
+    marker,
     findings,
     stack: readJson<StackArtifact>(join(runDir, 'stack.json')),
     routes,
@@ -751,6 +800,8 @@ export async function loadVerifyContext(opts: {
     liveMetadata,
     liveUnavailable,
     selfAuthor,
+    prAdvanced,
+    advancedFrom,
   };
 }
 

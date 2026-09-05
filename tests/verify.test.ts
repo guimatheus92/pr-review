@@ -331,13 +331,68 @@ test('verify — a gather without changedFilesComplete fails INV-FETCH-01', asyn
   }
 });
 
+test('verify — a pre-0.11 gather is unprovable, not a violation, and cannot be faked by a current run', async () => {
+  const f = healthyRun({ changedFilesComplete: false });
+  try {
+    // Neither the marker nor a provider count: the gate did not exist yet.
+    const path = join(f.runDir, 'pr-review-gather.json');
+    const gather = JSON.parse(readFileSync(path, 'utf8'));
+    delete gather.metadata.changedFileCount;
+    writeFileSync(path, JSON.stringify(gather), 'utf8');
+    const legacy = row(await rowsFor(f), 'INV-FETCH-01');
+    assert.equal(legacy.status, 'skip');
+    assert.match(legacy.evidence, /predates the file-list completeness gate/);
+
+    // Once the provider count is recorded the gate existed, so a missing marker
+    // is a real violation again — a current run cannot reach the legacy branch.
+    gather.metadata.changedFileCount = 1;
+    writeFileSync(path, JSON.stringify(gather), 'utf8');
+    assert.equal(row(await rowsFor(f), 'INV-FETCH-01').status, 'fail');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — comments from a LATER run on the same PR are outside this run window', async () => {
+  const f = healthyRun();
+  try {
+    // A re-review an hour later. Without a window ceiling these read as
+    // "written by this run and never planned" — 33 of 58 on the first live run.
+    f.comments.push(
+      comment({ body: 'first finding body', file: 'src/a.ts', line: 2, createdAt: '2024-01-01T01:00:00.000Z' }),
+      comment({ body: 'a later run said this', file: 'src/a.ts', line: 3, createdAt: '2024-01-01T01:00:01.000Z' }),
+    );
+    const rows = await rowsFor(f);
+    assert.equal(row(rows, 'INV-POST-05').status, 'pass', 'a later run duplicating a location is not this run duplicating it');
+    assert.equal(row(rows, 'INV-POST-06').status, 'pass', 'a later run is not a dispatched agent writing to the PR');
+    assert.match(row(rows, 'INV-POST-05').evidence, /among 2 comment\(s\)/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — an advanced PR downgrades the location-keyed posting rows to SKIP, never FAIL', async () => {
+  const f = healthyRun({ headSha: 'moved999' });
+  try {
+    f.comments = f.comments.filter((c) => c.line !== 3); // as an outdated comment would look
+    const rows = await rowsFor(f);
+    const one = row(rows, 'INV-POST-01');
+    assert.equal(one.status, 'skip', 'GitHub answers outdated comments at their original line — that is not a lost finding');
+    assert.match(one.evidence, /PR advanced \(head123 → moved99\)/);
+    assert.equal(row(rows, 'INV-POST-06').status, 'skip');
+    assert.equal(rows.filter((r) => r.status === 'fail').length, 0);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('verify — an advanced head SHA downgrades the count comparison but still asserts the flag', async () => {
   const f = healthyRun({ headSha: 'moved999' });
   try {
     const rows = await rowsFor(f);
     const fetch1 = row(rows, 'INV-FETCH-01');
     assert.equal(fetch1.status, 'pass', 'a PR that moved on is not a violation');
-    assert.match(fetch1.evidence, /advanced since the run/);
+    assert.match(fetch1.evidence, /the PR advanced \(head123 → moved99\)/);
   } finally {
     f.cleanup();
   }

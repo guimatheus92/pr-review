@@ -36,19 +36,28 @@ const PROVIDERS = ['github', 'azuredevops', 'gitlab'];
 const RUNTIMES = ['claude', 'copilot'];
 const CELL_TIMEOUT_MS = 30 * 60 * 1000;
 
-function flag(name, fallback) {
+/** `--name value`, or null. A flag with no value is an error, not an empty string. */
+function flag(name) {
   const i = process.argv.indexOf(`--${name}`);
-  return i === -1 ? fallback : process.argv[i + 1];
+  if (i === -1) return null;
+  const value = process.argv[i + 1];
+  if (value === undefined || value.startsWith('--')) {
+    console.error(`--${name} needs a value`);
+    process.exit(2);
+  }
+  return value;
 }
 const has = (name) => process.argv.includes(`--${name}`);
+const list = (name, fallback) => (flag(name) ?? fallback).split(',').map((s) => s.trim()).filter(Boolean);
 
-const wantProviders = flag('provider', PROVIDERS.join(',')).split(',').map((s) => s.trim());
-const wantRuntimes = flag('runtime', RUNTIMES.join(',')).split(',').map((s) => s.trim());
-const wantCases = flag('case', 'defects,filelist').split(',').map((s) => s.trim());
+const wantProviders = list('provider', PROVIDERS.join(','));
+const wantRuntimes = list('runtime', RUNTIMES.join(','));
+const wantCases = list('case', 'defects,filelist');
 const dryRun = has('dry-run');
 const resetOnly = has('reset-only');
-const outDir = flag('out', mkdtempSync(join(tmpdir(), 'pr-review-acceptance-')));
-const checkoutRoot = flag('checkout', null);
+// Lazily: naming --out must not still mint an empty temp directory.
+const outDir = flag('out') ?? mkdtempSync(join(tmpdir(), 'pr-review-acceptance-'));
+const checkoutRoot = flag('checkout');
 
 const matrix = parseYaml(readFileSync(join(ACCEPTANCE, 'matrix.yaml'), 'utf8'));
 const expected = parseYaml(readFileSync(join(ACCEPTANCE, 'expected.yaml'), 'utf8'));
@@ -133,9 +142,11 @@ async function runDefectsCell(provider, runtime) {
     return { provider, runtime, case: 'defects', ok: false, failures: ['no PR URL in matrix.yaml — run scripts/acceptance-seed.mjs'] };
   }
 
-  const cwd = checkoutFor(provider);
+  // Reset before the clone: --reset-only is the manual-recovery path and has no
+  // business spending a full-depth clone to delete comments.
   await resetPr(prUrl, { log: (m) => console.log(`  ${m}`) });
   if (resetOnly) return { provider, runtime, case: 'defects', ok: true, failures: [], prUrl, resetOnly: true };
+  const cwd = checkoutFor(provider);
 
   const argv = [CLI, 'review', prUrl, '--no-cache', '--runtime', runtime, ...(dryRun ? ['--dry-run'] : [])];
   let reviewExit = 0;
@@ -247,7 +258,13 @@ async function runFilelistCell() {
 
   const elsewhere = mkdtempSync(join(tmpdir(), 'acc-unrelated-'));
   try {
-    run(process.execPath, [CLI, 'gather', prUrl, '--no-cache', '--out', join(outDir, 'filelist-negative.json')], { cwd: elsewhere });
+    // stderr PIPED, not inherited: the refusal message is the assertion here,
+    // and an inherited stream leaves err.stderr null — the check would then
+    // report "refused for an unexpected reason" every time it worked.
+    run(process.execPath, [CLI, 'gather', prUrl, '--no-cache', '--out', join(outDir, 'filelist-negative.json')], {
+      cwd: elsewhere,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
     failures.push('gather from an unrelated directory SUCCEEDED — the truncated-list gate did not refuse');
   } catch (err) {
     const stderr = String(err.stderr ?? '') + String(err.stdout ?? '');

@@ -485,9 +485,19 @@ test('MCP capabilities — context advertises no server, and only the trusted re
     assert.doesNotMatch(context, /bicep \(repo\)/);
     assert.ok(existsSync(join(outDir, '.mcp.json')));
     assert.match(ctx.capabilityFiles['plugin/model-review'] ?? '', /capability-plugin_model-review--[0-9a-f]{12}\.json$/);
-    assert.ok(ctx.orchestratorPrompt.includes('\\"available\\":[\\"server-name\\"],\\"attempted\\":[\\"server-name\\"],\\"used\\":[\\"server-name\\"]'));
-    assert.match(ctx.orchestratorPrompt, /MUST be arrays of server-name strings, never booleans/);
+    assert.ok(ctx.orchestratorPrompt.includes('\\"available\\":[],\\"attempted\\":[],\\"used\\":[]'));
+    assert.match(ctx.orchestratorPrompt, /arrays of server-name strings, never booleans/);
     assert.match(ctx.orchestratorPrompt, /modelInspector/);
+    // The brief must not tell a pass to call tools the runtime denies, and must leave
+    // no room to guess what `available` holds — without these, reverting the reword is green.
+    assert.match(ctx.orchestratorPrompt, /denies MCP at the process level/);
+    assert.match(ctx.orchestratorPrompt, /MUST ALL be empty arrays/);
+    assert.doesNotMatch(ctx.orchestratorPrompt, /read-only MCP inspection\/validation tools/);
+    // Removing the context block left `mcpServers` with ONE observable consumer: the
+    // disabledMcpServers list that becomes copilot's --disable-mcp-server argv. Without a
+    // positive assertion here, pruning `mcpServers` as "now unused" un-denies every
+    // inventoried server under copilot with a green suite. Also pins the dedupe + sort.
+    assert.deepEqual(ctx.dispatchPlan?.disabledMcpServers, ['bicep', 'modelInspector']);
     assert.deepEqual(JSON.parse(readFileSync(join(outDir, '.mcp.json'), 'utf8')), trustedMcpConfig);
   } finally {
     rmSync(outDir, { recursive: true, force: true });

@@ -28,7 +28,7 @@ Every `pr-review review` writes artifacts to `~/.pr-review/runs/<provider>__<own
 | `stack.json` | The detected stack as selection saw it: languages, ecosystems, dependencies, dependency tokens/groups, notes |
 | `companions.json` | Every installed plugin, the ones pr-review recognizes, planned vs completed dispatches, and any missing/duplicate reviewer names. Written even on an early exit, so "planned 7 / completed 0" is visible |
 | `capabilities.json` / `capability-<pass>.json` | MCP server inventory (repo / user / plugin) and, per installed-plugin pass, which servers were available, attempted, and actually used |
-| `.mcp.json` | Trusted repository MCP definitions normalized for the isolated run (absent when the repo declares none, or when the PR changed them) |
+| `.mcp.json` | Trusted repository MCP definitions normalized for the isolated run (absent when the repo declares none, or when the PR changed them). **Provenance only — no runtime loads it**: MCP is denied at the process level in both runtimes, and claude is passed `--strict-mcp-config` with no `--mcp-config` |
 | `error.txt` | Written for handled failures after run-directory setup, including failed prerequisites, incomplete delivery, and post-delivery operational failures. Command-level exceptions may leave it absent; stderr is authoritative then |
 | `posted.marker` | Written on every publish attempt, carrying `verified`; the guard that stops `--resume` re-posting |
 | `passes.json` | One row per known skill — `[{name, source, matchedBy}]` where `matchedBy` is `glob`, `dependency`, `tag`, `plugin`, `repo`, `forced`, `baseline`, `context`, `index`, or `skipped` — persisted at dispatch so `--resume` can still render the summary's Skills section |

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { normalizeModel, resolveRuntime, runtimeSpawnArgs, sanitizeTaskDescription, taskCall } from '../src/dispatch/runtime.js';
+import { MCP_PROCESS_DENIAL, normalizeModel, resolveRuntime, RUNTIMES, runtimeSpawnArgs, sanitizeTaskDescription, taskCall } from '../src/dispatch/runtime.js';
 
 test('normalizeModel — only the copilot-style default maps to opus under claude', () => {
   assert.equal(normalizeModel('claude', 'claude-opus-4.8'), 'opus');
@@ -39,12 +39,16 @@ test('runtimeSpawnArgs — per-runtime argv shape', () => {
   ]);
 });
 
-test('runtimeSpawnArgs — neither runtime may boot ambient MCP servers', () => {
+test('runtimeSpawnArgs — EVERY runtime carries its process-level MCP denial', () => {
   // Denying the mcp__* tools is not enough: the servers still start (a cmd.exe +
-  // conhost + npx + node each on win32) only to be unreachable. Every runtime
-  // needs a process-level switch, not just a tool-level one.
-  assert.ok(runtimeSpawnArgs('claude', 'opus', '/dir').includes('--strict-mcp-config'));
-  assert.ok(runtimeSpawnArgs('copilot', 'm1', '/dir').includes('--disable-builtin-mcps'));
+  // conhost + npx + node each on win32) only to be unreachable. Driven off RUNTIMES
+  // rather than naming claude and copilot by hand — the argv-shape test above already
+  // pins those two byte-for-byte, so the value here is covering a runtime added later,
+  // which would otherwise fall through to copilot's branch with a green suite.
+  for (const runtime of RUNTIMES) {
+    const argv = runtimeSpawnArgs(runtime, 'm', '/dir');
+    assert.ok(argv.includes(MCP_PROCESS_DENIAL[runtime]), `${runtime} lost ${MCP_PROCESS_DENIAL[runtime]}`);
+  }
 });
 
 test('taskCall — tool vocabulary per runtime', () => {

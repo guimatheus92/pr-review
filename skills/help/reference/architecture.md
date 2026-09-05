@@ -20,7 +20,7 @@ Node CLI (deterministic plumbing)
   2. resolveRuntime()           → copilot | claude | auto (probe PATH: copilot first, then claude)
   3. ensurePacks() + loadLinguist() → clone missing skill packs, load the Linguist language index (fail-soft, in parallel with gather)
   4. detectCompanions()         → check installed companion plugins (per runtime)
-  5. runGather()                → fetch metadata + comments in parallel, diff (cached)
+  5. runGather()                → fetch metadata + comments in parallel, paginated file list checked against the provider's count and completed from the local checkout when short (cached only once complete)
   6. earlyExitGate()            → abort if PR is malformed/too large (exit 2 + error.txt)
   7. loadAll({ skillsOnly })    → repo skills + pack skills + installed-plugin skills; rules the PR itself changed are dropped as untrusted
   8. detectStack()              → canonical Linguist languages + categorized ecosystem/dependency/token evidence from root and changed-file manifests

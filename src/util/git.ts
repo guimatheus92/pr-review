@@ -1,4 +1,5 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { foldPath } from './realpath.js';
@@ -45,17 +46,29 @@ function findRepoRoot(dir: string): string | null {
   }
 }
 
-/** Throws when git fails or hangs: a failure must never read as an empty (clean) tree. */
-function gitZ(root: string, args: string[]): string[] {
-  return execFileSync('git', ['--no-optional-locks', ...args], {
-    cwd: root,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    maxBuffer: 64 * 1024 * 1024,
-    timeout: 30_000,
-  })
-    .split('\0')
-    .filter(Boolean);
+/**
+ * Run git in `root` and return stdout. Throws when git fails or hangs: a failure
+ * must never read as empty output (an empty tree, an empty diff). Read-only by
+ * convention — nothing in pr-review fetches, checks out or writes a ref in the
+ * reviewer's checkout.
+ */
+const GIT_EXEC = { encoding: 'utf8' as const, maxBuffer: 64 * 1024 * 1024, timeout: 30_000 };
+
+export function gitOut(root: string, args: string[]): string {
+  return execFileSync('git', ['--no-optional-locks', ...args], { ...GIT_EXEC, cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+const execFileAsync = promisify(execFile);
+
+/** Async twin of `gitOut` for fan-out reads (one process per file): same git flags and the same throw-on-failure contract (only the process wiring differs: nothing inherited, window hidden), and it does not block the event loop. */
+export async function gitOutAsync(root: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync('git', ['--no-optional-locks', ...args], { ...GIT_EXEC, cwd: root, windowsHide: true });
+  return stdout;
+}
+
+/** NUL-split stdout for `-z` listings: paths arrive raw, never C-quoted. */
+export function gitZ(root: string, args: string[]): string[] {
+  return gitOut(root, args).split('\0').filter(Boolean);
 }
 
 /** `status --porcelain -z`: `XY path`; a rename/copy carries the old path as the next token. */

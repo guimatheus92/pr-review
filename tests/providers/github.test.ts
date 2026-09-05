@@ -97,3 +97,22 @@ test('postLineComment — a finding with no location is null, never a top-level 
   const out = await provider.postLineComment(REF, { severity: 'LOW', title: 't', body: 'b' }, 'sha');
   assert.equal(out, null);
 });
+
+const PR_STUB = {
+  title: 't', body: '', user: { login: 'u' }, head: { sha: 'h', ref: 'f' }, base: { sha: 'b', ref: 'main' },
+  labels: [], created_at: 'c', updated_at: 'u', draft: false, merged: false, state: 'open',
+};
+
+test('fetchMetadata — carries the PR\'s own changed-file count so gather can refuse a truncated list', async () => {
+  // pulls/files stops at 3000 entries with no error and no `next` link (verified live: nodejs/node#62088
+  // lists 3000 of 4857); changed_files reports the real total, so the count comparison is the guard.
+  const provider = withStubClient({ get: async () => ({ data: { ...PR_STUB, changed_files: 3456 } }) });
+  const meta = await provider.fetchMetadata(REF);
+  assert.equal(meta.changedFileCount, 3456);
+  assert.equal(meta.changedFileListTruncated, undefined, 'GitHub never declares truncation; the count comparison does');
+});
+
+test('fetchFullDiff — never calls the API (the diff media type 406s above 300 files; nothing reads fullDiff)', async () => {
+  const provider = withStubClient({ get: async () => { throw new Error('must not be called'); } });
+  assert.equal(await provider.fetchFullDiff(REF), '');
+});

@@ -14,7 +14,7 @@ description: "pr-review performance optimizations: diff exclusion, file pre-filt
 | 4 | **Parallel dispatch** — all passes run concurrently within the session; the optional Codex second-opinion reviewer runs as a sibling process in parallel with the whole session (adds no wall-clock when it's not the slowest) | High — wall-clock = slowest pass, not sum |
 | 5 | **Docs-only triage** — deterministic Node-side triage runs only glob/forced passes (never baseline) when all in-scope files are docs (`**/*.md`, `**/*.txt`, `docs/**`, etc.) | High on docs PRs — skips the baseline passes |
 | 6 | **Conditional verifier** — dispatched only when Phase 1 has ≥1 CRITICAL/HIGH finding | Saves one agent on clean PRs |
-| 7 | **Parallel gather** — metadata + comments fetched concurrently; comments not fetched twice on cache miss; GitHub linked issues fetched in parallel; review + issue comment pagination runs concurrently | Medium — faster gather phase |
+| 7 | **Parallel gather** — metadata + comments fetched concurrently; comments not fetched twice on cache miss; GitHub linked issues fetched in parallel; review + issue comment pagination runs concurrently; GitHub skips the whole-PR text diff (the per-file patches are the diff), so 300–500-file PRs no longer die on the API's 406 | Medium — faster gather phase |
 | 8 | **Concurrent ADO diff synthesis** — per-file diffs synthesized with p-limit(5); LCS trims common prefix/suffix lines before the DP matrix | Medium on large ADO PRs |
 | 9 | **Deduped prompt boilerplate** — the output contract lives only in the dispatch prompt, not repeated per agent | Medium — smaller prompts |
 | 10 | **Prefix-stable prompts** — pass-invariant prompt prefix enables provider-side prompt cache hits | Medium — can reduce token cost ~75% |
@@ -30,6 +30,7 @@ One-time cost worth knowing: the first review on a machine clones the configured
 |---|---|---|
 | Max files | 500 | PRs with >500 changed files abort with "split into smaller PRs" |
 | Max patch size | 2 MB | Total diff bytes across all in-scope files |
+| Provider file-list caps | GitHub 3000 (`pulls/:n/files`), GitLab `"N+"` overflow, Azure DevOps paged 2000/page to completion | A list of any other length than the provider's own count, or one the provider declares truncated, is completed from the local checkout (`git diff-tree` from the single merge base — the checkout must be the PR's repository with base and head already present; pr-review never fetches). When that is impossible the run fails before anything is cached, naming the counts and the `git fetch` to run |
 
 ## Diff exclusion defaults
 

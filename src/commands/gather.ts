@@ -279,10 +279,7 @@ export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
     }
   }
 
-  const [changedFilesProvider, fullDiff] = await Promise.all([
-    provider.fetchChangedFiles(ref),
-    provider.fetchFullDiff(ref),
-  ]);
+  const changedFilesProvider = await provider.fetchChangedFiles(ref);
   // Incomplete (see listIsIncomplete): completed from the checkout or refused — never reviewed as-is, never cached.
   const changedFilesRaw = listIsIncomplete(changedFilesProvider, metadata)
     ? await completeFromGit(changedFilesProvider, ref, metadata, opts.cwd ?? process.cwd())
@@ -298,7 +295,6 @@ export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
     pr: ref,
     metadata,
     changedFiles,
-    fullDiff,
     existingComments,
     gatheredAt: new Date().toISOString(),
     changedFilesComplete: true,

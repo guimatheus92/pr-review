@@ -130,7 +130,6 @@ export function gatherFromPatch(patchText, overrides = {}) {
       state: 'open',
     },
     changedFiles: files,
-    fullDiff: patchText,
     existingComments: [],
     gatheredAt: now,
   };

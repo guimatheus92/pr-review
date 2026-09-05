@@ -4,6 +4,7 @@ import { mapGitHubStatus } from '../src/providers/github.js';
 import { classifyChange } from '../src/providers/azuredevops.js';
 import { mapDiff } from '../src/providers/gitlab.js';
 import { GIT_STATUS } from '../src/commands/gather.js';
+import { gatherFromPatch } from '../scripts/gather-from-patch.mjs';
 import type { ChangedFile } from '../src/types.js';
 
 /**
@@ -35,12 +36,18 @@ function captureStderr(fn: () => void): string[] {
  * bitmask, GitLab's booleans, git's name-status letters. A cast used to launder
  * GitHub's four non-union values straight into the type (#29).
  *
- * Read this as the inventory, not as the enforcement. Every seam here declares
- * `ChangedFile['status']` as its return type, so tsc already rejects an
- * off-vocabulary literal — what a row can still catch is a value produced by a
- * path the type cannot see (an internal cast, or a lookup resolving through
- * Object.prototype, which has its own test below). The teeth are the per-provider
- * `fetchChangedFiles` tests, which cover the call sites where the bug actually was.
+ * For the four TypeScript producers, read this as the inventory rather than the
+ * enforcement: each seam declares `ChangedFile['status']` as its return type, so
+ * tsc already rejects an off-vocabulary literal, and what a row can still catch is
+ * a value produced by a path the type cannot see (an internal cast, or a lookup
+ * resolving through Object.prototype, which has its own test below). Their teeth
+ * are the per-provider `fetchChangedFiles` tests, which cover the call sites where
+ * the bug actually was.
+ *
+ * `scripts/gather-from-patch.mjs` is the exception and the reason this table is
+ * not merely documentation: it is plain JS feeding `--from-gather` for the eval
+ * harness and dogfood runs, so NO type checks it at all. For that producer this
+ * row is the only thing standing between a typo and an off-vocabulary status.
  */
 test('every provider maps its own vocabulary onto ChangedFile["status"] — nothing else', () => {
   const emitted: [string, ChangedFile['status']][] = [
@@ -73,6 +80,40 @@ test('every provider maps its own vocabulary onto ChangedFile["status"] — noth
 
     // git — the name-status letters runGather completes a truncated list with.
     ...Object.entries(GIT_STATUS).map(([code, status]): [string, ChangedFile['status']] => [`git ${code}`, status]),
+
+    // The eval/dogfood harness — untyped JS, so this row is a real check, not an inventory.
+    ...gatherFromPatch(
+      [
+        'diff --git a/m.ts b/m.ts',
+        '--- a/m.ts',
+        '+++ b/m.ts',
+        '@@ -1 +1 @@',
+        '-a',
+        '+b',
+        'diff --git a/n.ts b/n.ts',
+        'new file mode 100644',
+        '--- /dev/null',
+        '+++ b/n.ts',
+        '@@ -0,0 +1 @@',
+        '+x',
+        'diff --git a/d.ts b/d.ts',
+        'deleted file mode 100644',
+        '--- a/d.ts',
+        '+++ /dev/null',
+        '@@ -1 +0,0 @@',
+        '-x',
+        'diff --git a/before.ts b/after.ts',
+        'similarity index 90%',
+        'rename from before.ts',
+        'rename to after.ts',
+        '--- a/before.ts',
+        '+++ b/after.ts',
+        '@@ -1 +1 @@',
+        '-x',
+        '+y',
+        '',
+      ].join('\n'),
+    ).changedFiles.map((f): [string, ChangedFile['status']] => [`gather-from-patch ${f.path}`, f.status]),
   ];
 
   for (const [source, status] of emitted) {

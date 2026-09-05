@@ -40,7 +40,7 @@ function gatherFixture() {
       labels: [], linkedItems: [], createdAt: '', updatedAt: '', isDraft: false, state: 'open' as const,
     },
     changedFiles: [{ path: 'src/a.ts', status: 'modified' as const, additions: 2, deletions: 1, patch: PATCH }],
-    fullDiff: '', existingComments: [], gatheredAt: '',
+    existingComments: [], gatheredAt: '',
   };
 }
 
@@ -53,7 +53,6 @@ function fakeProvider() {
     parseUrl: (url: string): PrRef => ({ provider: 'github', url, owner: 'o', repo: 'r', number: 1 }),
     fetchMetadata: async () => gatherFixture().metadata,
     fetchChangedFiles: async () => [],
-    fetchFullDiff: async () => '',
     fetchExistingComments: async () => [],
     isTransientError: () => false,
     postLineComment: async (_ref, f) => {

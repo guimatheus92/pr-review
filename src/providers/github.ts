@@ -275,17 +275,6 @@ export class GitHubProvider implements PrProvider {
     return files;
   }
 
-  /**
-   * Deliberately empty: `pulls.get` with the diff media type returns 406 above
-   * 300 files (undocumented) and was the only thing stopping 300–500-file PRs
-   * from being reviewed (the in-scope file guard still applies above that);
-   * nothing in the pipeline reads `fullDiff` — the per-file
-   * patches from `fetchChangedFiles` are the diff.
-   */
-  async fetchFullDiff(_ref: PrRef): Promise<string> {
-    return '';
-  }
-
   async fetchExistingComments(ref: PrRef, since?: Date): Promise<ExistingComment[]> {
     // Both endpoints filter server-side on `since`, so a reconciliation read is
     // one small page instead of the PR's whole comment history — which matters

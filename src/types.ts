@@ -80,8 +80,6 @@ export interface GatherOutput {
   pr: PrRef;
   metadata: PrMetadata;
   changedFiles: ChangedFile[];
-  /** Whole-PR text diff, kept only for the `pr-review-gather.json` contract; nothing in the pipeline reads it (empty on GitHub — see #26). */
-  fullDiff: string;
   existingComments: ExistingComment[];
   gatheredAt: string;
   /**

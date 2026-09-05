@@ -32,7 +32,6 @@ function fakeProvider() {
     parseUrl: (url: string): PrRef => ({ provider: 'github', url, owner: 'o', repo: 'r', number: 1 }),
     fetchMetadata: async () => gatherFixture().metadata,
     fetchChangedFiles: async () => [],
-    fetchFullDiff: async () => '',
     fetchExistingComments: async () => [],
     postLineComment: async () => ({ id: 'x' }),
     postBatchComments: async (_ref, _sha, comments) => {
@@ -49,7 +48,6 @@ function failingPostProvider(readFails: boolean): PrProvider {
     parseUrl: (url: string): PrRef => ({ provider: 'github', url, owner: 'o', repo: 'r', number: 1 }),
     fetchMetadata: async () => gatherFixture().metadata,
     fetchChangedFiles: async () => [],
-    fetchFullDiff: async () => '',
     fetchExistingComments: async () => {
       if (readFails) throw new Error('read-back unavailable');
       return [];
@@ -322,7 +320,6 @@ test('finalizeReview — existing-comment refresh uses the hydrated gather PR pr
       }),
       fetchMetadata: async () => gather.metadata,
       fetchChangedFiles: async () => [],
-      fetchFullDiff: async () => '',
       fetchExistingComments: async (ref) => {
         refreshedProject = ref.project;
         return [];

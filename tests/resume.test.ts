@@ -53,7 +53,6 @@ function fakeProvider() {
     parseUrl: (url: string): PrRef => ({ provider: 'github', url, owner: 'o', repo: 'r', number: 1 }),
     fetchMetadata: async () => gatherFixture().metadata,
     fetchChangedFiles: async () => [],
-    fetchFullDiff: async () => '',
     fetchExistingComments: async () => [],
     isTransientError: () => false,
     postLineComment: async (_ref, f) => {

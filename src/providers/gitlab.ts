@@ -118,17 +118,6 @@ export function mapDiff(d: GitLabDiff): ChangedFile {
   };
 }
 
-/** Exported for tests. GitLab has no single-blob MR diff endpoint; the full diff is the per-file diffs concatenated with git-style headers. */
-export function buildFullDiff(diffs: GitLabDiff[]): string {
-  return diffs
-    .map((d) => {
-      const oldSide = d.new_file ? '/dev/null' : `a/${d.old_path}`;
-      const newSide = d.deleted_file ? '/dev/null' : `b/${d.new_path}`;
-      return `diff --git a/${d.old_path} b/${d.new_path}\n--- ${oldSide}\n+++ ${newSide}\n${d.diff ?? ''}`;
-    })
-    .join('\n');
-}
-
 /**
  * Position math for inline discussions — the crux of GitLab posting. A
  * discussion position on an ADDED line carries `new_line` only; on a CONTEXT
@@ -405,10 +394,6 @@ export class GitLabProvider implements PrProvider {
 
   async fetchChangedFiles(ref: PrRef): Promise<ChangedFile[]> {
     return (await this.getDiffs(ref)).map(mapDiff);
-  }
-
-  async fetchFullDiff(ref: PrRef): Promise<string> {
-    return buildFullDiff(await this.getDiffs(ref));
   }
 
   async fetchExistingComments(ref: PrRef): Promise<ExistingComment[]> {

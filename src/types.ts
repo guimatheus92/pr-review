@@ -80,8 +80,12 @@ export interface GatherOutput {
   pr: PrRef;
   metadata: PrMetadata;
   changedFiles: ChangedFile[];
-  /** Whole-PR text diff, kept only for the `pr-review-gather.json` contract; nothing in the pipeline reads it (empty on GitHub — see #26). */
-  fullDiff: string;
+  /**
+   * @deprecated Never read by the pipeline and no longer written (#26). Cache
+   * entries and `--from-gather` payloads produced by <= 0.11 still carry it and
+   * stay valid; the per-file patches in `changedFiles` are the diff.
+   */
+  fullDiff?: string;
   existingComments: ExistingComment[];
   gatheredAt: string;
   /**

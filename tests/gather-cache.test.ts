@@ -49,7 +49,7 @@ test('runGather — unresolved ADO project bypasses stale cache reads and fresh 
       changedFileReads++;
       return [{ path: 'fresh.ts', status: 'modified', additions: 1, deletions: 0 }];
     },
-    fetchFullDiff: async () => 'fresh', fetchExistingComments: async () => [],
+    fetchExistingComments: async () => [],
     postLineComment: async () => null, isTransientError: () => false,
   };
   const result = await runGather({
@@ -97,7 +97,7 @@ test('runGather — filtered legacy cache is bypassed and replaced with raw prov
         { path: 'src/app.ts', status: 'modified', additions: 1, deletions: 0, patch: '@@\n+fresh' },
       ];
     },
-    fetchFullDiff: async () => 'fresh', fetchExistingComments: async () => [],
+    fetchExistingComments: async () => [],
     postLineComment: async () => null, isTransientError: () => false,
   };
   const result = await runGather({
@@ -131,7 +131,7 @@ function fakeGithub(metadata: PrMetadata, files: ChangedFile[]): { provider: PrP
     name: 'github', authEnv: () => ({}), parseUrl: () => ({ ...GH_REF, baseUrl: 'https://api.github.com' }),
     fetchMetadata: async () => metadata,
     fetchChangedFiles: async () => { fetches++; return files; },
-    fetchFullDiff: async () => '', fetchExistingComments: async () => [],
+    fetchExistingComments: async () => [],
     postLineComment: async () => null, isTransientError: () => false,
   };
   return { provider, fetches: () => fetches };
@@ -160,6 +160,10 @@ test('runGather — a list matching the count passes and the cache entry carries
   const result = await runGather({ prUrl: GH_REF.url, provider, readGatherCacheFn: () => null, writeGatherCacheFn: (v) => (cached = v, 'x') });
   assert.equal(result.changedFiles.length, 2);
   assert.equal(cached?.changedFilesComplete, true, 'only a list that passed the gate is marked complete');
+  // #26: the whole-PR diff is retired. The field stays optional on GatherOutput so
+  // <= 0.11 cache entries and --from-gather payloads keep parsing, but nothing writes it.
+  assert.ok(!('fullDiff' in result), 'gather writes no fullDiff');
+  assert.ok(cached && !('fullDiff' in cached), 'and never caches one');
 });
 
 test('runGather — a provider-declared truncation ("N+") is refused even when the list length equals N', async () => {

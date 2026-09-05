@@ -461,29 +461,6 @@ export class AzureDevOpsProvider implements PrProvider {
     }
   }
 
-  async fetchFullDiff(ref: PrRef): Promise<string> {
-    const git = await this.gitApi(ref);
-    const pr = await this.getPr(ref);
-    const sourceSha = pr.lastMergeSourceCommit?.commitId;
-    const targetSha = pr.lastMergeTargetCommit?.commitId;
-    if (!sourceSha || !targetSha) return '';
-    try {
-      const diffs = await git.getCommitDiffs(
-        pr.repository!.id!,
-        ref.project,
-        false,
-        undefined,
-        undefined,
-        { baseVersion: targetSha, baseVersionType: 2 },
-        { targetVersion: sourceSha, targetVersionType: 2 },
-      );
-      return JSON.stringify(diffs.changes ?? [], null, 2);
-    } catch (err) {
-      process.stderr.write(`[ado] getCommitDiffs failed (${(err as Error).message.split('\n')[0]}); full diff omitted from context\n`);
-      return '';
-    }
-  }
-
   async fetchExistingComments(ref: PrRef): Promise<ExistingComment[]> {
     const git = await this.gitApi(ref);
     const pr = await this.getPr(ref);

@@ -111,8 +111,3 @@ test('fetchMetadata — carries the PR\'s own changed-file count so gather can r
   assert.equal(meta.changedFileCount, 3456);
   assert.equal(meta.changedFileListTruncated, undefined, 'GitHub never declares truncation; the count comparison does');
 });
-
-test('fetchFullDiff — never calls the API (the diff media type 406s above 300 files; nothing reads fullDiff)', async () => {
-  const provider = withStubClient({ get: async () => { throw new Error('must not be called'); } });
-  assert.equal(await provider.fetchFullDiff(REF), '');
-});

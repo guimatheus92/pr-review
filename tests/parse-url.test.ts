@@ -215,10 +215,6 @@ test('AzureDevOpsProvider — every public PR operation hydrates a project-omitt
       projects.push(project);
       return [];
     },
-    getCommitDiffs: async (_repo: string, project: string | undefined) => {
-      projects.push(project);
-      return { changes: [] };
-    },
     getPullRequestIterations: async (_repo: string, _id: number, project: string | undefined) => {
       projects.push(project);
       return [{ id: 1 }];
@@ -238,7 +234,6 @@ test('AzureDevOpsProvider — every public PR operation hydrates a project-omitt
   );
 
   await provider.fetchExistingComments(ref);
-  await provider.fetchFullDiff(ref);
   await provider.fetchChangedFiles(ref);
   await provider.postLineComment(ref, {
     severity: 'LOW', title: 't', body: 'b', file: 'src/a.cs', line: 1,
@@ -246,7 +241,9 @@ test('AzureDevOpsProvider — every public PR operation hydrates a project-omitt
 
   assert.equal(ref.project, 'Platform');
   assert.equal(prFetches, 1, 'the hydrated cache alias prevents a second PR fetch');
-  assert.deepEqual(projects, [undefined, 'Platform', 'Platform', 'Platform', 'Platform', 'Platform']);
+  // One entry per project-scoped ADO call: getPullRequestById, getThreads,
+  // getPullRequestIterations, getPullRequestIterationChanges, createThread.
+  assert.deepEqual(projects, [undefined, 'Platform', 'Platform', 'Platform', 'Platform']);
 });
 
 test('resolvePr — the field-report URL resolves end to end', () => {

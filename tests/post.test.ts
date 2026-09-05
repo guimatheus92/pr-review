@@ -71,7 +71,6 @@ function fakeProvider(opts: { batchFails?: boolean; hasBatch?: boolean } = {}): 
     parseUrl: (url: string): PrRef | null => ({ provider: 'github', url, owner: 'o', repo: 'r', number: 1 }),
     fetchMetadata: async () => gatherFixture().metadata,
     fetchChangedFiles: async () => [],
-    fetchFullDiff: async () => '',
     fetchExistingComments: async () => [],
     isTransientError: () => false,
     postLineComment: async (_ref, f) => {
@@ -164,7 +163,6 @@ test('runPost — posting and reconciliation use the hydrated gather PR project'
     }),
     fetchMetadata: async () => gather.metadata,
     fetchChangedFiles: async () => [],
-    fetchFullDiff: async () => '',
     fetchExistingComments: async (ref) => {
       seen.push(`read:${ref.project}`);
       return [{
@@ -242,7 +240,6 @@ function statefulFake(opts: {
     parseUrl: (url: string): PrRef | null => ({ provider: 'github', url, owner: 'o', repo: 'r', number: 1 }),
     fetchMetadata: async () => gatherFixture().metadata,
     fetchChangedFiles: async () => [],
-    fetchFullDiff: async () => '',
     fetchExistingComments: async () => {
       state.reads++;
       if (opts.readThrows) throw Object.assign(new Error('read failed: 502'), { status: 502 });

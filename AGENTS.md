@@ -6,7 +6,7 @@ Generic, plugin-based PR review tool for GitHub, Azure DevOps, and GitLab, packa
 
 ```bash
 npm run build          # tsc + esbuild → dist/cli.cjs
-npm run test           # node scripts/test.mjs → node --test over tests/**/*.test.ts (596 tests, ~15s)
+npm run test           # node scripts/test.mjs → node --test over tests/**/*.test.ts (599 tests, ~25s)
 npm run build:watch    # tsc watch (re-run `npm run bundle` for esbuild)
 ```
 
@@ -21,7 +21,7 @@ The bundle at `dist/cli.cjs` is the single-file distribution artifact. The slash
 - `src/commands/status.ts` / `src/commands/detach.ts` — authenticated live/recoverable/terminal status plus detached execution. Exit 21 means targeted recovery is possible; exit 22 is terminal.
 - `src/dispatch/single-session.ts` — materializes context/pass files and an immutable plan, emits description-bearing dispatch-only task calls, promotes attempt outputs, performs one automatic selective recovery, assembles Phase 1/final output in Node, and runs a direct conditional verifier.
 - `src/dispatch/delivery.ts` / `src/util/atomic-json.ts` / `src/util/control-auth.ts` / `src/util/finalization-lease.ts` — strict `Finding[]` delivery, atomic create-only canonicals, attempt ceilings, digests, non-mutating control reads, Windows transaction-safe state, HMAC authority, and one recoverer/finalizer/poster per run.
-- `src/dispatch/runtime.ts` — runtime selection (resolveRuntime, runtimeSpawnArgs, taskCall, normalizeModel); `--runtime copilot|claude|auto` (default auto: probes PATH, copilot first). `runtimeSpawnArgs` adds the materialized run dir and checkout root as readable directories while denying shell and posting paths.
+- `src/dispatch/runtime.ts` — runtime selection (resolveRuntime, runtimeSpawnArgs, taskCall, normalizeModel); `--runtime copilot|claude|auto` (default auto: probes PATH, copilot first). `runtimeSpawnArgs` adds the materialized run dir and checkout root as readable directories while denying shell and posting paths. MCP is denied at the PROCESS level, not only the tool level — denying the `mcp__*` tools alone still lets every server boot (a `cmd.exe` + `conhost` + `npx` + `node` each on win32, every console window leaking) only to be unreachable. `MCP_PROCESS_DENIAL: Record<Runtime, string>` holds the per-runtime switch, so a new runtime fails to compile until it declares one. The two are NOT symmetric: claude's `--strict-mcp-config` is categorical (every config source ignored, and no `--mcp-config` is passed, so the run-dir `.mcp.json` is inventory/provenance only — no runtime loads it); copilot's `--disable-builtin-mcps` covers built-ins and is completed one name at a time by `--disable-mcp-server`, so its reach is bounded by `discoverMcpCapabilities`.
 - `src/util/progress.ts` / `src/util/posted-marker.ts` — the phase/heartbeat feed and posting idempotency guard. Schema-v1 decisions use authenticated authority; `posted.marker` in the run dir is diagnostic only.
 - `src/dispatch/codex.ts` — optional read-only Codex sibling; strict attempt-scoped `Finding[]` output and crash-safe attempt accounting (opt out: `--no-codex`)
 - `src/dispatch/line-snap.ts` — snaps finding line numbers to the nearest valid diff line before posting
@@ -69,7 +69,7 @@ The bundle at `dist/cli.cjs` is the single-file distribution artifact. The slash
 
 Tests use `node:test` + `node:assert`. Run with `npm run test`. Tests are in `tests/` mirroring `src/` structure. Provider tests require real auth env vars; pure-logic tests have no external deps.
 
-Run artifacts under `~/.pr-review/runs/<id>/` are part of the contract, not debug spill: `passes.json` (routing), `stack.json` (detected stack), `companions.json` (installed / recognized / planned / completed dispatches), `capabilities.json` + `capability-<pass>.json` (MCP inventory and per-pass usage evidence), `raw-<reviewer>.json` (one sidecar per pass and companion), `error.txt` on any failure, and `posted.marker` on any publish attempt. `--resume` and the operational-failure checks read them, so a change that stops writing one is a behaviour change.
+Run artifacts under `~/.pr-review/runs/<id>/` are part of the contract, not debug spill: `passes.json` (routing), `stack.json` (detected stack), `companions.json` (installed / recognized / planned / completed dispatches), `capabilities.json` + `capability-<pass>.json` (MCP inventory and per-pass usage evidence — both runtimes deny MCP at the process level, so the brief instructs passes to record all three arrays empty; nothing validates that yet, and the brief deliberately keeps an escape hatch so a denial that stopped working can still surface here), `raw-<reviewer>.json` (one sidecar per pass and companion), `error.txt` on any failure, and `posted.marker` on any publish attempt. `--resume` and the operational-failure checks read them, so a change that stops writing one is a behaviour change.
 
 ## Common tasks
 

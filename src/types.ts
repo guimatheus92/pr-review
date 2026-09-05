@@ -81,9 +81,12 @@ export interface GatherOutput {
   metadata: PrMetadata;
   changedFiles: ChangedFile[];
   /**
-   * @deprecated Never read by the pipeline and no longer written (#26). Cache
-   * entries and `--from-gather` payloads produced by <= 0.11 still carry it and
-   * stay valid; the per-file patches in `changedFiles` are the diff.
+   * @deprecated Written until 0.11, never read (#26). Declared only to document
+   * the shape older artifacts still have and to keep the fixtures that construct
+   * one type-checking — NOT a compatibility requirement: both readers are
+   * unchecked JSON casts, so an undeclared key round-trips either way. Safe to
+   * delete once no fixture sets it. The per-file patches in `changedFiles` are
+   * the diff.
    */
   fullDiff?: string;
   existingComments: ExistingComment[];

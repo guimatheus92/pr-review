@@ -44,6 +44,9 @@ test('gatherFromPatch — classifies added, modified, deleted, and renamed files
     ],
   );
   assert.equal(gather.changedFiles[3].previousPath, 'src/before.ts');
+  // #26: this is the last thing that ever produced a non-empty fullDiff, and it
+  // feeds dogfood + the eval harness through --from-gather.
+  assert.ok(!('fullDiff' in gather), 'the synthetic gather writes no fullDiff');
 });
 
 test('gatherFromPatch — parses Git C-quoted paths with spaces and octal escapes', () => {

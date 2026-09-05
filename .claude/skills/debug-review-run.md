@@ -10,7 +10,7 @@ Every `pr-review review` writes artifacts to `~/.pr-review/runs/<provider>__<own
 
 | File | Contains |
 |---|---|
-| `pr-review-gather.json` | Raw PR metadata, per-file patches, comments; `changedFilesComplete` marks a verified file list. The per-file patches are the diff — there is no whole-PR diff field (entries written by <= 0.11 still carry an unused `fullDiff`) |
+| `pr-review-gather.json` | Raw PR metadata, per-file patches, comments; `changedFilesComplete` marks a verified file list. The per-file patches are the diff — a fresh gather writes no whole-PR diff field, though a cache hit on an entry written by <= 0.11 copies its unused `fullDiff` straight through into this file |
 | `pr-context.md` | The shared context file read by the review passes (not by the orchestrator itself) — includes the `## Stack` tags and a `## More skills (on-demand)` pointer to the index |
 | `pass-<name>.md` | One file per dispatched pass: the pipeline rules header + ONE skill body + a `Source:` line retained for provenance. Referenced sibling files are not materialized automatically |
 | `skills-project.md` | Post-selection shared project context, injected whole into every pass and also read by Codex, direct companion agents, and the verifier. In the no-pack fallback, only project skills beyond the 10-pass cap remain here |

@@ -160,8 +160,14 @@ test('runGather — a list matching the count passes and the cache entry carries
   const result = await runGather({ prUrl: GH_REF.url, provider, readGatherCacheFn: () => null, writeGatherCacheFn: (v) => (cached = v, 'x') });
   assert.equal(result.changedFiles.length, 2);
   assert.equal(cached?.changedFilesComplete, true, 'only a list that passed the gate is marked complete');
-  // #26: the whole-PR diff is retired. The field stays optional on GatherOutput so
-  // <= 0.11 cache entries and --from-gather payloads keep parsing, but nothing writes it.
+});
+
+// The whole-PR diff is retired (#26). The field stays optional on GatherOutput to
+// document the shape <= 0.11 artifacts still have, but nothing writes one.
+test('runGather — writes and caches no fullDiff', async () => {
+  const { provider } = fakeGithub({ ...META, changedFileCount: 2 }, [file('a.ts'), file('b.ts')]);
+  let cached: GatherOutput | undefined;
+  const result = await runGather({ prUrl: GH_REF.url, provider, readGatherCacheFn: () => null, writeGatherCacheFn: (v) => (cached = v, 'x') });
   assert.ok(!('fullDiff' in result), 'gather writes no fullDiff');
   assert.ok(cached && !('fullDiff' in cached), 'and never caches one');
 });

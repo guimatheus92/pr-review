@@ -5,7 +5,7 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 ## [Unreleased]
 
 ### Removed
-- **`PrProvider.fetchFullDiff` is retired.** Nothing in the pipeline read `fullDiff`: GitHub had returned `''` since 0.11.0, while Azure DevOps still spent a `getCommitDiffs` call and GitLab still concatenated its per-file diffs, only to fill a field written to `pr-review-gather.json` and never consumed. `fullDiff` is now optional on `GatherOutput` and is no longer written — cache entries and `--from-gather` payloads produced by <= 0.11 still carry it, stay valid, and need no `cache clear`. The per-file patches in `changedFiles` are the diff. Fixes #26.
+- **`PrProvider.fetchFullDiff` is retired.** Nothing in the pipeline read `fullDiff`: GitHub had returned `''` since 0.11.0, while Azure DevOps still spent a `getCommitDiffs` call and GitLab still concatenated its per-file diffs, only to fill a field written to `pr-review-gather.json` and never consumed. `fullDiff` is now optional on `GatherOutput` and is no longer written. Cache entries and `--from-gather` payloads produced by <= 0.11 still carry it, stay valid and need no `cache clear` — that holds whether or not the field is declared, since both readers are unchecked JSON casts; the declaration is kept to document the older shape, not as a compatibility guarantee. A cache hit still copies a legacy `fullDiff` through into the run-dir artifact. The per-file patches in `changedFiles` are the diff. Fixes #26.
 
 ## [0.11.0] — 2026-09-05
 

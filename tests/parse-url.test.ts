@@ -241,8 +241,10 @@ test('AzureDevOpsProvider — every public PR operation hydrates a project-omitt
 
   assert.equal(ref.project, 'Platform');
   assert.equal(prFetches, 1, 'the hydrated cache alias prevents a second PR fetch');
-  // One entry per project-scoped ADO call: getPullRequestById, getThreads,
-  // getPullRequestIterations, getPullRequestIterationChanges, createThread.
+  // One entry per ADO call that takes a project: getPullRequestById first — the
+  // hydrating call, which necessarily runs with `undefined` — then getThreads,
+  // getPullRequestIterations, getPullRequestIterationChanges and createThread,
+  // all scoped to the resolved project.
   assert.deepEqual(projects, [undefined, 'Platform', 'Platform', 'Platform', 'Platform']);
 });
 

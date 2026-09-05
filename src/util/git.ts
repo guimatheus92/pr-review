@@ -52,27 +52,17 @@ function findRepoRoot(dir: string): string | null {
  * convention — nothing in pr-review fetches, checks out or writes a ref in the
  * reviewer's checkout.
  */
+const GIT_EXEC = { encoding: 'utf8' as const, maxBuffer: 64 * 1024 * 1024, timeout: 30_000 };
+
 export function gitOut(root: string, args: string[]): string {
-  return execFileSync('git', ['--no-optional-locks', ...args], {
-    cwd: root,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    maxBuffer: 64 * 1024 * 1024,
-    timeout: 30_000,
-  });
+  return execFileSync('git', ['--no-optional-locks', ...args], { ...GIT_EXEC, cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
 const execFileAsync = promisify(execFile);
 
 /** Async twin of `gitOut` for fan-out reads (one process per file): same git flags and the same throw-on-failure contract (only the process wiring differs: nothing inherited, window hidden), and it does not block the event loop. */
 export async function gitOutAsync(root: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync('git', ['--no-optional-locks', ...args], {
-    cwd: root,
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-    timeout: 30_000,
-    windowsHide: true,
-  });
+  const { stdout } = await execFileAsync('git', ['--no-optional-locks', ...args], { ...GIT_EXEC, cwd: root, windowsHide: true });
   return stdout;
 }
 

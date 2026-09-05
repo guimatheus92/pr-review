@@ -78,12 +78,13 @@ test('fetchChangedFiles — folder entries are not files: dropped before any con
       { changeType: 1, item: { path: '/newdir', isFolder: true } },
       { changeType: 1, item: { path: '/newdir/a.ts' } },
       { changeType: 2, item: { path: '/src', isFolder: true } },
+      { changeType: 1, item: { path: '/treeonly', gitObjectType: 'tree' } }, // some responses carry only the object type
     ],
     nextSkip: 0,
   }));
   const files = await provider.fetchChangedFiles(ref);
   assert.deepEqual(files.map((f) => f.path), ['newdir/a.ts']);
-  assert.ok(!items.includes('/newdir') && !items.includes('/src'), `getItem must never be asked for a folder: ${items.join(', ')}`);
+  assert.deepEqual(items, ['/newdir/a.ts'], 'getItem is asked for the one file and never for a folder');
 });
 
 test('fetchChangedFiles — a PR with no iterations is an error, never an empty (and therefore "complete") file list', async () => {

@@ -25,6 +25,12 @@ description: How to add a new PR hosting provider (e.g. GitLab, Bitbucket) to pr
 
 6. **Test** — smoke test against a real PR on the new provider. Add a test file at `tests/providers/<name>.test.ts` (picked up by the `tests/**/*.test.ts` glob), and cover every accepted URL shape in `tests/parse-url.test.ts` — including the identity normalization, since that is where a wrong answer is silent rather than loud.
 
+## Gotchas — provider API traps the current implementations already handle
+
+- **GitHub**: `pulls/:n/files` stops at 3000 entries silently (page 31 is an empty 200, no `next` link); `changed_files` reports the real total (0 in a documented stuck-diff state, still a mismatch). `pulls.get` with the diff media type 406s above 300 files — do not fetch it.
+- **Azure DevOps**: `getPullRequestIterationChanges` defaults to `$top=100`; the response's `nextSkip` is omitted, not 0, on the last page in every documented sample; iteration changes include folder entries (`isFolder`, or only `gitObjectType: 'tree'`); a PR reporting no iterations must be an error, never an empty list.
+- **GitLab**: `changes_count` is a string; `"N+"` means the stored diff overflowed (files, lines or bytes — `"37+"` exists) and `/diffs` serves exactly the capped set, so no length comparison can detect it; it is empty while a new MR's diff is still computing (unknown, never "zero").
+
 ## Reference implementations
 
 - GitHub: `src/providers/github.ts` — uses `@octokit/rest`, `gh auth token` fallback; posts inline comments as one batched review (`POST /pulls/:n/reviews`, event COMMENT), ONE attempt, with a per-comment fallback that `runPost` enters only after reconciling against the PR. `fetchExistingComments` forwards `since` to both list endpoints so a read-back is one page, not the PR's whole history; `fetchMetadata` carries `changed_files` as `changedFileCount` (`pulls/:n/files` stops at 3000 entries silently) and `fetchFullDiff` returns `''` (the diff media type 406s above 300 files)

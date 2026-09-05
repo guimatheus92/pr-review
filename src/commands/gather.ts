@@ -7,7 +7,7 @@ import { lastCommentIdFrom } from '../cache/keys.js';
 import { readGatherCache, writeGatherCache } from '../cache/store.js';
 import type { PrProvider } from '../providers/types.js';
 import pLimit from 'p-limit';
-import { cwdMatchesPr, defaultGitRemote } from '../stack/detect.js';
+import { cwdMatchesPr } from '../stack/detect.js';
 import { countChangedLines } from '../util/diff-lines.js';
 import { gitOut, gitOutAsync, gitTopLevel, gitZ } from '../util/git.js';
 
@@ -16,19 +16,33 @@ const HEX_ID = /^[0-9a-f]{7,64}$/i;
 const GIT_STATUS: Record<string, ChangedFile['status']> = { A: 'added', C: 'added', D: 'deleted', R: 'renamed' };
 
 /** The copy-paste hint quotes a ref only when it must: a refname may carry shell metacharacters (dollar, semicolon, pipe), rarely a quote; a plain one stays bare so the command also pastes into cmd.exe. */
-const PLAIN_REF = new RegExp('^[A-Za-z0-9._/-]+$');
+const PLAIN_REF = /^[A-Za-z0-9._/-]+$/;
 function shellQuote(ref: string): string {
   if (PLAIN_REF.test(ref)) return ref;
   return "'" + ref.split("'").join("'\\''") + "'";
 }
 
-/** What git said, for a refusal: stderr's first line, else the exit status (merge-base exits 1 in silence for unrelated histories), never the raw "Command failed" line. */
+/** What git said, for a refusal: stderr's first line, else the signal (a timeout kill) or exit status — merge-base exits 1 in silence for unrelated histories — and only then the error's own first line. */
 function gitDetail(err: unknown): string {
-  const e = err as { stderr?: string; status?: number | null; message?: string };
+  const e = err as { stderr?: string; status?: number | null; signal?: string | null; killed?: boolean; message?: string };
   const line = String(e.stderr ?? '').trim().split('\n')[0];
   if (line) return line;
+  if (e.signal) return 'git was killed by ' + e.signal + (e.killed ? ' (timeout)' : '');
   if (typeof e.status === 'number') return 'git exited with status ' + e.status;
   return String(e.message ?? err).split('\n')[0] ?? 'git failed';
+}
+
+/** An origin URL may embed credentials (https://user:token@host/…): never echo them into stderr or error.txt. */
+function redactUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    if (!u.username && !u.password) return url;
+    u.username = '';
+    u.password = '';
+    return u.toString();
+  } catch {
+    return url.replace(/^[^@:/]+:[^@]*@/, ''); // scp-style user:secret@host:path
+  }
 }
 
 interface GatherCmdOptions {
@@ -49,7 +63,7 @@ interface GatherCmdOptions {
  * A provider list of any other length than the provider's own count — or one
  * the provider declares truncated — is unknown, never complete: it feeds every
  * trust gate keyed on changed paths, where a missing path reads as "unchanged".
- * Strict inequality on purpose: GitHub is documented to report changed_files: 0
+ * Strict comparison on purpose: GitHub is documented to report changed_files: 0
  * for a stuck diff whose list is still cut at 3000 (community discussion
  * #200746) — "shorter than the count" would call that complete.
  */
@@ -74,9 +88,13 @@ function fetchHint(ref: PrRef, m: PrMetadata): string {
   return `git fetch origin ${shellQuote(m.baseBranch)} ${shellQuote(m.headBranch)}`;
 }
 
-function refusal(files: ChangedFile[], ref: PrRef, m: PrMetadata, reason: string): Error {
+/** `fetchable` = a fetch in the right checkout can fix it; a structural refusal (shallow, partial, criss-cross, git failure) gets the requirements instead of a command that cannot help. */
+function refusal(files: ChangedFile[], ref: PrRef, m: PrMetadata, reason: string, fetchable = true): Error {
+  const where = `a full (non-shallow, non-partial) checkout of ${ref.owner}/${ref.repo} (remote origin)`;
   return new Error(
-    `${truncationSummary(files, ref, m)}; ${reason}. pr-review completes the list from git only from a checkout of ${ref.owner}/${ref.repo} (remote origin) that already has base ${m.baseSha || '<unknown>'} and head ${m.headSha}: run ${fetchHint(ref, m)} there and retry (pr-review never fetches into your checkout)`,
+    fetchable
+      ? `${truncationSummary(files, ref, m)}; ${reason}. pr-review completes the list from git only from ${where} that already has base ${m.baseSha || '<unknown>'} and head ${m.headSha}: run ${fetchHint(ref, m)} there and retry (pr-review never fetches into your checkout)`
+      : `${truncationSummary(files, ref, m)}; ${reason}. pr-review completes the list from git only from ${where} whose history has a single merge base between base ${m.baseSha || '<unknown>'} and head ${m.headSha} (pr-review never fetches into your checkout)`,
   );
 }
 
@@ -89,13 +107,19 @@ function refusal(files: ChangedFile[], ref: PrRef, m: PrMetadata, reason: string
  * reshape the list; `-z` so non-ASCII paths arrive raw instead of C-quoted.
  */
 async function completeFromGit(files: ChangedFile[], ref: PrRef, m: PrMetadata, cwd: string): Promise<ChangedFile[]> {
-  const refuse = (reason: string): Error => refusal(files, ref, m, reason);
+  const refuse = (reason: string, fetchable = true): Error => refusal(files, ref, m, reason, fetchable);
   const root = gitTopLevel(cwd);
   if (!root) throw refuse('the current directory is not inside a git repository');
-  const origin = defaultGitRemote(root);
-  if (!origin) throw refuse("this checkout has no 'origin' remote");
+  let origin: string;
+  try {
+    origin = gitOut(root, ['remote', 'get-url', 'origin']).trim();
+  } catch (err) {
+    const detail = gitDetail(err);
+    if (/No such remote/i.test(detail)) throw refuse("this checkout has no 'origin' remote");
+    throw refuse('git could not read the origin remote (' + detail + ')', false);
+  }
   if (!cwdMatchesPr(origin, ref.owner, ref.repo, ref.project, ref)) {
-    throw refuse("this checkout's origin (" + origin + ") is not the PR's repository " + ref.owner + '/' + ref.repo);
+    throw refuse("this checkout's origin (" + redactUrl(origin) + ") is not the PR's repository " + ref.owner + '/' + ref.repo);
   }
   if (!m.baseSha || !m.headSha) {
     throw refuse('the provider has not reported both base and head commits yet (a fresh PR may still be computing its diff) — retry shortly');
@@ -109,28 +133,33 @@ async function completeFromGit(files: ChangedFile[], ref: PrRef, m: PrMetadata, 
       throw refuse(name + ' commit ' + sha + ' is not in this checkout (' + gitDetail(err) + ')');
     }
   }
-  if (gitOut(root, ['rev-parse', '--is-shallow-repository']).trim() !== 'false') {
-    throw refuse('this checkout is shallow, so its merge base cannot be trusted');
+  let shallow: string;
+  try {
+    shallow = gitOut(root, ['rev-parse', '--is-shallow-repository']).trim();
+  } catch (err) {
+    throw refuse('git could not tell whether this checkout is shallow (' + gitDetail(err) + ')', false);
   }
+  if (shallow !== 'false') throw refuse('this checkout is shallow, so its merge base cannot be trusted', false);
   // A partial (blobless/treeless) clone would make diff-tree -p fetch missing
   // objects from origin on demand — a network write pr-review never performs.
   let partial = '';
   try {
     partial = gitOut(root, ['config', '--get', 'extensions.partialClone']).trim();
-  } catch {
-    // exit 1 = key unset; anything worse already failed the checks above
+  } catch (err) {
+    // `config --get` exits 1 for an unset key and nothing else; any other failure is not a pass.
+    if ((err as { status?: number | null }).status !== 1) throw refuse("git could not read this checkout's configuration (" + gitDetail(err) + ')', false);
   }
-  if (partial) throw refuse('this is a partial clone (extensions.partialClone=' + partial + '): git would fetch missing objects from origin on demand, which pr-review never does');
+  if (partial) throw refuse('this is a partial clone (extensions.partialClone=' + partial + '): git would fetch missing objects from origin on demand, which pr-review never does', false);
   // One merge base, or git and the provider may have diffed against different
   // ancestors — and the branch under review controls which files that hides.
   let bases: string[];
   try {
     bases = gitOut(root, ['merge-base', '--all', m.baseSha, m.headSha]).split('\n').map((line) => line.trim()).filter(Boolean);
   } catch (err) {
-    throw refuse('base and head share no common ancestor, or git could not compute their merge base (' + gitDetail(err) + ')');
+    throw refuse('base and head share no common ancestor, or git could not compute their merge base (' + gitDetail(err) + ')', false);
   }
   if (bases.length !== 1) {
-    throw refuse('base and head have ' + bases.length + " merge bases (criss-cross history), so git cannot reproduce the provider's diff");
+    throw refuse('base and head have ' + bases.length + " merge bases (criss-cross history), so git cannot reproduce the provider's diff", false);
   }
   const mergeBase = bases[0]!;
 
@@ -143,13 +172,15 @@ async function completeFromGit(files: ChangedFile[], ref: PrRef, m: PrMetadata, 
   try {
     tokens = gitZ(root, ['diff-tree', '-r', '-M', '-z', '--name-status', mergeBase, m.headSha]);
   } catch (err) {
-    throw refuse('git could not list ' + range + ' in ' + root + ' (' + gitDetail(err) + ')');
+    throw refuse('git could not list ' + range + ' in ' + root + ' (' + gitDetail(err) + ')', false);
   }
   for (let i = 0; i < tokens.length; ) {
     const code = tokens[i]![0];
-    const previousPath = code === 'R' || code === 'C' ? tokens[i + 1] : undefined;
-    const path = previousPath ? tokens[i + 2]! : tokens[i + 1]!;
-    i += previousPath ? 3 : 2;
+    const paired = code === 'R' || code === 'C'; // three tokens: status, old path, new path
+    const previousPath = paired ? tokens[i + 1] : undefined;
+    const path = tokens[i + (paired ? 2 : 1)];
+    i += paired ? 3 : 2;
+    if (!path || (paired && !previousPath)) throw refuse('git diff-tree -z output ended mid-record for ' + range, false);
     if (known.has(path)) continue; // the provider's entry, with its own patch, wins
     missing.push({ path, status: GIT_STATUS[code ?? ''] ?? 'modified', ...(previousPath ? { previousPath } : {}), additions: 0, deletions: 0 });
   }
@@ -182,12 +213,14 @@ async function completeFromGit(files: ChangedFile[], ref: PrRef, m: PrMetadata, 
           // the PR's own). The row stays, patch-less — the path is what trust reads.
           if (hunk < 0) return;
           file.patch = out.slice(hunk).trimEnd();
-          Object.assign(file, countChangedLines(file.patch));
+          const counts = countChangedLines(file.patch);
+          file.additions = counts.additions;
+          file.deletions = counts.deletions;
         }),
       ),
     );
   } catch (err) {
-    throw refuse('git could not produce a patch for ' + range + ' in ' + root + ' (' + gitDetail(err) + ')');
+    throw refuse('git could not produce a patch for ' + range + ' in ' + root + ' (' + gitDetail(err) + ')', false);
   }
   const patchless = missing.filter((file) => file.patch === undefined).length;
   process.stderr.write(
@@ -249,9 +282,7 @@ export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
     provider.fetchChangedFiles(ref),
     provider.fetchFullDiff(ref),
   ]);
-  // A list of any other length than the provider's count, or one declared
-  // truncated, is completed from the checkout or refused — never reviewed as-is,
-  // never cached.
+  // Incomplete (see listIsIncomplete): completed from the checkout or refused — never reviewed as-is, never cached.
   const changedFilesRaw = listIsIncomplete(changedFilesProvider, metadata)
     ? await completeFromGit(changedFilesProvider, ref, metadata, opts.cwd ?? process.cwd())
     : changedFilesProvider;

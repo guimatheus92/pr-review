@@ -164,8 +164,8 @@ test('runGather — a list matching the count passes and the cache entry carries
 
 test('runGather — a provider-declared truncation ("N+") is refused even when the list length equals N', async () => {
   // GitLab serves exactly the stored, capped set for "N+": a length comparison is a tautology there.
-  const files = Array.from({ length: 1000 }, (_, i) => file(`f${i}.ts`));
-  const { provider } = fakeGithub({ ...META, changedFileCount: 1000, changedFileListTruncated: true }, files);
+  const files = Array.from({ length: 3 }, (_, i) => file(`f${i}.ts`));
+  const { provider } = fakeGithub({ ...META, changedFileCount: 3, changedFileListTruncated: true }, files);
   await withNoRepoDir(async (cwd) => {
     await assert.rejects(
       () => runGather({ prUrl: GH_REF.url, provider, cwd, readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' }),
@@ -196,11 +196,17 @@ test('runGather — a cache entry without the completeness marker predates the g
 
 // Completing a truncated list from the local checkout.
 
+/** Fixture git: the developer's system/global config must not shape the fixtures (a test may still point GIT_CONFIG_GLOBAL at its own file). Git rejects the OS null device as a config file on Windows, so the default is an empty file. */
+const EMPTY_GITCONFIG = join(mkdtempSync(join(tmpdir(), 'pr-review-gitconfig-')), 'config');
+writeFileSync(EMPTY_GITCONFIG, '');
 function git(cwd: string, ...args: string[]): string {
   return execFileSync(
     'git',
-    ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', ...args],
-    { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', '-c', 'core.autocrlf=false', ...args],
+    {
+      cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL ?? EMPTY_GITCONFIG },
+    },
   ).trim();
 }
 
@@ -466,7 +472,7 @@ test('runGather — a partial (blobless/treeless) clone is refused: diff-tree -p
   }
 });
 
-test('runGather — the refusal names the actual cause: no repository, no origin remote, or an origin that is another repository', async () => {
+test('runGather — the refusal names the actual cause: not inside a repository, or no origin remote', async () => {
   const { provider } = fakeGithub({ ...META, changedFileCount: 3 }, [file('a.ts')]);
   await withNoRepoDir(async (cwd) => {
     await assert.rejects(
@@ -493,6 +499,7 @@ test('runGather — a path with a glob metacharacter is diffed literally: dir[1]
     mkdirSync(join(repo, 'dir1'));
     writeFileSync(join(repo, 'dir[1]', 'x.ts'), 'bracketed\n');
     writeFileSync(join(repo, 'dir1', 'x.ts'), 'plain\n');
+    writeFileSync(join(repo, 'e.ts'), 'c.ts\nx\n'); // c.ts → e.ts is now a rename WITH an edit (still >50% similar, so -M pairs it)
     git(repo, 'add', '-A');
     git(repo, 'commit', '-q', '-m', 'globs');
     const headSha = git(repo, 'rev-parse', 'HEAD');
@@ -501,7 +508,41 @@ test('runGather — a path with a glob metacharacter is diffed literally: dir[1]
     const by = (p: string) => result.changedFiles.find((f) => f.path === p)!;
     assert.ok(by('dir[1]/x.ts').patch?.includes('+bracketed'), `literal pathspec, got ${JSON.stringify(by('dir[1]/x.ts').patch)}`);
     assert.ok(by('dir1/x.ts').patch?.includes('+plain'), `plain path, got ${JSON.stringify(by('dir1/x.ts').patch)}`);
+    assert.equal(by('e.ts').status, 'renamed');
+    assert.equal(by('e.ts').previousPath, 'c.ts');
+    assert.ok(by('e.ts').patch?.includes('+x'), `rename with edit keeps its hunk, got ${JSON.stringify(by('e.ts').patch)}`);
   } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('runGather — credentials embedded in the origin URL never reach the refusal message (stderr, error.txt)', async () => {
+  const { repo, baseSha, headSha } = prRepo('https://x:sekrit-token@github.com/other/x.git');
+  try {
+    const { provider } = fakeGithub({ ...META, baseSha, headSha, changedFileCount: 6 }, [file('a.ts')]);
+    await assert.rejects(
+      () => runGather({ prUrl: GH_REF.url, provider, cwd: repo, readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' }),
+      (err: Error) => /is not the PR's repository o\/r/.test(err.message) && /github\.com\/other\/x/.test(err.message) && !/sekrit/.test(err.message),
+    );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('runGather — structural refusals (shallow, criss-cross) do not tell the user to fetch: no fetch can fix them', async () => {
+  const { repo, baseSha, headSha } = prRepo();
+  const shallow = mkdtempSync(join(tmpdir(), 'pr-review-shallow2-'));
+  try {
+    git(shallow, 'clone', '-q', '--depth', '2', 'file://' + repo.replace(/\\/g, '/'), 'clone');
+    const clone = join(shallow, 'clone');
+    git(clone, 'remote', 'set-url', 'origin', 'https://github.com/o/r.git');
+    const { provider } = fakeGithub({ ...META, baseSha, headSha, changedFileCount: 6 }, [file('a.ts')]);
+    await assert.rejects(
+      () => runGather({ prUrl: GH_REF.url, provider, cwd: clone, readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' }),
+      (err: Error) => /shallow/.test(err.message) && !/git fetch/.test(err.message) && /never fetches/.test(err.message),
+    );
+  } finally {
+    rmSync(shallow, { recursive: true, force: true });
     rmSync(repo, { recursive: true, force: true });
   }
 });

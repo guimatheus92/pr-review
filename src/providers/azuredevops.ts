@@ -411,7 +411,7 @@ export class AzureDevOpsProvider implements PrProvider {
             ]);
             patch = synthesizePatch(path, baseContent, headContent, baseSha ?? '', headSha);
           }
-          const { additions, deletions } = patch ? countChangedLines(patch) : { additions: 0, deletions: 0 };
+          const { additions, deletions } = countChangedLines(patch ?? '');
           return { path, status, additions, deletions, patch };
         }),
       ),

@@ -4,6 +4,8 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-09-05
+
 ### Added
 - **A truncated file list is never reviewed.** `PrMetadata.changedFileCount` / `changedFileListTruncated` carry the provider's own count (GitHub `changed_files`; GitLab `changes_count`, where `"N+"` means the stored diff overflowed and `/diffs` serves exactly the capped set). `runGather` refuses a provider list of any other length, or one declared truncated, and completes it from the reviewer's checkout when that checkout is the PR's repository with base and head already present: `git diff-tree -r -M -z` from the single merge base (plumbing, so reviewer diff config and the PR's own `.gitattributes` cannot reshape the list; `-z`, so non-ASCII paths arrive raw), one hunks-only patch per missing file, provider entries winning. It never fetches: when a commit is absent, the history has two merge bases, or the clone is shallow, the run fails BEFORE anything is cached — exit 2, `error.txt` in detached mode — naming the counts and the exact `git fetch` to run (`git fetch origin <base> refs/pull/N/head`, `refs/merge-requests/N/head`, or the ADO branches). An incomplete file list is unknown, never empty: the rule-trust, config-trust and MCP gates it feeds would otherwise pass a rule the PR changed. Fixes #23.
 - The plugin slash command (`commands/pr-review.md`) locates the checkout whose git origin matches the PR URL before starting the CLI — the current directory, then its subdirectories, then its siblings, preferring a primary worktree over a linked one — and prints a project-skill count computed with the same rule as the loader.

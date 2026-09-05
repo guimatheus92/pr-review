@@ -43,6 +43,7 @@ test('every provider maps its own vocabulary onto ChangedFile["status"] — noth
     ['ado add|rename(9)', classifyChange(9, 'new.ts', '/old.ts').status],
     ['ado edit|rename(10)', classifyChange(10, 'new.ts', '/old.ts').status],
     ['ado delete(16)', classifyChange(16, 'a.ts', undefined).status],
+    ['ado delete|rename(24)', classifyChange(24, 'gone.ts', '/was.ts').status],
     ['ado none(undefined)', classifyChange(undefined, 'a.ts', undefined).status],
 
     // GitLab — three booleans on the diff entry.

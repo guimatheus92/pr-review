@@ -92,7 +92,7 @@ export function snapFindingsToDiff(
  * `dedupeWithinBatch` folds. Erring loose therefore costs little, while erring
  * tight re-posts comments that are already live.
  */
-const CLOCK_SLACK_MS = 60_000;
+export const CLOCK_SLACK_MS = 60_000;
 
 /** Head/tail budget for the excluded-by-window warning; purely cosmetic. */
 const SKEW_WARN_LIMIT = 5;
@@ -143,7 +143,7 @@ function claim(counts: Map<string, number>, key: string): boolean {
  * With no existing comments there is nothing to anchor to and local time is
  * the only option left.
  */
-function windowStart(existing: ExistingComment[] | undefined, fallback: number): number {
+export function windowStart(existing: ExistingComment[] | undefined, fallback: number): number {
   let newest = 0;
   for (const c of existing ?? []) {
     const at = Date.parse(c.createdAt);

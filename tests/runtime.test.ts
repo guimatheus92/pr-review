@@ -19,6 +19,41 @@ test('resolveRuntime — a --copilot binary override implies the copilot runtime
   assert.equal(resolveRuntime(undefined, 'copilot'), 'copilot');
 });
 
+/** A probe that "finds" only the named binaries — `where`/`which` exit non-zero otherwise. */
+function pathWith(...found: string[]) {
+  const probed: string[] = [];
+  const exec = (_file: string, args: string[]) => {
+    const name = args[0]!;
+    probed.push(name);
+    if (!found.includes(name)) throw new Error(`not found: ${name}`);
+  };
+  return { exec, probed };
+}
+
+test('resolveRuntime — probe order is copilot first, then claude', () => {
+  const both = pathWith('copilot', 'claude');
+  assert.equal(resolveRuntime('auto', undefined, both.exec), 'copilot');
+  assert.deepEqual(both.probed, ['copilot'], 'claude must not even be probed once copilot answers');
+
+  const claudeOnly = pathWith('claude');
+  assert.equal(resolveRuntime('auto', undefined, claudeOnly.exec), 'claude');
+  assert.deepEqual(claudeOnly.probed, ['copilot', 'claude']);
+});
+
+test('resolveRuntime — neither on PATH throws, naming both and the escape hatches', () => {
+  const neither = pathWith();
+  assert.throws(
+    () => resolveRuntime('auto', undefined, neither.exec),
+    /neither `copilot` nor `claude` is on PATH.*--runtime\/--copilot/s,
+  );
+});
+
+test('resolveRuntime — an explicit runtime never probes PATH at all', () => {
+  const none = pathWith();
+  assert.equal(resolveRuntime('claude', undefined, none.exec), 'claude');
+  assert.deepEqual(none.probed, [], 'an explicit choice must not depend on what happens to be installed');
+});
+
 test('runtimeSpawnArgs — per-runtime argv shape', () => {
   assert.deepEqual(runtimeSpawnArgs('copilot', 'm1', '/dir'), [
     '--model', 'm1', '--allow-all-tools', '--deny-tool=shell', '--disable-builtin-mcps',

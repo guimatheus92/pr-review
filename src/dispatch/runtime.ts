@@ -38,11 +38,23 @@ export const MCP_PROCESS_DENIAL = {
   copilot: '--disable-builtin-mcps',
 } as const satisfies Record<Runtime, string>;
 
+/**
+ * How `binaryOnPath` shells out. Injectable for the same reason `resolveToken`
+ * takes one in both providers: without a seam the `auto` probe can only be
+ * tested by mutating the machine's PATH, so the documented order — copilot
+ * first, claude second, throw last — had no coverage at all.
+ */
+export type ProbeExec = (file: string, args: string[]) => void;
+
+const defaultProbe: ProbeExec = (file, args) => {
+  execFileSync(file, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+};
+
 /** Exported for `pr-review doctor`. */
-export function binaryOnPath(name: string): boolean {
+export function binaryOnPath(name: string, exec: ProbeExec = defaultProbe): boolean {
   const probe = process.platform === 'win32' ? 'where' : 'which';
   try {
-    execFileSync(probe, [name], { stdio: ['ignore', 'pipe', 'ignore'] });
+    exec(probe, [name]);
     return true;
   } catch {
     return false;
@@ -54,11 +66,15 @@ export function binaryOnPath(name: string): boolean {
  * binary override implies the copilot runtime (the flag predates dual-runtime
  * and always meant "copilot binary path"); otherwise probe PATH, copilot first.
  */
-export function resolveRuntime(preferred: Runtime | 'auto' | undefined, binaryOverride?: string): Runtime {
+export function resolveRuntime(
+  preferred: Runtime | 'auto' | undefined,
+  binaryOverride?: string,
+  exec: ProbeExec = defaultProbe,
+): Runtime {
   if (preferred && preferred !== 'auto') return preferred;
   if (binaryOverride) return 'copilot';
-  if (binaryOnPath('copilot')) return 'copilot';
-  if (binaryOnPath('claude')) return 'claude';
+  if (binaryOnPath('copilot', exec)) return 'copilot';
+  if (binaryOnPath('claude', exec)) return 'claude';
   throw new Error(
     'No agent runtime found: neither `copilot` nor `claude` is on PATH. Install one, or pass --runtime/--copilot with an explicit binary.',
   );

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { controlDirForRun, ERROR_FILE } from '../src/util/tmp.js';
@@ -70,6 +70,7 @@ function healthyRun(over: {
   companionsMissing?: string[];
   deliveryKind?: DeliveryState['kind'];
   headSha?: string;
+  repoRoot?: string;
 } = {}): Fixture {
   const home = mkdtempSync(join(tmpdir(), 'pr-review-verify-'));
   const runDir = join(home, '.pr-review', 'runs', RUN_ID);
@@ -134,6 +135,7 @@ function healthyRun(over: {
     metadata: { headSha: 'head1234', baseSha: 'base1234', headBranch: 'feature', baseBranch: 'main', state: 'open', isDraft: false },
     runtime: 'copilot',
     runtimeBinary: 'copilot',
+    ...(over.repoRoot ? { repoRoot: over.repoRoot } : {}),
     disabledMcpServers: [],
     model: 'm',
     timeoutMs: 1,
@@ -508,19 +510,106 @@ test('verify — a pass reporting MCP usage fails INV-CTX-05 despite process-lev
   }
 });
 
+/** Mark `.claude/skills/team-rules.md` as changed by the PR under review. */
+function changeRuleFile(f: Fixture) {
+  const gatherPath = join(f.runDir, 'pr-review-gather.json');
+  const gather = JSON.parse(readFileSync(gatherPath, 'utf8'));
+  gather.changedFiles.push({ path: '.claude/skills/team-rules.md', status: 'modified', additions: 1, deletions: 0, patch: PATCH });
+  gather.metadata.changedFileCount = 2;
+  writeFileSync(gatherPath, JSON.stringify(gather), 'utf8');
+  f.metadata = { ...f.metadata, changedFileCount: 2 } as PrMetadata;
+}
+
+/**
+ * passes.json records an ABSOLUTE source path while the diff is repo-relative.
+ * The fixture uses the real shape on purpose: with a repo-relative source these
+ * assertions pass against a comparison that can never match in production.
+ */
+function routeSource(f: Fixture, absoluteSource: string) {
+  writeFileSync(
+    join(f.runDir, 'passes.json'),
+    JSON.stringify([
+      { name: 'pack/security', matchedBy: 'baseline', source: 'C:\\packs\\security.md' },
+      { name: 'team-rules', matchedBy: 'context', source: absoluteSource },
+    ]),
+    'utf8',
+  );
+}
+
 test('verify — a PR-authored rule that reached the review fails INV-TRUST-01', async () => {
   const f = healthyRun();
   try {
-    const gatherPath = join(f.runDir, 'pr-review-gather.json');
-    const gather = JSON.parse(readFileSync(gatherPath, 'utf8'));
-    gather.changedFiles.push({ path: '.claude/skills/team-rules.md', status: 'modified', additions: 1, deletions: 0, patch: PATCH });
-    gather.metadata.changedFileCount = 2;
-    writeFileSync(gatherPath, JSON.stringify(gather), 'utf8');
-    f.metadata = { ...f.metadata, changedFileCount: 2 } as PrMetadata;
-    const rows = await rowsFor(f);
-    const trust = row(rows, 'INV-TRUST-01');
+    changeRuleFile(f);
+    routeSource(f, 'C:\\repo\\.claude\\skills\\team-rules.md');
+    const trust = row(await rowsFor(f), 'INV-TRUST-01');
     assert.equal(trust.status, 'fail');
     assert.match(trust.evidence, /PR-authored rule file/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — a pack skill whose path merely ends the same way is not the repo rule', async () => {
+  const f = healthyRun({ repoRoot: 'C:\\repo' });
+  try {
+    changeRuleFile(f);
+    // Same tail, different tree. Without the repoRoot anchor a suffix match
+    // would blame the pack for a rule the PR changed in the checkout.
+    routeSource(f, 'C:\\Users\\me\\.pr-review\\packs\\x\\.claude\\skills\\team-rules.md');
+    const rows = await rowsFor(f);
+    assert.equal(row(rows, 'INV-TRUST-01').status, 'pass');
+    assert.match(row(rows, 'INV-TRUST-01').evidence, /excluded from the review/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — with a known repo root, the PR-authored rule is still caught', async () => {
+  const f = healthyRun({ repoRoot: 'C:\\repo' });
+  try {
+    changeRuleFile(f);
+    routeSource(f, 'C:\\repo\\.claude\\skills\\team-rules.md');
+    assert.equal(row(await rowsFor(f), 'INV-TRUST-01').status, 'fail');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — a run that refused before pass selection is not graded on what it never reached', async () => {
+  const f = healthyRun({ errorTxt: true });
+  try {
+    // The early-exit gate (too many files, diff too large) fires before stack
+    // detection and pass selection, so those artifacts and the plan are absent
+    // by design. Reporting three FAILs for a correct refusal is how a report
+    // teaches people to ignore it.
+    for (const artifact of ['stack.json', 'passes.json', 'capabilities.json', 'dispatch-plan.json']) {
+      rmSync(join(f.runDir, artifact), { force: true });
+    }
+    rmSync(controlDirForRun(f.runDir, f.home), { recursive: true, force: true });
+    const rows = await rowsFor(f, { offline: true });
+    for (const id of ['INV-CTX-01', 'INV-CTX-02', 'INV-OUT-02']) {
+      assert.equal(row(rows, id).status, 'skip', `${id} must not fail a run that never reached selection`);
+      assert.match(row(rows, id).evidence, /failed before pass selection/);
+    }
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — with no run-id, the newest run wins by time, not by name', async () => {
+  const f = healthyRun();
+  try {
+    // A run id sorts by provider first, so an alphabetically-later prefix would
+    // outrank a genuinely newer run. `local__` vs `github__` is the real pair.
+    const runs = join(f.home, '.pr-review', 'runs');
+    const older = join(runs, 'local__o__r__x__2020-01-01T00-00-00-000Z');
+    mkdirSync(older, { recursive: true });
+    writeFileSync(join(older, 'pr-review-gather.json'), readFileSync(join(f.runDir, 'pr-review-gather.json')));
+    const past = new Date('2020-01-01T00:00:00.000Z');
+    utimesSync(older, past, past);
+
+    const ctx = await loadVerifyContext({ home: f.home, offline: true, providerOverride: stubProvider(f) });
+    assert.equal(ctx.runId, RUN_ID, 'the newer github__ run must win over the older local__ one');
   } finally {
     f.cleanup();
   }

@@ -113,15 +113,24 @@ jobs:
         if: always()
         run: cat "$RUNNER_TEMP/acc/acceptance-report.md" >> "$GITHUB_STEP_SUMMARY" || true
 
+      # Collected by a step rather than named as an upload path: upload-artifact
+      # does not expand `~`, and `github.workspace/..` is not HOME either. On a
+      # publish run the run dirs ARE the evidence, so uploading nothing because
+      # a path guess was wrong is the one outcome worth ruling out.
+      - name: Collect run directories
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/acc/runs"
+          cp -r "$HOME/.pr-review/runs/." "$RUNNER_TEMP/acc/runs/" 2>/dev/null || echo 'no run directories to collect'
+
       - name: Upload run artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: acceptance-${{ matrix.provider }}-copilot
-          path: |
-            ${{ runner.temp }}/acc
-            ~/.pr-review/runs
+          path: ${{ runner.temp }}/acc
           retention-days: 14
+          if-no-files-found: warn
 
   filelist:
     name: gitlab / file-list gate

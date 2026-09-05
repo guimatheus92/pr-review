@@ -262,7 +262,7 @@ nothing to specialize on. The note is what separates the two.
 **Verified:** `tests/stack-detect.test.ts`, `tests/linguist.test.ts`,
 `tests/manifests.test.ts`
 
-**Check:** run+pr
+**Check:** run
 
 ### INV-CTX-02 — Skills, plugins and MCP servers are always discovered and recorded
 

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { RUNS_ROOT } from '../util/tmp.js';
@@ -158,6 +158,32 @@ function keyCounts(findings: Finding[]): Map<string, number> {
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   return counts;
+}
+
+/** Case-folded, forward-slashed, for comparing paths across platforms. */
+function foldPath(path: string): string {
+  return path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
+/**
+ * Does `source` (an absolute path recorded in passes.json) denote `changed`
+ * (a repo-relative path from the diff)?
+ *
+ * With the checkout root known this is exact. Without it, a suffix match
+ * anchored at a separator is the best available: it still refuses
+ * `.../packs/x/.claude/skills/rules.md` for a changed `.claude/skills/rules.md`
+ * only when the root is known, so the fallback errs toward reporting a
+ * violation rather than missing one — the right direction for a trust gate.
+ */
+function sourceIsRepoPath(source: string, changed: string, repoRoot?: string): boolean {
+  const s = foldPath(source);
+  const c = foldPath(changed);
+  if (repoRoot) {
+    const root = foldPath(repoRoot);
+    if (s.startsWith(`${root}/`)) return s.slice(root.length + 1) === c;
+    return false;
+  }
+  return s === c || s.endsWith(`/${c}`);
 }
 
 /** `file:line` for a key, for human-readable evidence. */
@@ -400,8 +426,11 @@ export const CHECKS: InvariantCheck[] = [
   },
   {
     id: 'INV-CTX-01',
-    needs: 'run+pr',
+    // Reads stack.json and the Linguist cache only — nothing live, so it must
+    // stay gradeable under --offline.
+    needs: 'run',
     run(ctx) {
+      if (failedBeforeSelection(ctx)) return skip('the run failed before pass selection — no stack was detected because none was reached');
       if (!ctx.stack) return fail('stack.json is missing — the run has no record of what stack it reviewed');
       const languages = ctx.stack.languages ?? [];
       const dependencies = ctx.stack.dependencies ?? [];
@@ -422,6 +451,7 @@ export const CHECKS: InvariantCheck[] = [
     id: 'INV-CTX-02',
     needs: 'run',
     run(ctx) {
+      if (failedBeforeSelection(ctx)) return skip('the run failed before pass selection — discovery was never reached');
       if (!ctx.capabilities) return fail('capabilities.json is missing — the run has no record of what it could reach');
       const c = ctx.capabilities;
       const shaped = Array.isArray(c.installedPlugins) && Array.isArray(c.selectedPluginSkills) && Array.isArray(c.mcpServers) && Array.isArray(c.warnings);
@@ -507,9 +537,15 @@ export const CHECKS: InvariantCheck[] = [
       if (touchedRule.length === 0 && touchedConfig.length === 0) {
         return skip('the PR changed no rule file, .pr-review.yaml or MCP config');
       }
+      // `passes.json` records an ABSOLUTE source path while the diff is
+      // repo-relative, so these cannot be compared directly — doing so is how
+      // this row would report PASS while admitting every PR-authored rule.
+      // Prefer the plan's repoRoot; fall back to a separator-bounded suffix
+      // match, which keeps a pack skill at .../packs/x/.claude/skills/foo.md
+      // from impersonating the repo's own .claude/skills/foo.md.
       const admitted = (ctx.routes ?? [])
         .filter((r) => r.matchedBy !== 'skipped' && r.source)
-        .filter((r) => touchedRule.includes(r.source!.replace(/\\/g, '/')));
+        .filter((r) => touchedRule.some((changed) => sourceIsRepoPath(r.source!, changed, ctx.plan?.repoRoot)));
       if (admitted.length > 0) {
         return fail(`${admitted.length} PR-authored rule file(s) reached the review: ${sample(admitted.map((r) => r.name))}`);
       }
@@ -596,6 +632,7 @@ export const CHECKS: InvariantCheck[] = [
     id: 'INV-OUT-02',
     needs: 'run',
     run(ctx) {
+      if (failedBeforeSelection(ctx)) return skip('the run failed before pass selection — only the pre-selection artifacts exist');
       const required = ['pr-review-gather.json', 'stack.json', 'passes.json', 'companions.json', 'capabilities.json'];
       if (ctx.finalization || existsSync(join(ctx.runDir, 'pr-review-summary.md'))) {
         required.push('pr-review-summary.md', 'pr-review-findings.json', 'progress.ndjson');
@@ -610,6 +647,19 @@ export const CHECKS: InvariantCheck[] = [
     },
   },
 ];
+
+/**
+ * The run refused before pass selection ever happened — the early-exit gate
+ * (too many files, diff too large) or a failed prerequisite.
+ *
+ * Such a run has no `stack.json`, `passes.json` or dispatch plan, because it
+ * never got that far. Grading the context rows against it would report three
+ * FAILs for a run that did exactly what it should, and a report that cries
+ * violation on a correct refusal is a report people learn to ignore.
+ */
+function failedBeforeSelection(ctx: VerifyContext): boolean {
+  return Boolean(ctx.errorTxt) && !ctx.plan && !ctx.routes;
+}
 
 function readFileSafe(path: string): string | null {
   try {
@@ -627,15 +677,28 @@ function runsRoot(home?: string): string {
   return home ? join(home, '.pr-review', 'runs') : RUNS_ROOT;
 }
 
-/** Newest-first: the run id ends in an ISO stamp, so name order is time order. */
+/**
+ * Newest first, by mtime.
+ *
+ * Not by name: a run id is `<provider>__<owner>__<repo>__<n>__<stamp>`, so name
+ * order is only time order *within* one PR — sorting the whole directory that
+ * way ranks every `local__` run above every `github__` one regardless of age,
+ * and `pr-review verify` with no arguments would audit the wrong run.
+ */
 function runDirsNewestFirst(home?: string): string[] {
   const root = runsRoot(home);
   if (!existsSync(root)) return [];
   return readdirSync(root, { withFileTypes: true })
     .filter((e) => e.isDirectory())
-    .map((e) => e.name)
-    .sort()
-    .reverse();
+    .map((e) => {
+      try {
+        return { name: e.name, at: statSync(join(root, e.name)).mtimeMs };
+      } catch {
+        return { name: e.name, at: 0 };
+      }
+    })
+    .sort((a, b) => b.at - a.at)
+    .map((e) => e.name);
 }
 
 function resolveRunId(opts: { runId?: string; prUrl?: string; home?: string }): string {
@@ -694,8 +757,10 @@ export async function loadVerifyContext(opts: {
       ? (routesRaw as PassRouteLike[])
       : null;
 
-  const provider = opts.providerOverride ?? resolvePr(gather.pr.url).provider;
-  const reanchor = provider.name === 'github' || provider.name === 'gitlab';
+  // Re-anchoring is a property of the provider the run targeted, which the
+  // gather already records — deriving it from a re-parsed URL would make an
+  // --offline audit depend on the URL still being resolvable.
+  const reanchor = gather.pr.provider === 'github' || gather.pr.provider === 'gitlab';
   const finalFindings = findings?.finalFindings ?? [];
   const postingShape = snapFindingsToDiff(finalFindings, gather.changedFiles, reanchor).findings;
   const expectedKeys = keyCounts(postingShape);
@@ -708,6 +773,7 @@ export async function loadVerifyContext(opts: {
 
   if (!opts.offline) {
     try {
+      const provider = opts.providerOverride ?? resolvePr(gather.pr.url).provider;
       const ref: PrRef = gather.pr;
       liveAll = await withRetry(
         () => provider.fetchExistingComments(ref, new Date(floor)),

@@ -22,6 +22,7 @@ import { controlDirForRun, ensureRunDir, ERROR_FILE, RUNS_ROOT, sanitizeForFilen
 import { appendProgress } from '../util/progress.js';
 import { readPostedMarker, writePostedMarker } from '../util/posted-marker.js';
 import { withRetry } from '../util/retry.js';
+import { printable } from '../util/text.js';
 import { resolvePr } from '../providers/index.js';
 import { dedupeAgainstExisting, dedupeWithinBatch } from '../dedupe.js';
 import {
@@ -119,6 +120,11 @@ const SEVERITY_RANK: Record<string, number> = {
 
 const MAX_FILES_GUARD = 500;
 const MAX_PATCH_BYTES = 2_000_000;
+// A capability sidecar is written by a dispatched agent, so its server list is untrusted input
+// on its way into the summary. Bounded like the stack section's dependency list — and per name
+// too, because safeSummaryValue expands every non-alphanumeric character ~6x.
+const MAX_REPORTED_SERVERS = 10;
+const MAX_REPORTED_SERVER_CHARS = 60;
 
 /**
  * The three-state exit contract, exported for tests: 2 = pipeline failure
@@ -238,9 +244,15 @@ export interface CapabilityUsage {
   notes: string;
 }
 
-export function readCapabilityUsage(files: Record<string, string>): { usage: CapabilityUsage[]; warnings: string[] } {
+export function readCapabilityUsage(
+  files: Record<string, string>,
+): { usage: CapabilityUsage[]; warnings: string[]; claims: string[] } {
   const usage: CapabilityUsage[] = [];
   const warnings: string[] = [];
+  // Plain-text twins of the MCP-claim warnings only. The summary needs safeSummaryValue's entity
+  // escaping; a terminal does not render entities, and the server names are the whole point of the
+  // line — an operator greps them against capabilities.json and dispatch-plan.json.
+  const claims: string[] = [];
   const strings = (value: unknown): string[] | null =>
     Array.isArray(value) && value.every((entry) => typeof entry === 'string') ? value : null;
   for (const [reviewer, path] of Object.entries(files)) {
@@ -266,20 +278,29 @@ export function readCapabilityUsage(files: Record<string, string>): { usage: Cap
       // tell them apart. Warn on both; never fail the run over a string the model wrote. Naming the
       // servers is what makes the warning actionable — the same run dir carries what classifies it
       // (capabilities.json: the inventory; dispatch-plan.json: runtime + disabledMcpServers).
-      const reported = ([['available', available], ['attempted', attempted], ['used', used]] as const)
-        .filter(([, names]) => names.length > 0)
-        .map(([field, names]) => `${field}: ${names.map((name) => safeSummaryValue(name)).join(', ')}`);
-      if (reported.length > 0) {
-        warnings.push(
-          `installed-plugin pass ${safeSummaryValue(reviewer)} reported MCP servers under a runtime ` +
-          `that denies them (${reported.join('; ')}) — a denial leak or fabricated evidence, unverified`,
-        );
+      const nonEmpty = ([['available', available], ['attempted', attempted], ['used', used]] as const)
+        .filter(([, names]) => names.length > 0);
+      if (nonEmpty.length > 0) {
+        const message = (render: (value: string) => string) => {
+          const fields = nonEmpty.map(([field, names]) => {
+            const shown = names
+              .slice(0, MAX_REPORTED_SERVERS)
+              .map((name) => render(name.slice(0, MAX_REPORTED_SERVER_CHARS)))
+              .join(', ');
+            const rest = names.length - MAX_REPORTED_SERVERS;
+            return `${field}: ${shown}${rest > 0 ? ` (+${rest} more)` : ''}`;
+          });
+          return `installed-plugin pass ${render(reviewer)} reported MCP servers under a runtime ` +
+            `that denies them (${fields.join('; ')}) — a denial leak or fabricated evidence, unverified`;
+        };
+        warnings.push(message(safeSummaryValue));
+        claims.push(message(printable));
       }
     } catch (error) {
       warnings.push(`installed-plugin pass ${safeSummaryValue(reviewer)} wrote invalid MCP usage evidence (${safeSummaryValue((error as Error).message)})`);
     }
   }
-  return { usage, warnings };
+  return { usage, warnings, claims };
 }
 
 function earlyExitGate(gather: GatherOutput): string | null {
@@ -1458,7 +1479,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   const outputs = session.outputs;
   const capabilityAudit = readCapabilityUsage(sessionCtx.capabilityFiles);
   degraded.push(...capabilityAudit.warnings);
-  for (const warning of capabilityAudit.warnings) process.stderr.write(`[mcp] ${warning}\n`);
+  for (const claim of capabilityAudit.claims) process.stderr.write(`[mcp] ${claim}\n`);
   writeCapabilities(capabilityAudit.usage, capabilityAudit.warnings);
   const plannedPassReviewers = sessionCtx.passes.map((pass) => pass.name);
   const plannedPassSet = new Set(plannedPassReviewers);

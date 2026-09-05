@@ -4,6 +4,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import type { GatherOutput, ReviewerOutput, Severity, SkillDefinition } from '../types.js';
 import { matchesAny } from '../util/globs.js';
 import { sanitizeForFilename } from '../util/tmp.js';
+import { printable } from '../util/text.js';
 import { parseReviewerOutput } from './parsers.js';
 import {
   GENERIC_AGENT,
@@ -1123,11 +1124,22 @@ async function spawnPlannedBatch(
     const attemptPath = resolve(reviewer.attemptsDir, `attempt-${attempt}.json`);
     try {
       if (existsSync(attemptPath)) unlinkSync(attemptPath);
-      // A re-dispatched pass that writes no sidecar must not inherit the previous attempt's
-      // evidence: readCapabilityUsage would read it as this attempt's own observation.
-      if (reviewer.capabilityPath && existsSync(reviewer.capabilityPath)) unlinkSync(reviewer.capabilityPath);
     } catch {
       // A failed cleanup leaves a detectable invalid/colliding attempt; never clear canonical output here.
+    }
+    // Its own try, deliberately. A stale attempt file is detectable downstream; a stale capability
+    // sidecar is NOT — it is byte-identical to one this attempt would have written, and
+    // readCapabilityUsage has no attempt awareness. So the failure must be said out loud, and must
+    // not be skipped by a throw above it. Windows makes that real: a child still holding the handle
+    // throws EBUSY.
+    try {
+      if (reviewer.capabilityPath && existsSync(reviewer.capabilityPath)) unlinkSync(reviewer.capabilityPath);
+    } catch (error) {
+      process.stderr.write(
+        `[mcp] could not clear stale capability evidence for ${printable(reviewer.name)} ` +
+        `(${printable((error as Error).message)}) — attempt ${attempt} may be audited on the ` +
+        `previous attempt's evidence\n`,
+      );
     }
   }
   appendReviewerProgress(plan.runDir, {

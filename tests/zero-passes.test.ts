@@ -96,8 +96,12 @@ const BASE = {
   runtime: 'copilot' as const,
 };
 
-test('capability audit — a plugin pass claiming MCP use reaches the Degraded block and capabilities.json', async () => {
+test('capability audit — a plugin pass claiming MCP use reaches the Degraded block, stderr and capabilities.json', async () => {
   const s = setup(['src/app.ts']);
+  const stderrLines: string[] = [];
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  (process.stderr as unknown as { write: (text: string) => boolean }).write = (text: string) =>
+    (stderrLines.push(String(text)), true);
   try {
     const result = await runReview({
       ...BASE,
@@ -142,8 +146,19 @@ test('capability audit — a plugin pass claiming MCP use reaches the Degraded b
     });
 
     assert.equal(result.exitCode, 0, 'an unverifiable claim annotates the run; it never fails it');
-    assert.match(result.summary, /Degraded[\s\S]*reported MCP servers under a runtime that denies them/);
-    assert.match(result.summary, /available: .*model&#45;inspector/);
+    // Pin the rendered bullet, not two substrings in order: the loose form stayed green even with
+    // an empty Degraded block if the text surfaced anywhere later in the summary.
+    assert.match(
+      result.summary,
+      /> \*\*Degraded:\*\* \d+ coverage warning\(s\):[\s\S]*?\n> - installed-plugin pass &#34;model&#45;tools&#47;model&#45;review&#34; reported MCP servers under a runtime that denies them \(available: &#34;model&#45;inspector&#34;; attempted: &#34;model&#45;inspector&#34;; used: &#34;model&#45;inspector&#34;\)/,
+    );
+    const mcpLines = stderrLines.filter((line) => line.startsWith('[mcp] '));
+    assert.equal(mcpLines.length, 1, 'exactly one console line per claiming pass');
+    assert.match(
+      mcpLines[0] ?? '',
+      /^\[mcp\] installed-plugin pass model-tools\/model-review reported MCP servers .*available: model-inspector/,
+      'the console form is plain text, so the server names stay greppable',
+    );
     const capabilities = JSON.parse(readFileSync(join(s.runDir, 'capabilities.json'), 'utf8')) as {
       warnings: string[];
       usage: Array<{ reviewer: string; used: string[] }>;
@@ -151,6 +166,7 @@ test('capability audit — a plugin pass claiming MCP use reaches the Degraded b
     assert.ok(capabilities.warnings.some((warning) => warning.includes('reported MCP servers')));
     assert.deepEqual(capabilities.usage[0]?.used, ['model-inspector'], 'the raw claim survives for triage');
   } finally {
+    process.stderr.write = originalWrite;
     s.restore();
   }
 });

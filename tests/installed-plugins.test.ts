@@ -208,7 +208,7 @@ test('readCapabilityUsage — a claimed MCP call is recorded verbatim AND flagge
     const valid = join(root, 'valid.json');
     writeFileSync(valid, JSON.stringify({
       reviewer: 'ignored-spoof',
-      available: ['model-inspector'],
+      available: ['model-inspector', 'video-analyzer'],
       attempted: ['model-inspector'],
       used: ['model-inspector'],
       notes: 'Read-only validation completed.',
@@ -220,7 +220,7 @@ test('readCapabilityUsage — a claimed MCP call is recorded verbatim AND flagge
     // The raw claim is still archived unchanged — the audit annotates evidence, never edits it.
     assert.deepEqual(result.usage, [{
       reviewer: 'plugin/model-review',
-      available: ['model-inspector'],
+      available: ['model-inspector', 'video-analyzer'],
       attempted: ['model-inspector'],
       used: ['model-inspector'],
       notes: 'Read-only validation completed.',
@@ -230,11 +230,25 @@ test('readCapabilityUsage — a claimed MCP call is recorded verbatim AND flagge
     assert.ok(claim, 'a non-empty sidecar must raise a warning of its own');
     // safeSummaryValue escapes every sidecar-supplied string before it reaches the summary.
     assert.match(claim, /plugin&#47;model&#45;review/, 'the warning names the pass, escaped');
-    assert.match(claim, /available: .*model&#45;inspector/, 'it names the field and the server');
+    assert.match(
+      claim,
+      /available: &#34;model&#45;inspector&#34;, &#34;video&#45;analyzer&#34;/,
+      'every server in the field is listed, comma-separated, each escaped',
+    );
     assert.match(claim, /attempted: .*model&#45;inspector/);
     assert.match(claim, /used: .*model&#45;inspector/);
     assert.match(claim, /denial leak or fabricated evidence, unverified/);
-    assert.ok(result.warnings.some((warning) => /produced no MCP usage evidence/.test(warning)));
+    assert.equal(result.claims.length, 1, 'only the MCP claim gets a console twin, not the missing sidecar');
+    assert.match(
+      result.claims[0] ?? '',
+      /installed-plugin pass plugin\/model-review .*available: model-inspector, video-analyzer/,
+      'the console form is plain text — the server names must stay greppable',
+    );
+    assert.ok(
+      result.warnings.some((warning) =>
+        warning.includes('plugin&#47;missing&#45;review') && /produced no MCP usage evidence/.test(warning)),
+      'the missing-evidence warning still names which pass was missing',
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -253,8 +267,47 @@ test('readCapabilityUsage — the all-empty sidecar the denial produces is silen
     }));
     const result = readCapabilityUsage({ 'plugin/model-review': clean });
     assert.deepEqual(result.warnings, [], 'the healthy path must not warn — a noisy alarm gets trained away');
+    assert.deepEqual(result.claims, []);
     assert.equal(result.usage.length, 1);
     assert.equal(result.usage[0]?.notes, 'No mcp__* tool was callable; nothing attempted.');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('readCapabilityUsage — a sidecar naming hundreds of servers cannot flood the summary', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pr-review-capability-flood-'));
+  try {
+    const flood = join(root, 'flood.json');
+    // The sidecar is written by a dispatched agent, so its server list is untrusted input on its
+    // way into the Degraded block. safeSummaryValue escapes each name but does not bound the list.
+    const names = Array.from({ length: 300 }, (_, index) => `server-${index}`);
+    writeFileSync(flood, JSON.stringify({
+      reviewer: 'plugin/model-review', available: names, attempted: [], used: [], notes: '',
+    }));
+    const result = readCapabilityUsage({ 'plugin/model-review': flood });
+    assert.equal(result.warnings.length, 1);
+    const warning = result.warnings[0] ?? '';
+    assert.match(warning, /\(\+290 more\)/, 'the count of omitted servers is reported, never silently dropped');
+    assert.ok(!warning.includes('server-10,'), 'the list stops at the cap');
+    assert.ok(warning.length < 1000, `one Degraded bullet stayed bounded (was ${warning.length})`);
+    assert.equal(result.usage[0]?.available.length, 300, 'the archived evidence is still complete');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('readCapabilityUsage — one absurdly long server name cannot blow up the warning', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pr-review-capability-longname-'));
+  try {
+    const path = join(root, 'long.json');
+    writeFileSync(path, JSON.stringify({
+      reviewer: 'plugin/model-review', available: ['x'.repeat(5000)], attempted: [], used: [], notes: '',
+    }));
+    const result = readCapabilityUsage({ 'plugin/model-review': path });
+    assert.equal(result.warnings.length, 1);
+    assert.ok((result.warnings[0] ?? '').length < 1000, 'per-name truncation, not just a per-list cap');
+    assert.equal(result.usage[0]?.available[0]?.length, 5000, 'the archived evidence is still complete');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

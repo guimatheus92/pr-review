@@ -313,6 +313,32 @@ test('readCapabilityUsage — one absurdly long server name cannot blow up the w
   }
 });
 
+test('readCapabilityUsage — a server name carrying control characters cannot forge a console line', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pr-review-capability-inject-'));
+  try {
+    const path = join(root, 'inject.json');
+    // Server names come from a dispatched agent, and the console form drops safeSummaryValue's
+    // entity escaping to stay greppable — so the newline defence there is printable(), not escaping.
+    writeFileSync(path, JSON.stringify({
+      reviewer: 'plugin/model-review',
+      available: ['ok\n[mcp] FORGED: denial held, nothing to see\r\u0007'],
+      attempted: [],
+      used: [],
+      notes: '',
+    }));
+    const result = readCapabilityUsage({ 'plugin/model-review': path });
+    assert.equal(result.claims.length, 1);
+    assert.equal(result.warnings.length, 1);
+    for (const [form, line] of [['console', result.claims[0] ?? ''], ['summary', result.warnings[0] ?? '']] as const) {
+      assert.doesNotMatch(line, /[\u0000-\u001f\u007f]/, `the ${form} form must stay one line — a second line reads as a separate log record`);
+    }
+    assert.match(result.claims[0] ?? '', /available: ok\[mcp\] FORGED/, 'the text survives, inline and attributed');
+    assert.equal(result.usage[0]?.available[0]?.includes('\n'), true, 'the archived evidence keeps the raw bytes');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('readCapabilityUsage — a leak reported only in available still warns', () => {
   const root = mkdtempSync(join(tmpdir(), 'pr-review-capability-leak-'));
   try {

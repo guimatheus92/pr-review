@@ -85,8 +85,10 @@ export interface GatherOutput {
   gatheredAt: string;
   /**
    * Set by gather only once the provider's file list passed the completeness
-   * gate (paginated to completion, count matched, or completed from git and
-   * re-checked against the count). Absent on entries cached
+   * gate: paginated to completion, count matched, or completed from git and —
+   * when an exact count exists — re-checked against it (a provider-declared
+   * truncation has no count to reach; an absent count never blocks). Absent on
+   * entries cached
    * before 0.11 — which may hold a truncated list — so a hit without it is
    * refetched once.
    */

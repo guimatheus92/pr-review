@@ -14,18 +14,6 @@
  * consumers (line-snap, GitLab mapDiff/positionForLine, the ADO counter)
  * all route through this one filter.
  */
-/** Additions and deletions of a patch — content lines only, hunk headers skipped — through the one preamble filter every diff consumer shares. */
-export function countChangedLines(patch: string): { additions: number; deletions: number } {
-  let additions = 0;
-  let deletions = 0;
-  for (const line of diffLines(patch)) {
-    if (line.startsWith('@@')) continue;
-    if (line.startsWith('+')) additions++;
-    else if (line.startsWith('-')) deletions++;
-  }
-  return { additions, deletions };
-}
-
 export function* diffLines(patch: string): Generator<string> {
   let contentStarted = false;
   for (const ln of patch.split('\n')) {
@@ -45,4 +33,16 @@ export function* diffLines(patch: string): Generator<string> {
     if (ln.startsWith('\\')) continue; // "\ No newline at end of file"
     yield ln;
   }
+}
+
+/** Additions and deletions of a patch — content lines only, hunk headers skipped — through the one preamble filter every diff consumer shares. */
+export function countChangedLines(patch: string): { additions: number; deletions: number } {
+  let additions = 0;
+  let deletions = 0;
+  for (const line of diffLines(patch)) {
+    if (line.startsWith('@@')) continue;
+    if (line.startsWith('+')) additions++;
+    else if (line.startsWith('-')) deletions++;
+  }
+  return { additions, deletions };
 }

@@ -363,7 +363,8 @@ export class AzureDevOpsProvider implements PrProvider {
     const baseSha = pr.lastMergeTargetCommit?.commitId;
     const iterations = await git.getPullRequestIterations(repoId, ref.number, ref.project);
     const latest = iterations[iterations.length - 1];
-    if (!latest) return [];
+    // An empty list would read downstream as "nothing changed" — and be cached as complete.
+    if (!latest) throw new Error('[ado] PR #' + ref.number + ' reported no iterations — cannot list its changed files');
     const entries: GitPullRequestChange[] = [];
     for (let skip = 0; ; ) {
       const page = await git.getPullRequestIterationChanges(repoId, ref.number, latest.id!, ref.project, ADO_CHANGES_PAGE, skip);
@@ -394,7 +395,7 @@ export class AzureDevOpsProvider implements PrProvider {
           // content and is not a reviewable file; it would count against the file
           // guard and cost a getItem call. isFolder is the wire boolean; gitObjectType
           // arrives as a raw string, never the SDK enum.
-          if (!path || change.item?.isFolder) return null;
+          if (!path || change.item?.isFolder || (change.item as { gitObjectType?: unknown } | undefined)?.gitObjectType === 'tree') return null;
           const { status, basePath } = classifyChange(
             change.changeType,
             path,
@@ -410,8 +411,6 @@ export class AzureDevOpsProvider implements PrProvider {
             ]);
             patch = synthesizePatch(path, baseContent, headContent, baseSha ?? '', headSha);
           }
-          // countChangedLines strips only the file-header preamble — `+++…` inside
-          // content is a real added line (text beginning `++`) and counts.
           const { additions, deletions } = patch ? countChangedLines(patch) : { additions: 0, deletions: 0 };
           return { path, status, additions, deletions, patch };
         }),

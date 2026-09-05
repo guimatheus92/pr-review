@@ -15,18 +15,10 @@ const PATCH_CONCURRENCY = 8;
 const HEX_ID = /^[0-9a-f]{7,64}$/i;
 const GIT_STATUS: Record<string, ChangedFile['status']> = { A: 'added', C: 'added', D: 'deleted', R: 'renamed' };
 
-/** Single-quote a ref for the copy-paste hint: a refname may carry shell metacharacters (`import { writeFileSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { resolvePr } from '../providers/index.js';
-import type { ChangedFile, GatherOutput, PrMetadata, PrRef } from '../types.js';
-import { applyDiffExclusions, summarizeExclusions } from '../dispatch/diff-filter.js';
-import { lastCommentIdFrom } from '../cache/keys.js';
-import { readGatherCache, writeGatherCache } from '../cache/store.js';
-import type { PrProvider } from '../providers/types.js';
-import pLimit from 'p-limit';
-import { cwdMatchesPr, defaultGitRemote } from '../stack/detect.js';
-, `;`, `|`), rarely a quote — both stay inert. */
+/** The copy-paste hint quotes a ref only when it must: a refname may carry shell metacharacters (dollar, semicolon, pipe), rarely a quote; a plain one stays bare so the command also pastes into cmd.exe. */
+const PLAIN_REF = new RegExp('^[A-Za-z0-9._/-]+$');
 function shellQuote(ref: string): string {
+  if (PLAIN_REF.test(ref)) return ref;
   return "'" + ref.split("'").join("'\\''") + "'";
 }
 
@@ -57,6 +49,9 @@ interface GatherCmdOptions {
  * A provider list of any other length than the provider's own count — or one
  * the provider declares truncated — is unknown, never complete: it feeds every
  * trust gate keyed on changed paths, where a missing path reads as "unchanged".
+ * Strict inequality on purpose: GitHub is documented to report changed_files: 0
+ * for a stuck diff whose list is still cut at 3000 (community discussion
+ * #200746) — "shorter than the count" would call that complete.
  */
 function listIsIncomplete(files: ChangedFile[], m: PrMetadata): boolean {
   return m.changedFileListTruncated === true || (m.changedFileCount !== undefined && files.length !== m.changedFileCount);
@@ -66,9 +61,7 @@ function truncationSummary(files: ChangedFile[], ref: PrRef, m: PrMetadata): str
   if (m.changedFileListTruncated) {
     return `${ref.provider} listed ${files.length} changed files and reports the list as truncated (its stored diff overflowed)`;
   }
-  // Strict equality on purpose: GitHub is documented to report changed_files: 0
-  // for a stuck diff whose list is still cut at 3000 — "shorter than" would call
-  // that complete. A longer list is a disagreement, not a truncation.
+  // A longer list is a disagreement, not a truncation (see listIsIncomplete).
   return files.length < (m.changedFileCount ?? 0)
     ? `${ref.provider} listed ${files.length} of ${m.changedFileCount} changed files — file list truncated`
     : `${ref.provider} listed ${files.length} changed files against a reported count of ${m.changedFileCount} — file list disagrees with the provider's count`;
@@ -98,15 +91,18 @@ function refusal(files: ChangedFile[], ref: PrRef, m: PrMetadata, reason: string
 async function completeFromGit(files: ChangedFile[], ref: PrRef, m: PrMetadata, cwd: string): Promise<ChangedFile[]> {
   const refuse = (reason: string): Error => refusal(files, ref, m, reason);
   const root = gitTopLevel(cwd);
-  if (!root || !cwdMatchesPr(defaultGitRemote(root), ref.owner, ref.repo, ref.project, ref)) {
-    throw refuse('the current directory is not a checkout of the repository under review');
+  if (!root) throw refuse('the current directory is not inside a git repository');
+  const origin = defaultGitRemote(root);
+  if (!origin) throw refuse("this checkout has no 'origin' remote");
+  if (!cwdMatchesPr(origin, ref.owner, ref.repo, ref.project, ref)) {
+    throw refuse("this checkout's origin (" + origin + ") is not the PR's repository " + ref.owner + '/' + ref.repo);
   }
   if (!m.baseSha || !m.headSha) {
     throw refuse('the provider has not reported both base and head commits yet (a fresh PR may still be computing its diff) — retry shortly');
   }
   for (const [name, sha] of [['base', m.baseSha], ['head', m.headSha]] as const) {
     // Provider-supplied ids become git arguments: only a hex object id gets that far.
-    if (!HEX_ID.test(sha)) throw refuse(name + " commit id '" + sha + "' is not a hex commit id");
+    if (!HEX_ID.test(sha)) throw refuse(name + ' commit id ' + JSON.stringify(sha) + ' is not a hex commit id');
     try {
       gitOut(root, ['cat-file', '-e', sha + '^{commit}']);
     } catch (err) {
@@ -116,6 +112,15 @@ async function completeFromGit(files: ChangedFile[], ref: PrRef, m: PrMetadata, 
   if (gitOut(root, ['rev-parse', '--is-shallow-repository']).trim() !== 'false') {
     throw refuse('this checkout is shallow, so its merge base cannot be trusted');
   }
+  // A partial (blobless/treeless) clone would make diff-tree -p fetch missing
+  // objects from origin on demand — a network write pr-review never performs.
+  let partial = '';
+  try {
+    partial = gitOut(root, ['config', '--get', 'extensions.partialClone']).trim();
+  } catch {
+    // exit 1 = key unset; anything worse already failed the checks above
+  }
+  if (partial) throw refuse('this is a partial clone (extensions.partialClone=' + partial + '): git would fetch missing objects from origin on demand, which pr-review never does');
   // One merge base, or git and the provider may have diffed against different
   // ancestors — and the branch under review controls which files that hides.
   let bases: string[];
@@ -131,9 +136,15 @@ async function completeFromGit(files: ChangedFile[], ref: PrRef, m: PrMetadata, 
 
   const known = new Set(files.map((file) => file.path));
   const missing: ChangedFile[] = [];
+  const range = mergeBase.slice(0, 12) + '..' + m.headSha.slice(0, 12);
   // -z tokens: `X\0path\0`; a rename or copy is `R100\0old\0new\0` — old path first
   // (status --porcelain -z, which gitProvenance parses, lists the NEW path first).
-  const tokens = gitZ(root, ['diff-tree', '-r', '-M', '-z', '--name-status', mergeBase, m.headSha]);
+  let tokens: string[];
+  try {
+    tokens = gitZ(root, ['diff-tree', '-r', '-M', '-z', '--name-status', mergeBase, m.headSha]);
+  } catch (err) {
+    throw refuse('git could not list ' + range + ' in ' + root + ' (' + gitDetail(err) + ')');
+  }
   for (let i = 0; i < tokens.length; ) {
     const code = tokens[i]![0];
     const previousPath = code === 'R' || code === 'C' ? tokens[i + 1] : undefined;
@@ -156,23 +167,33 @@ async function completeFromGit(files: ChangedFile[], ref: PrRef, m: PrMetadata, 
   // under -z) and a Windows argv budget; revisit only if a real PR makes this
   // the slow step.
   const limit = pLimit(PATCH_CONCURRENCY);
-  await Promise.all(
-    missing.map((file) =>
-      limit(async () => {
-        // Both sides of a rename, or -M sees a bare add; --literal-pathspecs so a
-        // `*` or `[` in a file name is a name, not a glob.
-        const out = await gitOutAsync(root, [
-          '--literal-pathspecs', 'diff-tree', '-r', '-M', '-p', '--no-color', mergeBase, m.headSha, '--',
-          file.path, ...(file.previousPath ? [file.previousPath] : []),
-        ]);
-        const hunk = out.search(/^@@ /m);
-        if (hunk < 0) return; // binary, pure rename, mode-only, or a -diff attribute: patch-less, as providers report binaries
-        file.patch = out.slice(hunk).trimEnd();
-        Object.assign(file, countChangedLines(file.patch));
-      }),
-    ),
+  try {
+    await Promise.all(
+      missing.map((file) =>
+        limit(async () => {
+          // Both sides of a rename, or -M sees a bare add; --literal-pathspecs so a
+          // `*` or `[` in a file name is a name, not a glob.
+          const out = await gitOutAsync(root, [
+            '--literal-pathspecs', 'diff-tree', '-r', '-M', '-p', '--no-color', mergeBase, m.headSha, '--',
+            file.path, ...(file.previousPath ? [file.previousPath] : []),
+          ]);
+          const hunk = out.search(/^@@ /m);
+          // No hunk: binary, pure rename, mode-only, or a `-diff` attribute (possibly
+          // the PR's own). The row stays, patch-less — the path is what trust reads.
+          if (hunk < 0) return;
+          file.patch = out.slice(hunk).trimEnd();
+          Object.assign(file, countChangedLines(file.patch));
+        }),
+      ),
+    );
+  } catch (err) {
+    throw refuse('git could not produce a patch for ' + range + ' in ' + root + ' (' + gitDetail(err) + ')');
+  }
+  const patchless = missing.filter((file) => file.patch === undefined).length;
+  process.stderr.write(
+    '[gather] ' + truncationSummary(files, ref, m) + '; completed ' + missing.length + ' file(s) from git at ' + root +
+      (patchless ? ' (' + patchless + ' without a patch: binary, pure rename, mode-only or a -diff attribute)' : '') + '\n',
   );
-  process.stderr.write('[gather] ' + truncationSummary(files, ref, m) + '; completed ' + missing.length + ' file(s) from git at ' + root + '\n');
   return union;
 }
 

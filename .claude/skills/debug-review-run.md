@@ -1,5 +1,5 @@
 ---
-description: How to debug a pr-review run that produced unexpected results (missing findings, parse errors, empty output, companion failures).
+description: How to debug a pr-review run that produced unexpected results (missing findings, parse errors, empty output, companion failures, "file list truncated" / provider count mismatch, stale cache entries).
 ---
 
 # Debugging a Review Run

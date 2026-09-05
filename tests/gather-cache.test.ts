@@ -264,19 +264,25 @@ test('runGather — a missing commit names the provider-specific fetch command; 
     const gh = fakeGithub({ ...META, baseSha, headSha: absent, changedFileCount: 6 }, [file('a.ts')]);
     await assert.rejects(
       () => runGather({ prUrl: GH_REF.url, provider: gh.provider, cwd: repo, readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' }),
-      (err: Error) => /is not in this checkout/.test(err.message) && /git fetch origin 'main' 'refs\/pull\/1\/head'/.test(err.message) && /never fetches/.test(err.message),
+      (err: Error) => /is not in this checkout/.test(err.message) && /git fetch origin main refs\/pull\/1\/head/.test(err.message) && /never fetches/.test(err.message),
     );
     const glRef: PrRef = { provider: 'gitlab', url: 'https://gitlab.com/o/r/-/merge_requests/7', owner: 'o', repo: 'r', number: 7 };
     const gl: PrProvider = { ...gh.provider, name: 'gitlab', parseUrl: () => ({ ...glRef }) };
     await assert.rejects(
       () => runGather({ prUrl: glRef.url, provider: gl, cwd: repo, readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' }),
-      /git fetch origin 'refs\/merge-requests\/7\/head'/,
+      /git fetch origin refs\/merge-requests\/7\/head/,
     );
     const adoRef: PrRef = { provider: 'azuredevops', url: 'https://dev.azure.com/o/p/_git/r/pullrequest/3', owner: 'o', organization: 'o', project: 'p', repo: 'r', number: 3 };
     const ado: PrProvider = { ...gh.provider, name: 'azuredevops', parseUrl: () => ({ ...adoRef }) };
     await assert.rejects(
       () => runGather({ prUrl: adoRef.url, provider: ado, cwd: repo, readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' }),
-      /git fetch origin 'main' 'feature'/,
+      /git fetch origin main feature/,
+    );
+    // A refname may carry shell metacharacters (never a space): only then is it quoted, so the plain form still pastes into cmd.exe.
+    const odd = fakeGithub({ ...META, baseSha, headSha: absent, baseBranch: 'rel;ease$(x)', changedFileCount: 6 }, [file('a.ts')]);
+    await assert.rejects(
+      () => runGather({ prUrl: GH_REF.url, provider: odd.provider, cwd: repo, readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' }),
+      /git fetch origin 'rel;ease\$\(x\)' refs\/pull\/1\/head/,
     );
   } finally {
     rmSync(repo, { recursive: true, force: true });
@@ -289,7 +295,7 @@ test('runGather — a checkout of another repository cannot complete the list', 
     const { provider } = fakeGithub({ ...META, baseSha, headSha, changedFileCount: 6 }, [file('a.ts')]);
     await assert.rejects(
       () => runGather({ prUrl: GH_REF.url, provider, cwd: repo, readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' }),
-      /not a checkout of/,
+      /is not the PR's repository o\/r/,
     );
   } finally {
     rmSync(repo, { recursive: true, force: true });
@@ -428,6 +434,73 @@ test('runGather — unrelated histories and a non-hex commit id are refused with
       () => runGather({ prUrl: GH_REF.url, provider: odd.provider, cwd: repo, readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' }),
       /is not a hex commit id/,
     );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('runGather — a provider-declared truncation ("N+") is completed from the checkout: there is no count to reach, the union is the list', async () => {
+  const { repo, baseSha, headSha } = prRepo();
+  try {
+    const { provider } = fakeGithub({ ...META, baseSha, headSha, changedFileCount: 1, changedFileListTruncated: true }, [file('a.ts')]);
+    let cached: GatherOutput | undefined;
+    const result = await runGather({ prUrl: GH_REF.url, provider, cwd: repo, readGatherCacheFn: () => null, writeGatherCacheFn: (v) => (cached = v, 'x') });
+    assert.equal(result.changedFiles.length, 6);
+    assert.equal(cached?.changedFilesComplete, true);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('runGather — a partial (blobless/treeless) clone is refused: diff-tree -p would fetch objects from origin on demand', async () => {
+  const { repo, baseSha, headSha } = prRepo();
+  try {
+    git(repo, 'config', 'extensions.partialClone', 'origin');
+    const { provider } = fakeGithub({ ...META, baseSha, headSha, changedFileCount: 6 }, [file('a.ts')]);
+    await assert.rejects(
+      () => runGather({ prUrl: GH_REF.url, provider, cwd: repo, readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' }),
+      /partial clone/,
+    );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('runGather — the refusal names the actual cause: no repository, no origin remote, or an origin that is another repository', async () => {
+  const { provider } = fakeGithub({ ...META, changedFileCount: 3 }, [file('a.ts')]);
+  await withNoRepoDir(async (cwd) => {
+    await assert.rejects(
+      () => runGather({ prUrl: GH_REF.url, provider, cwd, readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' }),
+      /is not inside a git repository/,
+    );
+  });
+  const bare = mkdtempSync(join(tmpdir(), 'pr-review-noorigin-'));
+  try {
+    git(bare, 'init', '-q', '-b', 'main');
+    await assert.rejects(
+      () => runGather({ prUrl: GH_REF.url, provider, cwd: bare, readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' }),
+      /has no 'origin' remote/,
+    );
+  } finally {
+    rmSync(bare, { recursive: true, force: true });
+  }
+});
+
+test('runGather — a path with a glob metacharacter is diffed literally: dir[1]/x.ts never receives dir1/x.ts\'s patch', async () => {
+  const { repo, baseSha } = prRepo();
+  try {
+    mkdirSync(join(repo, 'dir[1]'));
+    mkdirSync(join(repo, 'dir1'));
+    writeFileSync(join(repo, 'dir[1]', 'x.ts'), 'bracketed\n');
+    writeFileSync(join(repo, 'dir1', 'x.ts'), 'plain\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'globs');
+    const headSha = git(repo, 'rev-parse', 'HEAD');
+    const { provider } = fakeGithub({ ...META, baseSha, headSha, changedFileCount: 8 }, [file('a.ts')]);
+    const result = await runGather({ prUrl: GH_REF.url, provider, cwd: repo, readGatherCacheFn: () => null, writeGatherCacheFn: () => 'x' });
+    const by = (p: string) => result.changedFiles.find((f) => f.path === p)!;
+    assert.ok(by('dir[1]/x.ts').patch?.includes('+bracketed'), `literal pathspec, got ${JSON.stringify(by('dir[1]/x.ts').patch)}`);
+    assert.ok(by('dir1/x.ts').patch?.includes('+plain'), `plain path, got ${JSON.stringify(by('dir1/x.ts').patch)}`);
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

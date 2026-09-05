@@ -85,3 +85,15 @@ test('fetchChangedFiles — folder entries are not files: dropped before any con
   assert.deepEqual(files.map((f) => f.path), ['newdir/a.ts']);
   assert.ok(!items.includes('/newdir') && !items.includes('/src'), `getItem must never be asked for a folder: ${items.join(', ')}`);
 });
+
+test('fetchChangedFiles — a PR with no iterations is an error, never an empty (and therefore "complete") file list', async () => {
+  const provider = new AzureDevOpsProvider();
+  const ref = provider.parseUrl(PR_URL)!;
+  const git = {
+    getPullRequestById: async () => PR,
+    getPullRequestIterations: async () => [],
+    getPullRequestIterationChanges: async () => { throw new Error('must not be called'); },
+  };
+  (provider as unknown as { gitApis: Map<string, Promise<unknown>> }).gitApis.set(orgUrlFor(ref), Promise.resolve(git));
+  await assert.rejects(() => provider.fetchChangedFiles(ref), /no iterations/);
+});

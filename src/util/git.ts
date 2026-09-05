@@ -64,7 +64,7 @@ export function gitOut(root: string, args: string[]): string {
 
 const execFileAsync = promisify(execFile);
 
-/** Async twin of `gitOut` for fan-out reads (one process per file): same flags, same throw-on-failure contract, and it does not block the event loop. */
+/** Async twin of `gitOut` for fan-out reads (one process per file): same git flags and the same throw-on-failure contract (only the process wiring differs: nothing inherited, window hidden), and it does not block the event loop. */
 export async function gitOutAsync(root: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', ['--no-optional-locks', ...args], {
     cwd: root,

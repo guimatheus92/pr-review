@@ -56,6 +56,12 @@ export function runtimeSpawnArgs(
       '--tools', 'Read,Write,Edit,Glob,Grep,Task,Agent',
       '--allowedTools', 'Read,Write,Edit,Glob,Grep,Task,Agent',
       '--disallowedTools', 'Bash,PowerShell,WebFetch,WebSearch,mcp__*',
+      // `--setting-sources user` loads the user's MCP config, and denying the
+      // mcp__* TOOLS does not stop the SERVERS from booting: a dispatched
+      // session started every user MCP server (each one a cmd.exe + conhost +
+      // npx + node on win32) only to be forbidden from calling it. This is the
+      // claude-side equivalent of copilot's --disable-builtin-mcps.
+      '--strict-mcp-config',
       '--setting-sources', 'user',
       '--add-dir', addDir,
       ...repoArg,

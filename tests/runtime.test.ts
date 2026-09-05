@@ -29,6 +29,7 @@ test('runtimeSpawnArgs — per-runtime argv shape', () => {
     '--tools', 'Read,Write,Edit,Glob,Grep,Task,Agent',
     '--allowedTools', 'Read,Write,Edit,Glob,Grep,Task,Agent',
     '--disallowedTools', 'Bash,PowerShell,WebFetch,WebSearch,mcp__*',
+    '--strict-mcp-config',
     '--setting-sources', 'user', '--add-dir', '/dir',
   ]);
   assert.deepEqual(runtimeSpawnArgs('copilot', 'm1', '/run', '/repo', ['ado', 'bicep']), [
@@ -36,6 +37,14 @@ test('runtimeSpawnArgs — per-runtime argv shape', () => {
     '--no-custom-instructions', '--no-ask-user', '--add-dir', '/run', '--add-dir', '/repo',
     '--disable-mcp-server', 'ado', '--disable-mcp-server', 'bicep', '-s',
   ]);
+});
+
+test('runtimeSpawnArgs — neither runtime may boot ambient MCP servers', () => {
+  // Denying the mcp__* tools is not enough: the servers still start (a cmd.exe +
+  // conhost + npx + node each on win32) only to be unreachable. Every runtime
+  // needs a process-level switch, not just a tool-level one.
+  assert.ok(runtimeSpawnArgs('claude', 'opus', '/dir').includes('--strict-mcp-config'));
+  assert.ok(runtimeSpawnArgs('copilot', 'm1', '/dir').includes('--disable-builtin-mcps'));
 });
 
 test('taskCall — tool vocabulary per runtime', () => {

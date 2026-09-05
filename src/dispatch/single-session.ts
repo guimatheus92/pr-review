@@ -295,12 +295,6 @@ function writeContextFile(
 
   metaLines.push('', `## Stack`, '', `- **Tags:** ${opts.stackTags.length ? opts.stackTags.join(', ') : '(none detected)'}`);
 
-  if ((opts.mcpServers?.length ?? 0) > 0) {
-    metaLines.push('', `## Available MCP Capabilities`, '');
-    for (const server of opts.mcpServers ?? []) metaLines.push(`- ${server.name} (${server.source})`);
-    metaLines.push('', 'Use only read-only inspection/validation tools relevant to your pass. Never claim MCP validation unless a tool call succeeds.');
-  }
-
   metaLines.push('', `## Changed Files (${inScope.length} in scope, ${gather.changedFiles.length - inScope.length} excluded)`);
   for (const f of inScope) {
     metaLines.push(`- ${f.path} (${f.status}, +${f.additions} -${f.deletions})`);
@@ -354,7 +348,7 @@ function passTaskPrompt(
   capabilityAudit?: { path: string; reviewer: string; servers: string[] },
 ): string {
   const audit = capabilityAudit
-    ? ` This installed-plugin pass declares MCP servers: ${capabilityAudit.servers.join(', ') || '(none)'}. Use relevant read-only MCP inspection/validation tools when available. Before returning, write a JSON object to \`${capabilityAudit.path}\` using exactly this shape: {"reviewer":"${capabilityAudit.reviewer}","available":["server-name"],"attempted":["server-name"],"used":["server-name"],"notes":"evidence"}. available, attempted, and used MUST be arrays of server-name strings, never booleans. Put a server in attempted only if you called it, and in used only after a successful tool result; otherwise keep those arrays empty.`
+    ? ` This installed-plugin pass declares MCP servers: ${capabilityAudit.servers.join(', ') || '(none)'}. This runtime denies MCP tools, so none of them is callable from your session and there is nothing to attempt — report that honestly rather than claiming a call you could not make. Before returning, write a JSON object to \`${capabilityAudit.path}\` using exactly this shape: {"reviewer":"${capabilityAudit.reviewer}","available":["server-name"],"attempted":["server-name"],"used":["server-name"],"notes":"evidence"}. available, attempted, and used MUST be arrays of server-name strings, never booleans. Put a server in attempted only if you called it, and in used only after a successful tool result; otherwise keep those arrays empty.`
     : '';
   return (
     `Read the PR context at \`${contextPath}\`, then read your review pass at \`${passPath}\` and apply ONLY that pass's rules to the diff.` +

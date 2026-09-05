@@ -461,7 +461,7 @@ test('index — shards every exposed entry and keeps duplicate names distinct', 
   }
 });
 
-test('MCP capabilities — context lists names/provenance and copies only the trusted repo config', () => {
+test('MCP capabilities — context advertises no server, and only the trusted repo config is copied', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
     const trustedMcpConfig = { mcpServers: { modelInspector: { command: 'tool' } } };
@@ -476,8 +476,13 @@ test('MCP capabilities — context lists names/provenance and copies only the tr
     });
     const context = readFileSync(ctx.contextPath, 'utf8');
     assert.match(context, /Checkout root:\*\* C:\/repo/);
-    assert.match(context, /modelInspector \(plugin:model-tools\)/);
-    assert.match(context, /bicep \(repo\)/);
+    // Both runtimes deny MCP tools at the process level, so the shared context must
+    // not advertise servers a pass cannot call. It used to list them under
+    // "## Available MCP Capabilities", which only bought a paragraph of the pass
+    // explaining why the call it was told to make was impossible.
+    assert.doesNotMatch(context, /Available MCP Capabilities/);
+    assert.doesNotMatch(context, /modelInspector \(plugin:model-tools\)/);
+    assert.doesNotMatch(context, /bicep \(repo\)/);
     assert.ok(existsSync(join(outDir, '.mcp.json')));
     assert.match(ctx.capabilityFiles['plugin/model-review'] ?? '', /capability-plugin_model-review--[0-9a-f]{12}\.json$/);
     assert.ok(ctx.orchestratorPrompt.includes('\\"available\\":[\\"server-name\\"],\\"attempted\\":[\\"server-name\\"],\\"used\\":[\\"server-name\\"]'));

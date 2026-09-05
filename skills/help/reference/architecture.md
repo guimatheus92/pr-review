@@ -144,7 +144,7 @@ The slash command finds the bundle via `$CLAUDE_PLUGIN_ROOT/dist/cli.cjs` under 
 
 **Why single-session?** One runtime process dispatches all Phase 1 passes via `task()` / `Task()`. Node opens another dispatch session only for an unresolved delta, and a direct verifier session only when severe findings require it. The Codex second-opinion reviewer remains the deliberate parallel sibling.
 
-**Why runtime-generic?** `src/dispatch/runtime.ts` isolates task syntax, model normalization, and permission flags. Both runtimes receive only the materialized run directory. Copilot denies shell, built-in/ambient MCPs, and checkout instructions; Claude uses `dontAsk` plus an explicit Read/Write/Edit/Glob/Grep/Task/Agent allowlist and denies shell, web, and MCP tools. Task strings are JSON-escaped and carry mandatory descriptions.
+**Why runtime-generic?** `src/dispatch/runtime.ts` isolates task syntax, model normalization, and permission flags. Both runtimes receive only the materialized run directory. Neither runtime lets an ambient MCP server start: copilot passes `--disable-builtin-mcps` (plus one `--disable-mcp-server` per inventoried server) and claude passes `--strict-mcp-config`, so denial is at the process level, not only the tool level. Copilot also denies shell and checkout instructions; claude uses `dontAsk` plus an explicit Read/Write/Edit/Glob/Grep/Task/Agent allowlist and denies shell, web, and MCP tools. Task strings are JSON-escaped and carry mandatory descriptions.
 
 **Why esbuild bundle?** `dist/cli.cjs` is a zero-dependency single file. No `npm install` needed after plugin install — the slash command just runs `node "$CLI"`.
 

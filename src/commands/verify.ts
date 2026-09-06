@@ -544,7 +544,13 @@ export const CHECKS: InvariantCheck[] = [
       // because a PR committing `.Agents/skills` bypassed a macOS reviewer, so
       // a case-sensitive audit would report SKIP for the exact bypass it is
       // supposed to catch.
-      const changed = ctx.gather.changedFiles.map((f) => f.path.replace(/\\/g, '/'));
+      // `previousPath` too: a rule file the PR RENAMED away is authored by the
+      // branch just as much as one it edited, and the product's own trust gate
+      // checks both. Auditing only `path` would call that bypass clean.
+      const changed = ctx.gather.changedFiles
+        .flatMap((f) => [f.path, f.previousPath])
+        .filter((p): p is string => typeof p === 'string' && p.length > 0)
+        .map((p) => p.replace(/\\/g, '/'));
       const folded = new Set(changed.map((p) => p.normalize('NFC').toLowerCase()));
       const touchedRule = changed.filter((p) =>
         /(^|\/)(\.claude|\.copilot|\.github|\.agents)\/(skills|rules|instructions)\//i.test(p.normalize('NFC')),

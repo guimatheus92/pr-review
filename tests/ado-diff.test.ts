@@ -43,19 +43,23 @@ test('classifyChange — add/edit/delete map by bit, base path is the new path',
   assert.deepEqual(classifyChange(undefined, 'a.ts', undefined), { status: 'modified', basePath: 'a.ts' });
 });
 
-test('classifyChange — a pure rename fetches base from the OLD (source) path', () => {
+test('classifyChange — a pure rename is "renamed" and fetches base from the OLD (source) path', () => {
   const { status, basePath } = classifyChange(8, 'new/name.tmdl', '/old/name.tmdl');
-  assert.equal(status, 'modified');
+  assert.equal(status, 'renamed');
   assert.equal(basePath, 'old/name.tmdl'); // leading slash stripped; base read from the pre-rename path
 });
 
 test('classifyChange — rename OR-ed with edit (10) is still a rename, not a plain modify', () => {
   const { status, basePath } = classifyChange(10, 'new/name.tmdl', '/old/name.tmdl');
-  assert.equal(status, 'modified');
+  assert.equal(status, 'renamed');
   assert.equal(basePath, 'old/name.tmdl');
 });
 
-test('classifyChange — rename bit with a missing sourceServerItem falls back to the new path', () => {
+test('classifyChange — the rename bit without a sourceServerItem is not a rename we can describe', () => {
+  // `renamed` must never mean less here than on GitHub and GitLab, where it always
+  // pairs with a previousPath. With no source item there is no previous path to
+  // report, so this stays `modified` — which is also what it was before renames
+  // were labelled at all, so the base fetch is unchanged.
   assert.deepEqual(classifyChange(8, 'a.ts', undefined), { status: 'modified', basePath: 'a.ts' });
 });
 

@@ -226,7 +226,7 @@ by the pass count while letting two passes disagree about what the PR even is.
 
 **Verified:** `tests/gather-cache.test.ts`, `tests/session-context.test.ts`
 
-**Check:** run+pr
+**Check:** run
 
 ### INV-FETCH-03 — No repo pollution
 
@@ -464,8 +464,8 @@ review that looks whole and is not, with no signal about what is missing.
 
 **Always:** `0` = the pipeline completed; without `--fail-on` it says nothing
 about the finding count. `1` = a finding at or above the `--fail-on` threshold
-survived. `2` = an operational failure; `error.txt` names it. Exit 2 always
-leaves `error.txt`; exit 0 always clears it.
+survived. `2` = an operational failure; `error.txt` names it. A run that reaches finalization always
+leaves `error.txt` on exit 2 and clears it on exit 0.
 
 **Why:** CI gates on these. An exit code that sometimes means "no findings" and
 sometimes means "no review" cannot gate anything.

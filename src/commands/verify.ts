@@ -109,6 +109,17 @@ export interface VerifyContext {
   postingShape: Finding[];
   /** Multiset of `file:line:body` keys the run should have left on the PR. */
   expectedKeys: Map<string, number>;
+  /**
+   * Bodies the run should have left as PR-LEVEL threads.
+   *
+   * Azure DevOps only, and only for findings with no location: INV-POST-01
+   * blesses those as resolvable PR-level threads there, so on ADO they are
+   * expected output, not a violation — while on GitHub and GitLab everything is
+   * re-anchored inline and a location-less body reaching the top level IS one.
+   * Modelled as expected rather than merely exempted, so INV-POST-01 can
+   * require them to be present instead of ignoring the findings entirely.
+   */
+  expectedTopLevel: Map<string, number>;
   /** Live comments created inside this run's window, or null when unread. */
   liveWindow: ExistingComment[] | null;
   /** Every live comment the read returned, or null when unread. */
@@ -131,6 +142,22 @@ export interface VerifyContext {
   prAdvanced: boolean;
   /** `<old>→<new>` for the evidence line, when the PR advanced. */
   advancedFrom: string | null;
+  /**
+   * The run recorded control state that failed authentication.
+   *
+   * Distinguishes "this run predates the control store" from "someone changed
+   * what it recorded" — INV-DEL-01 must not read the second as the first.
+   */
+  controlUnauthenticated: boolean;
+  /** Run-dir artifacts that exist but do not parse. */
+  corruptArtifacts: string[];
+  /**
+   * False when neither a finalization record nor a posting marker gave the
+   * window an upper bound. Without one, a later run's comments on the same PR
+   * fall inside this run's window — the exact defect the ceiling was added for
+   * — so the rows that depend on it say so rather than grading silently.
+   */
+  windowCeilingKnown: boolean;
 }
 
 const pass = (evidence: string): CheckResult => ({ status: 'pass', evidence });
@@ -143,11 +170,19 @@ function sample(items: string[], limit = 5): string {
   return items.length > limit ? `${head}, +${items.length - limit} more` : head;
 }
 
-function readJson<T>(path: string): T | null {
+/**
+ * Absent and corrupt are different answers, and several rows key off this null.
+ * A file that exists but will not parse is recorded in `corrupt` so the row that
+ * cares can say "unreadable" instead of "there was nothing there". The set is
+ * per-load, not module state: two audits in one process must not see each
+ * other's artifacts.
+ */
+function readJson<T>(path: string, corrupt?: Set<string>): T | null {
   if (!existsSync(path)) return null;
   try {
     return JSON.parse(readFileSync(path, 'utf8')) as T;
   } catch {
+    corrupt?.add(path);
     return null;
   }
 }
@@ -234,7 +269,20 @@ export const CHECKS: InvariantCheck[] = [
       const missing = [...remaining.entries()].filter(([, n]) => n > 0);
       const total = [...ctx.expectedKeys.values()].reduce((a, b) => a + b, 0);
       const short = missing.reduce((a, [, n]) => a + n, 0);
-      if (missing.length === 0) return pass(`${total}/${total} findings present as inline threads`);
+      const topLevelRemaining = new Map(ctx.expectedTopLevel);
+      for (const c of ctx.liveWindow!) {
+        if (c.file) continue;
+        const body = c.body.trim();
+        const n = topLevelRemaining.get(body) ?? 0;
+        if (n > 0) topLevelRemaining.set(body, n - 1);
+      }
+      const missingTopLevel = [...topLevelRemaining.values()].reduce((a, n) => a + n, 0);
+      const topLevelTotal = [...ctx.expectedTopLevel.values()].reduce((a, n) => a + n, 0);
+      const topLevelNote = topLevelTotal > 0 ? ` + ${topLevelTotal - missingTopLevel}/${topLevelTotal} as PR-level threads` : '';
+      if (missingTopLevel > 0 && !ctx.prAdvanced) {
+        return fail(`${missingTopLevel} location-less finding(s) never landed as a PR-level thread`);
+      }
+      if (missing.length === 0) return pass(`${total}/${total} findings present as inline threads${topLevelNote}`);
       if (ctx.prAdvanced) {
         return skip(
           `${total - short}/${total} matched by location; the rest cannot be graded because the PR advanced ` +
@@ -255,23 +303,49 @@ export const CHECKS: InvariantCheck[] = [
       // the very violation this invariant exists for — the companion posting a
       // "### Code review" verdict — arrives under a DIFFERENT author than the
       // CLI's. An author-scoped check alone would call that clean.
+      // Claim the PR-level threads Azure DevOps is DOCUMENTED to produce for
+      // location-less findings (INV-POST-01). Claimed once each, so a second
+      // copy of the same body is still a violation, and only on the provider
+      // where INV-POST-01 blesses it — everywhere else the map is empty.
+      const seenExpected = new Map(ctx.expectedTopLevel);
+      const unexpected = topLevel.filter((c) => {
+        const n = seenExpected.get(c.body.trim()) ?? 0;
+        if (n <= 0) return true;
+        seenExpected.set(c.body.trim(), n - 1);
+        return false;
+      });
+      const expectedCount = topLevel.length - unexpected.length;
+      const expectedNote = expectedCount > 0 ? ` (${expectedCount} documented PR-level thread(s) claimed)` : '';
+
+      // A verdict banner is a violation on every provider, in every position:
+      // it is never something a finding produces.
+      const banner = topLevel.filter((c) => /^\s*(#\s*PR Review Summary|###\s*Code review)\b/i.test(c.body));
+      if (banner.length > 0) {
+        return fail(
+          `${banner.length} top-level comment(s) carry a review-verdict banner: ` +
+            sample(banner.map((c) => `${c.id} by ${c.author}`), 3),
+        );
+      }
+
+      // The body tripwire runs ALWAYS, not only when the identity is unknown: a
+      // dispatched agent authenticates with the runtime's own credential, so
+      // the very violation this invariant exists for arrives under a DIFFERENT
+      // author than the CLI's, and an author-scoped check alone calls it clean.
       const bodies = new Set((ctx.findings?.finalFindings ?? []).map((f) => f.body.trim()));
-      const suspects = topLevel.filter(
-        (c) => bodies.has(c.body.trim()) || /^\s*(#\s*PR Review Summary|###\s*Code review)\b/i.test(c.body),
-      );
+      const suspects = unexpected.filter((c) => bodies.has(c.body.trim()));
       if (suspects.length > 0) {
         return fail(
-          `${suspects.length} top-level comment(s) carry this tool's output shape: ` +
+          `${suspects.length} top-level comment(s) repeat a finding body: ` +
             sample(suspects.map((c) => `${c.id} by ${c.author}`), 3),
         );
       }
 
       if (ctx.selfAuthor) {
-        const ours = topLevel.filter((c) => c.author === ctx.selfAuthor);
+        const ours = unexpected.filter((c) => c.author === ctx.selfAuthor);
         return ours.length === 0
           ? pass(
-              `0 top-level comments authored by ${ctx.selfAuthor} in the run window` +
-                (topLevel.length > 0 ? ` (${topLevel.length} by others, shape-checked)` : ''),
+              `0 unexpected top-level comments authored by ${ctx.selfAuthor} in the run window${expectedNote}` +
+                (unexpected.length > 0 ? ` (${unexpected.length} by others, shape-checked)` : ''),
             )
           : fail(
               `${ours.length} top-level comment(s) authored by ${ctx.selfAuthor}: ` +
@@ -280,7 +354,7 @@ export const CHECKS: InvariantCheck[] = [
       }
       return skip(
         'no confirmed write from this run to derive the posting identity from; ' +
-          `shape tripwire clean over ${topLevel.length} top-level comment(s) in the window`,
+          `shape tripwire clean over ${unexpected.length} unexpected top-level comment(s) in the window${expectedNote}`,
       );
     },
   },
@@ -312,6 +386,12 @@ export const CHECKS: InvariantCheck[] = [
         counts.set(key, (counts.get(key) ?? 0) + 1);
       }
       const dupes = [...counts.entries()].filter(([, n]) => n > 1);
+      if (dupes.length > 0 && !ctx.windowCeilingKnown) {
+        return skip(
+          `${dupes.length} duplicated location(s), but this run recorded no completion time, so a later run's ` +
+            'comments cannot be excluded from the window',
+        );
+      }
       return dupes.length === 0
         ? pass(`no duplicate file:line:body among ${ctx.liveWindow!.length} comment(s) in the window`)
         : fail(`${dupes.length} duplicated location(s): ${sample(dupes.map(([key, n]) => `${describeKey(key)} x${n}`))}`);
@@ -394,7 +474,9 @@ export const CHECKS: InvariantCheck[] = [
   },
   {
     id: 'INV-FETCH-02',
-    needs: 'run+pr',
+    // Artifact-only since the unscoped-comment clause was removed; keeping it
+    // run+pr would drop a gradeable row under --offline for nothing.
+    needs: 'run',
     run(ctx) {
       const m = ctx.gather.metadata;
       const missing = (['title', 'author', 'headSha', 'state'] as const).filter((k) => !m[k]);
@@ -460,15 +542,13 @@ export const CHECKS: InvariantCheck[] = [
       const c = ctx.capabilities;
       const shaped = Array.isArray(c.installedPlugins) && Array.isArray(c.selectedPluginSkills) && Array.isArray(c.mcpServers) && Array.isArray(c.warnings);
       if (!shaped) return fail('capabilities.json is malformed (installedPlugins/selectedPluginSkills/mcpServers/warnings must all be arrays)');
-      if (!c.runtime) {
-        return fail('capabilities.json records no runtime — nothing on disk says which agent CLI hosted the session');
-      }
       if (!ctx.routes) return fail('passes.json is missing or malformed — the run has no record of how skills were routed');
       if (ctx.routes.length === 0) return fail('passes.json is empty — no skill was even considered');
       const by = (kind: string) => ctx.routes!.filter((r) => r.matchedBy === kind).length;
       const dispatched = ctx.routes.filter((r) => !['context', 'index', 'skipped'].includes(r.matchedBy)).length;
+      const runtimeNote = c.runtime ? `runtime ${c.runtime}` : 'runtime not recorded (run predates 0.12.0)';
       return pass(
-        `runtime ${c.runtime}, ${(c.installedPlugins as unknown[]).length} plugin(s), ${c.mcpServers!.length} MCP server(s), ` +
+        `${runtimeNote}, ${(c.installedPlugins as unknown[]).length} plugin(s), ${c.mcpServers!.length} MCP server(s), ` +
           `${ctx.routes.length} skill(s) routed (${dispatched} dispatched / ${by('context')} context / ${by('index')} index / ${by('skipped')} skipped)`,
       );
     },
@@ -532,6 +612,10 @@ export const CHECKS: InvariantCheck[] = [
             sample(reached.map((u) => u.reviewer)),
         );
       }
+      const evidenceWarnings = ctx.capabilityUsage?.warnings ?? [];
+      if (evidenceWarnings.length > 0) {
+        return fail(`${evidenceWarnings.length} pass(es) produced missing or invalid MCP evidence: ${sample(evidenceWarnings)}`);
+      }
       const covered = ctx.plan.runtime === 'copilot' ? `${inventory.length} inventoried server(s) denied by name` : 'denied categorically (--strict-mcp-config)';
       return pass(`${ctx.plan.runtime}: ${covered}; no MCP reached in ${usage.length} pass sidecar(s)`);
     },
@@ -567,7 +651,10 @@ export const CHECKS: InvariantCheck[] = [
       // Prefer the plan's repoRoot; fall back to a separator-bounded suffix
       // match, which keeps a pack skill at .../packs/x/.claude/skills/foo.md
       // from impersonating the repo's own .claude/skills/foo.md.
-      const admitted = (ctx.routes ?? [])
+      if (!ctx.routes) {
+        return fail('the PR changed rule or config files but passes.json is unreadable — whether they reached the review is unknown');
+      }
+      const admitted = ctx.routes
         .filter((r) => r.matchedBy !== 'skipped' && r.source)
         .filter((r) => touchedRule.some((changed) => sourceIsRepoPath(r.source!, changed, ctx.plan?.repoRoot)));
       if (admitted.length > 0) {
@@ -588,6 +675,12 @@ export const CHECKS: InvariantCheck[] = [
     needs: 'run',
     run(ctx) {
       const failures: string[] = [];
+      if (!ctx.state && ctx.controlUnauthenticated) {
+        return fail(
+          'the run recorded delivery state that failed authentication — what it delivered cannot be established, ' +
+            'and this is the one row that grades whether it delivered at all',
+        );
+      }
       if (ctx.state) {
         if (ctx.state.kind !== 'complete') failures.push(`delivery state is '${ctx.state.kind}'`);
         if (ctx.state.missing.length > 0) failures.push(`${ctx.state.missing.length} reviewer(s) missing`);
@@ -768,10 +861,16 @@ export async function loadVerifyContext(opts: {
 }): Promise<VerifyContext> {
   const runId = resolveRunId(opts);
   const runDir = join(runsRoot(opts.home), runId);
-  const gather = readJson<GatherOutput>(join(runDir, 'pr-review-gather.json'));
+  const corrupt = new Set<string>();
+  const gather = readJson<GatherOutput>(join(runDir, 'pr-review-gather.json'), corrupt);
   if (!gather) throw new Error(`verify: ${join(runDir, 'pr-review-gather.json')} is missing or unreadable — nothing to audit`);
 
   const control = readAuthoritativeControl(runDir, opts.home);
+  // readAuthoritativeControl returns null both when the control files are
+  // absent (a run predating the store) and when they FAIL authentication. Only
+  // the mirror's presence separates the two, and the difference is the whole
+  // point of the row that reads it.
+  const controlUnauthenticated = control === null && existsSync(join(runDir, 'delivery-state.json'));
   const plan = control?.plan ?? null;
   const state = control?.state ?? null;
   let finalization: FinalizationRecord | null = null;
@@ -788,9 +887,9 @@ export async function loadVerifyContext(opts: {
     }
   }
 
-  const findings = readJson<FindingsArtifact>(join(runDir, 'pr-review-findings.json'));
-  const capabilities = readJson<CapabilitiesArtifact>(join(runDir, 'capabilities.json'));
-  const routesRaw = readJson<unknown>(join(runDir, 'passes.json'));
+  const findings = readJson<FindingsArtifact>(join(runDir, 'pr-review-findings.json'), corrupt);
+  const capabilities = readJson<CapabilitiesArtifact>(join(runDir, 'capabilities.json'), corrupt);
+  const routesRaw = readJson<unknown>(join(runDir, 'passes.json'), corrupt);
   const routes =
     Array.isArray(routesRaw) && routesRaw.every((r) => r && typeof r.name === 'string' && typeof r.matchedBy === 'string')
       ? (routesRaw as PassRouteLike[])
@@ -803,6 +902,14 @@ export async function loadVerifyContext(opts: {
   const finalFindings = findings?.finalFindings ?? [];
   const postingShape = snapFindingsToDiff(finalFindings, gather.changedFiles, reanchor).findings;
   const expectedKeys = keyCounts(postingShape);
+  const expectedTopLevel = new Map<string, number>();
+  if (gather.pr.provider === 'azuredevops') {
+    for (const f of postingShape) {
+      if (f.file && f.line) continue;
+      const body = f.body.trim();
+      expectedTopLevel.set(body, (expectedTopLevel.get(body) ?? 0) + 1);
+    }
+  }
 
   let liveAll: ExistingComment[] | null = null;
   let liveMetadata: PrMetadata | null = null;
@@ -843,7 +950,8 @@ export async function loadVerifyContext(opts: {
   const finishedAt = finalization ? Date.parse(finalization.completedAt) : NaN;
   const postedAt = marker && marker !== 'corrupt' ? marker.postedAt : NaN;
   const ceilingSource = Number.isFinite(finishedAt) ? finishedAt : postedAt;
-  const ceiling = Number.isFinite(ceilingSource) ? ceilingSource + CLOCK_SLACK_MS : Infinity;
+  const ceilingKnown = Number.isFinite(ceilingSource);
+  const ceiling = ceilingKnown ? ceilingSource + CLOCK_SLACK_MS : Infinity;
 
   const liveWindow =
     liveAll === null
@@ -892,15 +1000,16 @@ export async function loadVerifyContext(opts: {
     finalizationError,
     marker,
     findings,
-    stack: readJson<StackArtifact>(join(runDir, 'stack.json')),
+    stack: readJson<StackArtifact>(join(runDir, 'stack.json'), corrupt),
     routes,
     capabilities,
-    companions: readJson<CompanionsArtifact>(join(runDir, 'companions.json')),
+    companions: readJson<CompanionsArtifact>(join(runDir, 'companions.json'), corrupt),
     errorTxt: readFileSafe(join(runDir, ERROR_FILE)),
     capabilityUsage: Object.keys(capabilityFiles).length > 0 ? readCapabilityUsage(capabilityFiles) : { usage: [], warnings: [] },
     home: opts.home,
     postingShape,
     expectedKeys,
+    expectedTopLevel,
     liveWindow,
     liveAll,
     liveMetadata,
@@ -908,6 +1017,9 @@ export async function loadVerifyContext(opts: {
     selfAuthor,
     prAdvanced,
     advancedFrom,
+    controlUnauthenticated,
+    corruptArtifacts: [...corrupt],
+    windowCeilingKnown: ceilingKnown,
   };
 }
 

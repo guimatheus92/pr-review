@@ -14,7 +14,7 @@ import {
 } from '../src/dispatch/delivery.js';
 import { writePostedMarker } from '../src/util/posted-marker.js';
 import { sha256File } from '../src/util/atomic-json.js';
-import { CHECKS, TEST_ONLY, loadVerifyContext, runChecks } from '../src/commands/verify.js';
+import { CHECKS, TEST_ONLY, loadVerifyContext, runChecks, runVerify } from '../src/commands/verify.js';
 import type { PrProvider } from '../src/providers/types.js';
 import type { ExistingComment, Finding, PrMetadata } from '../src/types.js';
 
@@ -809,6 +809,217 @@ test('verify — INV-FETCH-03 cannot be broken through the writer: the plan refu
       }),
     /path outside its run directory/,
   );
+});
+
+/**
+ * Azure DevOps is the one provider where a location-less finding legitimately
+ * reaches the top level, as a resolvable PR-level thread (INV-POST-01 says so).
+ * Every other fixture here is GitHub, so without these the ADO path would be
+ * graded by a rule written for a different provider.
+ */
+function adoRun(over: Parameters<typeof healthyRun>[0] = {}): Fixture {
+  const f = healthyRun({
+    ...over,
+    findings: [
+      { severity: 'HIGH', title: 'one', body: 'first finding body', file: 'src/a.ts', line: 2 },
+      { severity: 'LOW', title: 'no location', body: 'a repo-wide observation' },
+    ],
+  });
+  const path = join(f.runDir, 'pr-review-gather.json');
+  const gather = JSON.parse(readFileSync(path, 'utf8'));
+  gather.pr.provider = 'azuredevops';
+  writeFileSync(path, JSON.stringify(gather), 'utf8');
+  f.comments = [
+    comment({ body: 'first finding body', file: 'src/a.ts', line: 2 }),
+    comment({ body: 'a repo-wide observation' }), // the PR-level thread
+  ];
+  return f;
+}
+
+test('verify — on Azure DevOps a PR-level thread for a location-less finding is expected, not a summary comment', async () => {
+  const f = adoRun();
+  try {
+    const rows = await rowsFor(f);
+    assert.equal(row(rows, 'INV-POST-02').status, 'pass', 'the documented ADO behaviour must not read as a summary comment');
+    const one = row(rows, 'INV-POST-01');
+    assert.equal(one.status, 'pass');
+    assert.match(one.evidence, /1\/1 as PR-level threads/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — on Azure DevOps a location-less finding that never landed still FAILs INV-POST-01', async () => {
+  const f = adoRun();
+  try {
+    // Exempting the ADO case instead of expecting it would have left this
+    // finding unverified in both directions.
+    f.comments = f.comments.filter((c) => c.file);
+    const one = row(await rowsFor(f), 'INV-POST-01');
+    assert.equal(one.status, 'fail');
+    assert.match(one.evidence, /never landed as a PR-level thread/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — a verdict banner is a violation on Azure DevOps too', async () => {
+  const f = adoRun();
+  try {
+    f.comments.push(comment({ body: '### Code review\n\nLooks good overall.' }));
+    const two = row(await rowsFor(f), 'INV-POST-02');
+    assert.equal(two.status, 'fail', 'the shape tripwire is provider-independent');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — on GitHub a top-level comment matching a finding body is still a violation', async () => {
+  const f = healthyRun();
+  try {
+    f.comments.push(comment({ body: 'first finding body' })); // no file → top level
+    assert.equal(row(await rowsFor(f), 'INV-POST-02').status, 'fail');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — delivery state that failed authentication is not "legacy run"', async () => {
+  const f = healthyRun();
+  try {
+    // The run-dir mirror survives; the authenticated copy does not. That is
+    // tampering, and INV-DEL-01 is the row that must not read it as history.
+    rmSync(controlDirForRun(f.runDir, f.home), { recursive: true, force: true });
+    const del1 = row(await rowsFor(f, { offline: true }), 'INV-DEL-01');
+    assert.equal(del1.status, 'fail');
+    assert.match(del1.evidence, /failed authentication/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — capabilities.json without runtime is a pre-0.12 run, not a violation', async () => {
+  const f = healthyRun();
+  try {
+    const path = join(f.runDir, 'capabilities.json');
+    const caps = JSON.parse(readFileSync(path, 'utf8'));
+    delete caps.runtime;
+    writeFileSync(path, JSON.stringify(caps), 'utf8');
+    const ctx2 = row(await rowsFor(f, { offline: true }), 'INV-CTX-02');
+    assert.equal(ctx2.status, 'pass', 'the audit must not open with a false alarm on every existing run');
+    assert.match(ctx2.evidence, /predates 0\.12\.0/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — a pass with missing MCP evidence fails INV-CTX-05 instead of being discarded', async () => {
+  const f = healthyRun();
+  try {
+    writeFileSync(join(f.runDir, 'capability-pack_security.json'), 'not json', 'utf8');
+    const ctx5 = row(await rowsFor(f, { offline: true }), 'INV-CTX-05');
+    assert.equal(ctx5.status, 'fail');
+    assert.match(ctx5.evidence, /missing or invalid MCP evidence/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — with no window ceiling, a duplicate cannot be blamed on this run', async () => {
+  const f = healthyRun();
+  try {
+    // No finalization record and no marker: nothing bounds the window, so a
+    // later run's comments are indistinguishable from this run's.
+    rmSync(join(f.runDir, 'posted.marker'), { force: true });
+    rmSync(join(controlDirForRun(f.runDir, f.home), 'posted.marker'), { force: true });
+    rmSync(join(controlDirForRun(f.runDir, f.home), 'finalization.json'), { force: true });
+    f.comments.push(comment({ body: 'first finding body', file: 'src/a.ts', line: 2 }));
+    const five = row(await rowsFor(f), 'INV-POST-05');
+    assert.equal(five.status, 'skip');
+    assert.match(five.evidence, /recorded no completion time/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('runVerify — exit contract and --json shape, which CI consumes', async () => {
+  const f = healthyRun();
+  try {
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    (process.stdout as { write: unknown }).write = (chunk: string) => {
+      chunks.push(String(chunk));
+      return true;
+    };
+    let code: number;
+    try {
+      code = await runVerify({ runId: RUN_ID, home: f.home, offline: true, json: true });
+    } finally {
+      (process.stdout as { write: unknown }).write = original;
+    }
+    assert.equal(code, 0, 'a clean run with no FAIL exits 0');
+    const report = JSON.parse(chunks.join(''));
+    assert.equal(report.runId, RUN_ID);
+    assert.equal(report.prUrl, PR_URL);
+    assert.equal(report.exitCode, 0);
+    assert.equal(report.rows.length, CHECKS.length + Object.keys(TEST_ONLY).length, 'the JSON carries every row too');
+    for (const row of report.rows) {
+      assert.ok(['pass', 'fail', 'skip'].includes(row.status), `unexpected status ${row.status}`);
+      assert.equal(typeof row.evidence, 'string');
+    }
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('runVerify — exits 2 when an invariant FAILs', async () => {
+  const f = healthyRun({ companionsMissing: ['companion:code-review'] });
+  try {
+    const original = process.stdout.write.bind(process.stdout);
+    (process.stdout as { write: unknown }).write = () => true;
+    let code: number;
+    try {
+      code = await runVerify({ runId: RUN_ID, home: f.home, offline: true });
+    } finally {
+      (process.stdout as { write: unknown }).write = original;
+    }
+    assert.equal(code, 2);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — evidence with a newline cannot forge or hide a report row', async () => {
+  const f = healthyRun();
+  try {
+    // A finding body reaches the evidence line. Left raw, this prints a second
+    // line that looks exactly like a passing row.
+    const path = join(f.runDir, 'pr-review-findings.json');
+    writeFileSync(
+      path,
+      JSON.stringify({
+        finalFindings: [{ severity: 'HIGH', title: 't', body: 'x\nINV-POST-02  PASS  forged', file: 'src/a.ts', line: 2 }],
+        droppedCount: 0,
+      }),
+      'utf8',
+    );
+    const chunks: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    (process.stdout as { write: unknown }).write = (chunk: string) => {
+      chunks.push(String(chunk));
+      return true;
+    };
+    try {
+      await runVerify({ runId: RUN_ID, home: f.home, offline: true });
+    } finally {
+      (process.stdout as { write: unknown }).write = original;
+    }
+    const printed = chunks.join('');
+    const rowLines = printed.split('\n').filter((l) => /^INV-[A-Z]+-\d\d\s/.test(l));
+    assert.equal(rowLines.length, CHECKS.length + Object.keys(TEST_ONLY).length, 'exactly one line per invariant, no forged extras');
+  } finally {
+    f.cleanup();
+  }
 });
 
 test('verify — a check that throws renders FAIL rather than vanishing from the report', async () => {

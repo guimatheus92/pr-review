@@ -173,8 +173,11 @@ async function runDefectsCell(provider, runtime) {
   }
   const runDir = join(RUNS_ROOT, report.runId);
   for (const row of report.rows.filter((r) => r.status === 'fail')) {
-    failures.push(`${row.id}: ${row.evidence}`);
+    failures.push(`${row.id}: ${safeLogValue(row.evidence)}`);
   }
+  // Exit 1 means the audit could not be completed. Treating that as a pass is
+  // the same "not checked reads as clean" mistake verify itself refuses.
+  if (verifyExit === 1) failures.push('pr-review verify could not complete the audit (exit 1) — the run is unverified, not clean');
 
   const capabilities = readArtifact(runDir, 'capabilities.json');
   if (capabilities?.runtime !== runtime) {
@@ -381,5 +384,11 @@ writeFileSync(join(outDir, 'acceptance-report.md'), md + '\n', 'utf8');
 
 const failed = results.filter((r) => !r.ok);
 console.log(`\nreport: ${outDir}`);
+if (results.length === 0) {
+  // "all 0 cell(s) passed" with exit 0 is the worst possible outcome: a typo in
+  // --provider or --case reads as a green matrix.
+  console.error('no cell ran — check --provider / --runtime / --case against the matrix');
+  process.exit(1);
+}
 console.log(failed.length === 0 ? `all ${results.length} cell(s) passed` : `${failed.length}/${results.length} cell(s) FAILED`);
 process.exit(failed.length === 0 ? 0 : 1);

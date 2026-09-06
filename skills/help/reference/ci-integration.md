@@ -147,8 +147,11 @@ review:
   if: always()
 ```
 
-Exit 0 means every invariant passed or was explicitly skipped with a reason;
-exit 2 means the run broke a guarantee (a top-level comment appeared, a finding
+Exit 0 means every invariant passed or was explicitly skipped with a reason.
+**Exit 1 means the audit could not be completed** — the PR read-back failed, so
+every invariant needing it went ungraded; treat that as "not verified", never as
+"clean" (it is the outcome a transient provider blip produces). Exit 2 means the
+run broke a guarantee (a top-level comment appeared, a finding
 never landed, the file list was never proved complete, a planned pass delivered
 nothing). Add `--offline` to grade from the run artifacts alone when you do not
 want the extra provider read.

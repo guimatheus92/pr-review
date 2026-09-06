@@ -18,7 +18,7 @@ credential in CI. The claude cells are reported as `SKIP` there, never omitted.
 
 | Path | What it is |
 |---|---|
-| `repo/` | The fixture repo's `main` branch, verbatim. |
+| `repo/` | The fixture repo's `main` branch. Manifest filenames carry a leading `_` here and the seeder strips it — under their real names they would be *this* repo's manifests, and every review of pr-review would detect the fixture's stack. |
 | `defects/` | Files copied over `main` to make the PR branch. |
 | `expected.yaml` | Assertions, shared by all six cells. |
 | `matrix.yaml` | Clone URLs and PR URLs. Public identifiers only — never a secret. |
@@ -107,10 +107,10 @@ exists — so a fork PR can never reach them.
 | `defects/src/api/users.ts` | SQL built by concatenation **and** a handler with no `audit.log` — one generic defect, one repo-rule defect, in one file. Also the TypeScript language tag. |
 | `defects/src/api/users.ts` → `greetHandler` | The control. Correct on both counts; `must_not_find: greetHandler` fails if the reviewer flags it, so a fixture broken enough to flag everything cannot pass. |
 | `defects/scripts/report.py` | `shell=True` with interpolated input. Python tag, and a second unmistakable defect so the assertion set is not single-file. |
-| `defects/requirements.txt` | Adds `django` — exercises dependency detection from the **PR's own manifest diff**, a different code path from the checkout scan that yields `express`/`pg`. |
+| `defects/_requirements.txt` | Adds `django` — exercises dependency detection from the **PR's own manifest diff**, a different code path from the checkout scan that yields `express`/`pg`. |
 | `defects/db/schema.sql` | SQL language tag with zero defect signal. |
-| `defects/docs/notes.md` | Noise. Nothing here should produce a finding. |
-| `defects/package-lock.json` | Must be dropped by `applyDiffExclusions`. |
+| `defects/docs/notes.md` | Noise, and it must not say so: a fixture that states its own expected outcome is telling the reviewer the answer. |
+| `defects/_package-lock.json` | Must be dropped by `applyDiffExclusions`. |
 | `acc/wide` (GitLab only) | 101 files, so GitLab reports `changes_count: "100+"` and the truncated-file-list gate actually fires. GitHub needs 3000+ files and Azure DevOps reports no count at all, so the gate is only reachable here. |
 
 ## Resetting

@@ -65,10 +65,21 @@ function git(args, cwd, secrets = []) {
   }
 }
 
+/**
+ * Copy a fixture tree, stripping the leading `_` from manifest filenames.
+ *
+ * The fixture needs a real `package.json` and `requirements.txt` — that is how
+ * it proves dependency detection. But committing them under those names makes
+ * them THIS repository's manifests: `findChangedFileManifests` matches on
+ * basename regardless of directory, so every review of pr-review itself would
+ * detect express, pg, flask and django and route passes for a stack it does not
+ * have. Observed on this branch's own dogfood run. The underscore is invisible
+ * to the manifest regexes and is removed here, where the fixture is built.
+ */
 function copyTree(from, to) {
   for (const entry of readdirSync(from)) {
     const src = join(from, entry);
-    const dest = join(to, entry);
+    const dest = join(to, entry.startsWith('_') ? entry.slice(1) : entry);
     if (statSync(src).isDirectory()) {
       mkdirSync(dest, { recursive: true });
       copyTree(src, dest);

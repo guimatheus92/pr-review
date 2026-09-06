@@ -6,7 +6,7 @@ Generic, plugin-based PR review tool for GitHub, Azure DevOps, and GitLab, packa
 
 ```bash
 npm run build          # tsc + esbuild → dist/cli.cjs
-npm run test           # node scripts/test.mjs → node --test over tests/**/*.test.ts (661 tests, ~25s)
+npm run test           # node scripts/test.mjs → node --test over tests/**/*.test.ts (672 tests, ~25s)
 npm run build:watch    # tsc watch (re-run `npm run bundle` for esbuild)
 ```
 
@@ -77,7 +77,7 @@ INVARIANTS.md first, in its own commit. IDs are append-only: retire, never renam
 
 Tests use `node:test` + `node:assert`. Run with `npm run test`. Tests are in `tests/` mirroring `src/` structure. Every test is hermetic: provider tests inject a stub Octokit client, GitApi, or `fetch`, so none needs a credential or the network. That is also the limit of the suite — nothing in it proves a real Azure DevOps or GitLab call works, which is what `npm run acceptance` exists for.
 
-Run artifacts under `~/.pr-review/runs/<id>/` are part of the contract, not debug spill: `passes.json` (routing), `stack.json` (detected stack), `companions.json` (installed / recognized / planned / completed dispatches), `capabilities.json` + `capability-<pass>.json` (MCP inventory and per-pass usage evidence — both runtimes deny MCP at the process level, so the brief instructs passes to record all three arrays empty; nothing validates that yet, and the brief deliberately keeps an escape hatch so a denial that stopped working can still surface here), `raw-<reviewer>.json` (one sidecar per pass and companion), `error.txt` on any failure, and `posted.marker` on any publish attempt. `--resume` and the operational-failure checks read them, so a change that stops writing one is a behaviour change.
+Run artifacts under `~/.pr-review/runs/<id>/` are part of the contract, not debug spill: `passes.json` (routing), `stack.json` (detected stack), `companions.json` (installed / recognized / planned / completed dispatches), `capabilities.json` + `capability-<pass>.json` (MCP inventory and per-pass usage evidence — both runtimes deny MCP at the process level, so the brief instructs passes to record all three arrays empty, and `pr-review verify` fails INV-CTX-05 when a pass reports otherwise or writes no evidence at all; the brief deliberately keeps an escape hatch so a denial that stopped working can still surface here), `raw-<reviewer>.json` (one sidecar per pass and companion), `error.txt` on any failure, and `posted.marker` on any publish attempt. `--resume` and the operational-failure checks read them, so a change that stops writing one is a behaviour change.
 
 ## Common tasks
 

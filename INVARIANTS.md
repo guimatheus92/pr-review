@@ -271,10 +271,16 @@ nothing to specialize on. The note is what separates the two.
 ### INV-CTX-02 — Skills, plugins and MCP servers are always discovered and recorded
 
 **Always:** Every run records what it found: `capabilities.json` (the resolved
-runtime, installed plugins with their MCP servers, the discovered server
-inventory, warnings) and `passes.json` (every known skill and where it was
-routed — dispatched, context, index, or skipped). Finding nothing is a valid
-result. Not recording is not.
+runtime, the model string handed to the CLI, installed plugins with their MCP
+servers, the discovered server inventory, warnings) and `passes.json` (every
+known skill and where it was routed — dispatched, context, index, or skipped).
+Finding nothing is a valid result. Not recording is not.
+
+Ceiling, declared rather than implied: `model` is what pr-review *asked for*
+after `normalizeModel`, not necessarily what served the session. `auto` is a
+delegation — the Copilot CLI picks and reports the pick nowhere, its own logs
+at default level included. A run needing a specific model attributed must pin
+`--model`.
 
 **Why:** "Why didn't it apply my rule?" is unanswerable without the routing
 table, and an unrecorded capability inventory means a run cannot be audited

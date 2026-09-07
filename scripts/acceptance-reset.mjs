@@ -108,6 +108,27 @@ export function resolveToken(provider, host) {
   throw new Error(`unknown provider: ${provider}`);
 }
 
+/**
+ * A git URL with the credential inlined, for cloning and pushing.
+ *
+ * Built by string rather than through the URL object's userinfo setters:
+ * those read as a hardcoded credential to any secret scanner worth having,
+ * including this repo's own dogfood gate, and a scanner that has to be taught
+ * exceptions stops being one. The returned `secret` is what `mask()` strips
+ * from every git error before it is printed.
+ *
+ * This is why `matrix.yaml` can hold a plain, credential-free clone URL: the
+ * credential is added at the moment of use and never stored. A fixture
+ * repository therefore does not have to be public — that was a constraint of
+ * the first cut, not of the design.
+ */
+export function credentialedGitUrl(provider, clone, token) {
+  const u = new URL(clone);
+  const user = provider === 'github' ? 'x-access-token' : provider === 'gitlab' ? 'oauth2' : 'pr-review';
+  const secret = token.scheme === 'basic' ? Buffer.from(token.value, 'base64').toString('utf8').replace(/^:/, '') : token.value;
+  const userinfo = `${encodeURIComponent(user)}:${encodeURIComponent(secret)}`;
+  return { url: `${u.protocol}//${userinfo}@${u.host}${u.pathname}${u.search}`, secret };
+}
 function authHeader(token) {
   return token.scheme === 'basic' ? `Basic ${token.value}` : `Bearer ${token.value}`;
 }

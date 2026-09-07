@@ -26,7 +26,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import { matchExpectedFindings, safeLogValue, stackExpectationFailures } from './eval-assertions.mjs';
-import { credentialEnv, listComments, parsePrUrl, resetPr, resolveToken } from './acceptance-reset.mjs';
+import { credentialEnv, credentialedGitUrl, listComments, parsePrUrl, resetPr, resolveToken } from './acceptance-reset.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ACCEPTANCE = join(ROOT, 'evals', 'acceptance');
@@ -116,7 +116,18 @@ function checkoutFor(provider) {
     execFileSync('git', ['reset', '--hard', 'origin/main'], { cwd: dir, stdio: ['ignore', 'pipe', 'inherit'] });
   } else {
     mkdirSync(dir, { recursive: true });
-    execFileSync('git', ['clone', '--no-single-branch', clone, dir], { stdio: ['ignore', 'pipe', 'inherit'] });
+    // Cloned with a credential resolved at runtime, so the fixture repository
+    // does not have to be public and no token is stored in matrix.yaml. git
+    // writes the URL into .git/config, so the remote is rewritten back to the
+    // plain one immediately afterwards.
+    const host = new URL(clone).host;
+    const { url: authed, secret } = credentialedGitUrl(provider, clone, resolveToken(provider, host));
+    try {
+      execFileSync('git', ['clone', '--no-single-branch', authed, dir], { stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (err) {
+      throw new Error(String(err.stderr || err.message).split(secret).join('***'));
+    }
+    execFileSync('git', ['remote', 'set-url', 'origin', clone], { cwd: dir, stdio: ['ignore', 'pipe', 'inherit'] });
   }
   checkouts.set(provider, dir);
   return dir;

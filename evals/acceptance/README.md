@@ -82,6 +82,16 @@ cited, a reviewer flagging everything would cite it against the control too, so
 "ACC-LOG-002 lands on the broken handler and not the correct one" *is* the
 causality this pair exists to prove.
 
+**The verifier's own findings are excluded**, structurally, by identity against
+`raw-verifier.json`. The verifier adjudicates other findings, so it quotes them
+— and a quoted accusation drags the rule id into a finding whose entire purpose
+is to refute it: *"Correction: `audit.log(req)` does not capture Authorization
+headers — `companion:code-review` states the opposite"* cites ACC-LOG-002 while
+*defending* the control. No amount of text matching separates a quotation from
+an accusation. The exclusion is safe because a verdict the verifier upholds
+still reaches the list as the original reviewer's own finding, which is not
+excluded.
+
 ## One-time setup
 
 Only the account and repo creation is manual. Everything after is one command.

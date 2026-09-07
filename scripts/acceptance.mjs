@@ -223,7 +223,19 @@ const PLANTED_DEFECTS = [
   ['the missing audit call', /ACC-LOG-002/i],
 ];
 
-function controlFalsePositives(findings) {
+function controlFalsePositives(findings, runDir) {
+  // The verifier ADJUDICATES other findings, so it quotes them — and a quoted
+  // accusation carries the rule id into a finding whose whole point is to
+  // refute it. "Correction: `audit.log(req)` does not capture Authorization
+  // headers — companion:code-review states the opposite" cites ACC-LOG-002
+  // while DEFENDING the control, and text alone cannot tell that apart from an
+  // accusation. Excluded structurally rather than by prose: the exclusion is
+  // safe because a verdict the verifier upholds still reaches this list as the
+  // original reviewer's own finding, which is not excluded.
+  const verifier = readArtifact(runDir, 'raw-verifier.json');
+  const quoted = new Set(
+    (Array.isArray(verifier) ? verifier : (verifier?.findings ?? [])).map((f) => `${f.file}:${f.line}:${f.title}`),
+  );
   const source = join(ACCEPTANCE, 'defects', 'src', 'api', 'users.ts');
   const lines = readFileSync(source, 'utf8').split(/\r?\n/);
   const start = lines.findIndex((l) => /export async function greetHandler/.test(l));
@@ -242,6 +254,7 @@ function controlFalsePositives(findings) {
   const out = [];
   for (const f of findings) {
     if (!f.file?.endsWith('src/api/users.ts')) continue;
+    if (quoted.has(`${f.file}:${f.line}:${f.title}`)) continue;
     const line = Number(f.line);
     if (!Number.isInteger(line) || line < start + 1 || line > end + 1) continue;
     for (const [what, re] of PLANTED_DEFECTS) {
@@ -419,7 +432,7 @@ async function runDefectsCell(provider, runtime) {
   for (const { pattern, finding } of matchExpectedFindings(expected.must_not_find ?? [], findings, false)) {
     if (finding) failures.push(`must_not_find matched: ${safeLogValue(pattern)} → ${safeLogValue(finding.title)}`);
   }
-  failures.push(...controlFalsePositives(findings));
+  failures.push(...controlFalsePositives(findings, runDir));
 
   const companions = readArtifact(runDir, 'companions.json');
   if (!companions) failures.push('companions.json is missing');

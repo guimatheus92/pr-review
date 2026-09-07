@@ -26,7 +26,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import { matchExpectedFindings, safeLogValue, stackExpectationFailures } from './eval-assertions.mjs';
-import { listComments, parsePrUrl, resetPr, resolveToken } from './acceptance-reset.mjs';
+import { credentialEnv, listComments, parsePrUrl, resetPr, resolveToken } from './acceptance-reset.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ACCEPTANCE = join(ROOT, 'evals', 'acceptance');
@@ -68,6 +68,13 @@ if (!existsSync(CLI)) {
 }
 mkdirSync(outDir, { recursive: true });
 
+/**
+ * Spawn a child with the harness's credentials available to it.
+ *
+ * `~/.pr-review/acceptance.env` is a harness convenience; the product reads
+ * only `process.env`, so the values are injected here rather than taught to
+ * the CLI. A real environment variable still wins — it is spread last.
+ */
 function run(file, args, opts = {}) {
   return execFileSync(file, args, {
     stdio: ['ignore', 'pipe', 'inherit'],
@@ -75,6 +82,9 @@ function run(file, args, opts = {}) {
     timeout: CELL_TIMEOUT_MS,
     killSignal: 'SIGKILL',
     ...opts,
+    // After the spread, not before: a caller passing its own `env` would
+    // otherwise drop the file credentials on the floor.
+    env: { ...credentialEnv(), ...process.env, ...(opts.env ?? {}) },
   });
 }
 

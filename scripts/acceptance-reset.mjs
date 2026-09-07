@@ -13,8 +13,66 @@
 // like a missing PR.
 
 import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 const GITHUB_API = 'https://api.github.com';
+
+/**
+ * Optional local credential file: `~/.pr-review/acceptance.env`, `KEY=value`
+ * per line.
+ *
+ * Deliberately OUTSIDE the checkout. A `.env` at the repo root relies on
+ * `.gitignore` staying correct forever, and the ways it leaks anyway are all
+ * routine: `git add -A` after someone edits the ignore file, a dogfood run with
+ * `--include-untracked`, a CI step that uploads the workspace. Nothing in this
+ * repository can reach `~/.pr-review/`, so the question never arises.
+ *
+ * Lowest precedence but one: a real environment variable always wins, which is
+ * what keeps CI — where these arrive as environment secrets and no file exists
+ * — running on exactly the same code path.
+ */
+let fileEnvCache = null;
+function fileEnv() {
+  if (fileEnvCache) return fileEnvCache;
+  fileEnvCache = {};
+  const path = join(homedir(), '.pr-review', 'acceptance.env');
+  if (!existsSync(path)) return fileEnvCache;
+  for (const raw of readFileSync(path, 'utf8').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const eq = line.indexOf('=');
+    if (eq < 1) continue;
+    // Strip one layer of surrounding quotes so a pasted value with spaces works.
+    const value = line.slice(eq + 1).trim().replace(/^(['"])(.*)\1$/, '$2');
+    if (value) fileEnvCache[line.slice(0, eq).trim()] = value;
+  }
+  return fileEnvCache;
+}
+
+/**
+ * The file's values, for handing to a child process.
+ *
+ * The product's own providers read `process.env` and must never learn about a
+ * test credential file — so the harness injects, rather than the CLI reading.
+ * Env vars still win: the spread order below puts `process.env` last.
+ */
+export function credentialEnv() {
+  return { ...fileEnv() };
+}
+
+/** `process.env` first, then the local file. Never logs the value. */
+function credential(...names) {
+  for (const name of names) {
+    if (process.env[name]) return process.env[name];
+  }
+  const fromFile = fileEnv();
+  for (const name of names) {
+    if (fromFile[name]) return fromFile[name];
+  }
+  return undefined;
+}
 
 function cli(file, args) {
   try {
@@ -28,25 +86,23 @@ function cli(file, args) {
 /** @returns {{scheme: 'bearer'|'basic'|'token', value: string}} */
 export function resolveToken(provider, host) {
   if (provider === 'github') {
-    const env = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
-    const token = env ?? cli('gh', ['auth', 'token']);
-    if (!token) throw new Error('no GitHub token: set GITHUB_TOKEN or run `gh auth login`');
+    const token = credential('GITHUB_TOKEN', 'GH_TOKEN') ?? cli('gh', ['auth', 'token']);
+    if (!token) throw new Error('no GitHub token: set GITHUB_TOKEN, add it to ~/.pr-review/acceptance.env, or run `gh auth login`');
     return { scheme: 'bearer', value: token };
   }
   if (provider === 'gitlab') {
-    const env = process.env.GITLAB_TOKEN ?? process.env.GITLAB_ACCESS_TOKEN;
-    const token = env ?? cli('glab', ['config', 'get', 'token', '-h', host ?? 'gitlab.com']);
-    if (!token) throw new Error('no GitLab token: set GITLAB_TOKEN (scope `api`) or run `glab auth login`');
+    const token = credential('GITLAB_TOKEN', 'GITLAB_ACCESS_TOKEN') ?? cli('glab', ['config', 'get', 'token', '-h', host ?? 'gitlab.com']);
+    if (!token) throw new Error('no GitLab token: set GITLAB_TOKEN (scope `api`) in the environment or ~/.pr-review/acceptance.env, or run `glab auth login`');
     return { scheme: 'bearer', value: token };
   }
   if (provider === 'azuredevops') {
-    const pat = process.env.AZURE_DEVOPS_PAT ?? process.env.SYSTEM_ACCESSTOKEN ?? process.env.AZURE_DEVOPS_EXT_PAT;
+    const pat = credential('AZURE_DEVOPS_PAT', 'SYSTEM_ACCESSTOKEN', 'AZURE_DEVOPS_EXT_PAT');
     if (pat) return { scheme: 'basic', value: Buffer.from(`:${pat}`).toString('base64') };
     const bearer =
-      process.env.AZURE_DEVOPS_BEARER ??
+      credential('AZURE_DEVOPS_BEARER') ??
       cli('az', ['account', 'get-access-token', '--resource', '499b84ac-1321-427f-aa17-267ca6975798', '--query', 'accessToken', '-o', 'tsv']);
     if (!bearer) {
-      throw new Error('no Azure DevOps credential: set AZURE_DEVOPS_PAT (Code read+write, PR Threads read+write) or run `az login`');
+      throw new Error('no Azure DevOps credential: set AZURE_DEVOPS_PAT (Code read+write, PR Threads read+write) in the environment or ~/.pr-review/acceptance.env, or run `az login`');
     }
     return { scheme: 'bearer', value: bearer };
   }

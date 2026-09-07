@@ -89,11 +89,34 @@ npm run acceptance -- --dry-run    # no posting; the posting rows report SKIP
 npm run acceptance -- --reset-only # clean the fixture PRs and stop
 ```
 
-Credentials locally: nothing new is written to disk. The providers already fall
-back to `gh auth token`, `az account get-access-token` and
-`glab config get token`, so an existing login is enough. To keep credentials out
-of any file at all, export `AZURE_DEVOPS_PAT` / `GITLAB_TOKEN` per shell session
-— an env var always wins over the CLI fallback.
+## Where the credentials live
+
+Three places, in this precedence order:
+
+1. **An environment variable** — `GITHUB_TOKEN`, `AZURE_DEVOPS_PAT`,
+   `GITLAB_TOKEN`. Always wins. This is what CI uses: the workflow maps its
+   environment secrets onto these names, so CI and a local run take the same
+   code path.
+2. **`~/.pr-review/acceptance.env`** — `KEY=value` per line, `#` for comments.
+   Optional, local only.
+3. **The provider CLIs' own logins** — `gh auth token`,
+   `az account get-access-token`, `glab config get token`. An existing login is
+   enough and nothing extra is stored.
+
+The file sits under `~/.pr-review/`, **not** in the checkout, on purpose. A
+`.env` at the repo root depends on `.gitignore` staying correct forever, and
+every way it leaks anyway is routine: `git add -A` after someone edits the
+ignore file, a dogfood run with `--include-untracked`, a CI step that uploads
+the workspace. Nothing in this repository can reach `~/.pr-review/`, so the
+question does not arise.
+
+The product itself never reads that file — `src/providers/*` read only
+`process.env`. The runner loads it and injects the values into the CLI it
+spawns, which keeps a test-only convenience out of the shipped tool.
+
+`matrix.yaml` holds public URLs and nothing else, which is also why the fixture
+repositories are public: a private one would need a credentialed clone URL in a
+committed file.
 
 In CI: `gh workflow run acceptance.yml`. Secrets live in the `acceptance`
 GitHub environment, not in repository secrets, and no `pull_request` trigger

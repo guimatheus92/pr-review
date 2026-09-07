@@ -541,7 +541,7 @@ async function runFilelistCell() {
   // to actually come back incomplete for a refusal to be correct. Measured on
   // this estate, GitLab's `changes_count` is exact at least through 1200 files
   // ("1200", not "1200+"), so the truncation flag never trips. The refusal is
-  // covered hermetically by tests/gather.test.ts, which can stub a short list
+  // covered hermetically by tests/gather-cache.test.ts, which can stub a short list
   // against a high count. Naming that ceiling is the point — a live assertion
   // written for a truncation that never happens tests nothing, and the first
   // version of this cell asserted the *opposite* of correct behaviour: it
@@ -549,7 +549,7 @@ async function runFilelistCell() {
   const reported = await gitlabChangesCount(prUrl);
   if (reported.truncated) {
     failures.push(
-      `GitLab now reports changes_count "${reported.truncated}" for this MR — truncation is live, so this cell must assert the refusal path again (see tests/gather.test.ts for the shape)`,
+      `GitLab now reports changes_count "${reported.truncated}" for this MR — truncation is live, so this cell must assert the refusal path again (see tests/gather-cache.test.ts for the shape)`,
     );
   }
   const expected = reported.count ?? null;

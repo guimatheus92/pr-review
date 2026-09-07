@@ -206,8 +206,8 @@ on its first 100 files, from 0.6 through 0.10, because `$top` defaults to 100.
 **Enforced:** `src/commands/gather.ts`, `src/providers/github.ts`,
 `src/providers/azuredevops.ts`, `src/providers/gitlab.ts`
 
-**Verified:** `tests/gather-cache.test.ts`, `tests/providers/azuredevops.test.ts`,
-`tests/providers/gitlab.test.ts`
+**Verified:** `tests/gather-cache.test.ts`, `tests/providers/github.test.ts`,
+`tests/providers/azuredevops.test.ts`, `tests/providers/gitlab.test.ts`
 
 **Check:** run+pr
 

@@ -232,7 +232,7 @@ this estate ("1200", never "1200+"), so the truncation flag it keys on never
 trips. The `filelist` cell therefore proves the half that is reachable — that a
 101-file MR paginates to a complete list, from inside the checkout *and* from an
 unrelated directory, both agreeing with the provider's own count — and leaves
-the refusal to `tests/gather.test.ts`, which can stub a short list against a
+the refusal to `tests/gather-cache.test.ts`, which can stub a short list against a
 high count.
 
 The first version of that cell asserted the opposite: it demanded a refusal from

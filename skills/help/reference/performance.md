@@ -15,7 +15,8 @@ description: "pr-review performance optimizations: diff exclusion, file pre-filt
 | 5 | **Docs-only triage** — deterministic Node-side triage runs only glob/forced passes (never baseline) when all in-scope files are docs (`**/*.md`, `**/*.txt`, `docs/**`, etc.) | High on docs PRs — skips the baseline passes |
 | 6 | **Conditional verifier** — dispatched only when Phase 1 has ≥1 CRITICAL/HIGH finding | Saves one agent on clean PRs |
 | 7 | **Parallel gather** — metadata + comments fetched concurrently; comments not fetched twice on cache miss; GitHub linked issues fetched in parallel; review + issue comment pagination runs concurrently; no provider fetches a whole-PR text diff (the per-file patches are the diff), so GitHub PRs of 300–500 files no longer die on the API's 406 and Azure DevOps spends no `getCommitDiffs` call | Medium — faster gather phase |
-| 8 | **Concurrent ADO diff synthesis** — per-file diffs synthesized with p-limit(5); LCS trims common prefix/suffix lines before the DP matrix | Medium on large ADO PRs |
+| 8 | **Concurrent ADO diff synthesis** — Azure DevOps has no diff endpoint, so each modified file costs **two** `getItem` calls (the whole file at base and at head) and the diff is computed locally: p-limit(5), LCS trimming common prefix/suffix before the DP matrix, output framed into `@@` hunks with 3 lines of context | Medium on large ADO PRs |
+| 8b | **No content fetched for a file that will not be reviewed** — a path the diff exclusions will drop costs no fetch, and once the in-scope count is past the 500-file guard nothing is fetched at all: the list is completed with paths only and the run is refused. Measured on a 501-file ADO PR: 1002 `getItem` calls → 0 | Highest on ADO and on truncated lists |
 | 9 | **Deduped prompt boilerplate** — the output contract lives only in the dispatch prompt, not repeated per agent | Medium — smaller prompts |
 | 10 | **Prefix-stable prompts** — pass-invariant prompt prefix enables provider-side prompt cache hits | Medium — can reduce token cost ~75% |
 | 11 | **Batched GitHub posting** — inline comments go as one review (`POST /pulls/:n/reviews`); head SHA comes from gather metadata (no per-finding `pulls.get`) | Medium — fewer API calls, fewer rate-limit hits |
@@ -28,8 +29,8 @@ One-time cost worth knowing: the first review on a machine clones the configured
 
 | Guard | Default | Effect |
 |---|---|---|
-| Max files | 500 | PRs with >500 changed files abort with "split into smaller PRs" |
-| Max patch size | 2 MB | Total diff bytes across all in-scope files |
+| Max files | 500 | PRs with >500 in-scope changed files abort with "split into smaller PRs". Counted **after** diff exclusions, and reached before any file content is fetched — the guard now decides what is worth downloading, not just what is worth reviewing |
+| Max patch size | 2 MB | Total diff bytes across all in-scope files (reported against the same 1024² divisor the message uses, so it prints as 1.9 MB) |
 | Provider file-list caps | GitHub 3000 (`pulls/:n/files`), GitLab `"N+"` overflow, Azure DevOps paged 2000/page to completion | A list of any other length than the provider's own count, or one the provider declares truncated, is completed from the local checkout (`git diff-tree` from the single merge base — the checkout must be the PR's repository with base and head already present; pr-review never fetches). When that is impossible the run fails before anything is cached, naming the counts and the `git fetch` to run |
 
 ## Diff exclusion defaults

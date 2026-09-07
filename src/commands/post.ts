@@ -29,14 +29,6 @@ export interface PostResult {
 }
 
 /**
- * Snap located findings to the nearest valid diff line. When reanchor is set
- * (GitHub: review comments only attach to diff lines, and no finding may be
- * dropped), findings that cannot anchor where the reviewer pointed — file
- * outside the diff, or no location at all — are re-anchored to the first
- * valid line of the first changed file, with the original location kept in
- * the body. Without a valid anchor a bad path would 422 the whole batch.
- */
-/**
  * Where a provider's findings are allowed to land. Both halves are properties
  * of the provider's comment API, and the two must be decided together in ONE
  * place: `runPost` applies this shape, and `resumeReview` and `verify` both
@@ -64,6 +56,17 @@ export function postingShape(findings: Finding[], changedFiles: ChangedFile[], p
   return snapFindingsToDiff(findings, changedFiles, reanchor, snap).findings;
 }
 
+/**
+ * Snap located findings to the nearest valid diff line. When reanchor is set
+ * (GitHub: review comments only attach to diff lines, and no finding may be
+ * dropped), findings that cannot anchor where the reviewer pointed — file
+ * outside the diff, or no location at all — are re-anchored to the first
+ * valid line of the first changed file, with the original location kept in
+ * the body. Without a valid anchor a bad path would 422 the whole batch.
+ *
+ * Prefer `postingShape`: the (snap, reanchor) pair is a property of the
+ * provider, and three call sites have to agree on it.
+ */
 export function snapFindingsToDiff(
   findings: Finding[],
   changedFiles: ChangedFile[],

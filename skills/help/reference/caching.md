@@ -32,6 +32,7 @@ pr-review cache clear --all          # clear everything
 ## Design notes
 
 - Gather cache hits save ~5-10s per run (skips API calls). The key is `headSha` + last comment id, so a new commit or comment auto-busts it.
+- A gather that withheld file **content** is never cached either: past the 500-file guard the list is completed with paths only, and an entry like that — restored later under a wider `diff_excludes` set — would come back looking like a whole diff. Nothing is lost: the run such an entry would serve is refused for the same reason the first one was.
 - A gather whose file list could not be verified complete (count matched, completed from git, or — Azure DevOps — paginated to completion) is never cached: gather completes it from the local checkout or throws before the cache write. Entries carry `changedFilesComplete`; an entry without it was written before 0.11 (an Azure DevOps entry may hold only the first 100 files of a larger PR) and is refetched once, then rewritten in place — no `cache clear` needed.
 - GitHub/GitLab cache scope is `<owner__repo>`. Azure DevOps scope is `<organization__project__repo>`; an unresolved ADO project bypasses the cache rather than sharing data across same-name repositories.
 - Clearing a project-omitted ADO URL removes every project-scoped entry whose cached PR identity matches that organization, repository, and PR number.

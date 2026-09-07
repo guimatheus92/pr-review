@@ -121,11 +121,13 @@ function checkoutFor(provider) {
     // writes the URL into .git/config, so the remote is rewritten back to the
     // plain one immediately afterwards.
     const host = new URL(clone).host;
-    const { url: authed, secret } = credentialedGitUrl(provider, clone, resolveToken(provider, host));
+    const { url: authed, secrets } = credentialedGitUrl(provider, clone, resolveToken(provider, host));
     try {
       execFileSync('git', ['clone', '--no-single-branch', authed, dir], { stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (err) {
-      throw new Error(String(err.stderr || err.message).split(secret).join('***'));
+      let text = String(err.stderr || err.message);
+      for (const s of secrets) text = text.split(s).join('***');
+      throw new Error(text);
     }
     execFileSync('git', ['remote', 'set-url', 'origin', clone], { cwd: dir, stdio: ['ignore', 'pipe', 'inherit'] });
   }
@@ -149,17 +151,27 @@ function checkoutFor(provider) {
  * 9-pass orchestration after two dispatches. INV-DEL-01 then correctly refuses
  * to post a partial review. Nothing in that chain is a pr-review failure.
  */
-function runtimeBlockedReason(runtime) {
+async function runtimeBlockedReason(runtime) {
   if (runtime !== 'copilot') return null;
   try {
-    const token = execFileSync('gh', ['auth', 'token'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    // The token the COPILOT CLI itself will authenticate with, in its own
+    // precedence order — not `gh auth token` first. In CI those are different
+    // identities: the Copilot CLI runs on `${{ github.token }}` via
+    // COPILOT_GITHUB_TOKEN while `gh` holds the fixture-repo PAT, so asking gh
+    // reports another account's quota and BLOCKED could never fire where it
+    // matters most.
+    const token =
+      process.env.COPILOT_GITHUB_TOKEN ||
+      process.env.GH_TOKEN ||
+      execFileSync('gh', ['auth', 'token'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     if (!token) return null;
-    const raw = execFileSync(
-      'curl',
-      ['-s', '-H', `Authorization: token ${token}`, '-H', 'Editor-Version: copilot-cli', 'https://api.github.com/copilot_internal/user'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
-    );
-    const parsed = JSON.parse(raw);
+    // fetch, not curl: a token in argv is readable by any process that can list
+    // the process table, and this one runs in CI next to other jobs.
+    const res = await fetch('https://api.github.com/copilot_internal/user', {
+      headers: { Authorization: `token ${token}`, 'Editor-Version': 'copilot-cli' },
+    });
+    if (!res.ok) return null;
+    const parsed = await res.json();
     const quota = parsed?.quota_snapshots?.premium_interactions;
     if (!quota || quota.unlimited) return null;
     const remaining = Number(quota.remaining ?? quota.percent_remaining ?? 0);
@@ -268,7 +280,7 @@ function readArtifact(runDir, name) {
 async function runDefectsCell(provider, runtime) {
   const prUrl = matrix.providers[provider]?.pulls?.[runtime];
   const failures = [];
-  const blocked = runtimeBlockedReason(runtime);
+  const blocked = await runtimeBlockedReason(runtime);
   if (blocked) {
     return { provider, runtime, case: 'defects', ok: true, blocked, failures: [], prUrl };
   }

@@ -180,8 +180,9 @@ async function seedProvider(provider, matrix) {
     return null;
   }
   const token = resolveToken(provider, new URL(cfg.clone).host);
-  const { url: remote, secret } = credentialedGitUrl(provider, cfg.clone, token);
-  const secrets = [secret, token.value];
+  const { url: remote, secrets: urlSecrets } = credentialedGitUrl(provider, cfg.clone, token);
+  // Both forms the URL can carry, plus the bearer/basic value itself.
+  const secrets = [...new Set([...urlSecrets, token.value, encodeURIComponent(token.value)])];
   const work = mkdtempSync(join(tmpdir(), `acc-seed-${provider}-`));
 
   try {
@@ -199,8 +200,16 @@ async function seedProvider(provider, matrix) {
         git(['clone', '-q', remote, '.'], work, secrets);
         git(['checkout', '-q', '-B', 'main'], work, secrets);
         reused = true;
-      } catch {
-        // An empty repository has nothing to clone — start one.
+      } catch (err) {
+        // ONLY an empty repository may fall through to `git init`. Everything
+        // else — a bad credential, a network blip, a typo in the remote — must
+        // stop right here, because `reused: false` leads straight to
+        // `push --force` on main a few lines down. Force-pushing a fresh
+        // history over a live estate is exactly what closed PRs #1 and #2, and
+        // a bare `catch {}` left that path reachable through every transient
+        // failure while the comment above claimed it had been closed.
+        const text = String(err?.stderr ?? err?.message ?? '');
+        if (!/empty repository|unborn|yet to be born|does not have any commits/i.test(text)) throw err;
       }
     }
     if (!reused) git(['init', '-q', '-b', 'main'], work, secrets);

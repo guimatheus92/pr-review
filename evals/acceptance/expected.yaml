@@ -37,12 +37,20 @@ must_not_find:
   # actually meaningful: the SQLi and audit findings track the defect, not the
   # file.
   #
-  # Each pattern is two lookaheads: the first keeps it to findings whose TITLE
-  # is about greetHandler (a finding merely mentioning it in passing is not
-  # about it), the second requires the defect class anywhere in title or body,
-  # so the two can appear in either order.
-  - "^(?=[^\\n]*greetHandler)(?=[\\s\\S]*(sql injection|parameteri[sz]|string concatenation|interpolat))"
-  - "^(?=[^\\n]*greetHandler)(?=[\\s\\S]*(ACC-LOG-002|audit\\.log|audit log|missing audit))"
+  # Three lookaheads. The middle one is the load-bearing part and took three
+  # live cells to arrive at: a finding that names BOTH handlers is comparing
+  # them, and the subject of a comparison is the broken one. Anchoring on the
+  # title instead ("^[^\n]*greetHandler") failed on
+  # "getUserHandler does not audit-log, but greetHandler does" — a correct
+  # finding, flagged as a false positive, which is the failure mode that gets
+  # an assertion deleted rather than fixed.
+  #
+  # Known blind spot, stated rather than papered over: a finding that wrongly
+  # includes the control AND names the broken handler in the same breath slips
+  # through. That is the right trade — this check crying wolf on correct
+  # reviews is a certainty, that miss is a maybe.
+  - "^(?=[\\s\\S]*greetHandler)(?![\\s\\S]*getUserHandler)(?=[\\s\\S]*(sql injection|parameteri[sz]|string concatenation|interpolat))"
+  - "^(?=[\\s\\S]*greetHandler)(?![\\s\\S]*getUserHandler)(?=[\\s\\S]*(ACC-LOG-002|audit[ .\\-]log|missing audit))"
 
 stack:
   include:

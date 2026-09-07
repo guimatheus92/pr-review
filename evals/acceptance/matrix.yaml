@@ -28,9 +28,11 @@ providers:
     pulls:
       claude: https://gitlab.com/guimatheus92/pr-review-acceptance/-/merge_requests/1
       copilot: https://gitlab.com/guimatheus92/pr-review-acceptance/-/merge_requests/2
-    # GitLab-only: the wide MR that trips the truncated-file-list gate.
-    # 101 files, because GitLab reports changes_count "100+" above 100 — the
-    # only provider where that gate is reachable without thousands of files.
+    # GitLab-only: the wide MR that proves the file list paginates to
+    # completion. 101 files — one past GitLab's 100-per-page /diffs cap, so the
+    # provider has to walk a second page. NOT a truncation trigger:
+    # changes_count was measured exact at 1200 files, so the "N+" form never
+    # appears. See runFilelistCell in scripts/acceptance.mjs.
     wide: https://gitlab.com/guimatheus92/pr-review-acceptance/-/merge_requests/3
 
 # Branches the seeder creates. One per runtime so two cells never write to the

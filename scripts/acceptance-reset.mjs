@@ -139,7 +139,13 @@ export function credentialedGitUrl(provider, clone, token) {
   const user = provider === 'github' ? 'x-access-token' : provider === 'gitlab' ? 'oauth2' : 'pr-review';
   const secret = token.scheme === 'basic' ? Buffer.from(token.value, 'base64').toString('utf8').replace(/^:/, '') : token.value;
   const userinfo = `${encodeURIComponent(user)}:${encodeURIComponent(secret)}`;
-  return { url: `${u.protocol}//${userinfo}@${u.host}${u.pathname}${u.search}`, secret };
+  // `secrets` carries BOTH forms, because the URL embeds the percent-encoded
+  // token while callers had only the raw one to mask with. A PAT containing any
+  // of `+/=:@` therefore survived masking and reached the acceptance report and
+  // the CI job summary in its encoded form — masked in shape, intact in fact.
+  // Returned as a list so no caller has to remember there are two.
+  const secrets = [...new Set([secret, encodeURIComponent(secret)])];
+  return { url: `${u.protocol}//${userinfo}@${u.host}${u.pathname}${u.search}`, secret, secrets };
 }
 function authHeader(token) {
   return token.scheme === 'basic' ? `Basic ${token.value}` : `Bearer ${token.value}`;

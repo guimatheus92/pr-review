@@ -82,7 +82,7 @@ Only the account and repo creation is manual. Everything after is one command.
    - **Code** → Read & write
    - **Pull Request Threads** → Read & write
 
-2. **GitLab** — create an account at <https://gitlab.com> and an empty **public**
+2. **GitLab** — create an account at <https://gitlab.com> and an empty
    project `pr-review-acceptance`.
    PAT (User settings → Access tokens) with scope **`api`** — there is no
    narrower write scope for `POST /merge_requests/:iid/discussions` — and at
@@ -96,11 +96,14 @@ Only the account and repo creation is manual. Everything after is one command.
    grant **Merge requests: read+write** plus **Repository: read** — the same
    reach under a different name.
 
-3. **GitHub** — create an empty **public** repo `pr-review-acceptance`.
-   For CI only, a fine-grained PAT scoped to that repo with **Pull requests:
-   read and write** and **Contents: read**.
+3. **GitHub** — create an empty repo `pr-review-acceptance`.
+   A fine-grained PAT scoped to that repo with **Pull requests: read and
+   write** and **Contents: read and write** — write, because
+   `acceptance-seed.mjs` pushes `main` and the defect branches with this
+   token; read-only cannot seed the estate.
 
-   Public repos, because the runner clones the fixture with no credential.
+   Public or private, either works: the runner clones with a credential
+   resolved at run time (see below), so nothing depends on anonymous access.
 
 4. Put the three clone/web URLs into `matrix.yaml` (replace every `CHANGE-ME`).
 
@@ -160,9 +163,11 @@ The product itself never reads that file — `src/providers/*` read only
 `process.env`. The runner loads it and injects the values into the CLI it
 spawns, which keeps a test-only convenience out of the shipped tool.
 
-`matrix.yaml` holds public URLs and nothing else, which is also why the fixture
-repositories are public: a private one would need a credentialed clone URL in a
-committed file.
+`matrix.yaml` holds plain, credential-free URLs and nothing else. The credential
+is added at the moment of use (`credentialedGitUrl`) and the remote is rewritten
+back immediately, so it is never written to `.git/config` or to a committed
+file — which is why the fixture repositories do not have to be public. That was
+a constraint of the first cut, not of the design.
 
 In CI: `gh workflow run acceptance.yml`. Secrets live in the `acceptance`
 GitHub environment, not in repository secrets, and no `pull_request` trigger

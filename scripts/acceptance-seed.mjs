@@ -338,15 +338,14 @@ if (!dryRun && failures === 0) {
       const url = matrix.providers[current]?.pulls?.[runtime[2]];
       return url ? `${runtime[1]}${url}` : line;
     }
-    const wide = /^( {4}wide:\s*)(.*)$/.exec(line);
-    if (wide) {
-      const url = matrix.providers[current]?.wide;
-      return url ? `${wide[1]}${url}` : line;
-    }
-    const huge = /^( {4}huge:\s*)(.*)$/.exec(line);
-    if (huge) {
-      const url = matrix.providers[current]?.huge;
-      return url ? `${huge[1]}${url}` : line;
+    // The separator is rebuilt rather than reused: on a FIRST seed the key is
+    // written with an empty value (`    huge:`), so carrying the matched prefix
+    // through emitted `huge:https://…` — no space, and YAML refuses to parse a
+    // mapping like that. Caught by seeding the estate for real.
+    const single = /^( {4})(wide|huge):\s*(.*)$/.exec(line);
+    if (single) {
+      const url = matrix.providers[current]?.[single[2]];
+      return url ? `${single[1]}${single[2]}: ${url}` : line;
     }
     return line;
   });

@@ -26,7 +26,7 @@ providers:
     # the only provider where that costs anything — two whole-file getItem calls
     # per changed file, ~1002 requests before #27. See runNoFetchCell in
     # scripts/acceptance.mjs.
-    huge:
+    huge: https://dev.azure.com/guimatheus92/acceptance/_git/pr-review-acceptance/pullrequest/3
 
   gitlab:
     clone: https://gitlab.com/guimatheus92/pr-review-acceptance.git

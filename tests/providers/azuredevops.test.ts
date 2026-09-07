@@ -157,3 +157,36 @@ test('fetchChangedFiles — a rename carries previousPath, including when the re
   assert.equal(items.includes('/gone.ts'), false, 'a deleted file fetches no content at all');
   assert.equal(items.includes('/used-to-be.ts'), false, 'nor does its source path');
 });
+
+test('fetchExistingComments — a tombstoned comment is not an existing comment', async () => {
+  // Azure DevOps never removes a deleted comment; it leaves the entry in the
+  // thread with isDeleted: true and empty content. A live fixture PR reviewed a
+  // few times carried 183 tombstones against 2 real comments, and counting them
+  // made `pr-review verify` report 63 inline comments matching no planned
+  // finding (INV-POST-06, "a dispatched agent wrote to the PR") and 14
+  // duplicated locations (INV-POST-05). Both alarms were false. They also
+  // reached every review pass as prior PR discussion.
+  const provider = new AzureDevOpsProvider();
+  const ref = provider.parseUrl(PR_URL)!;
+  const thread = (id: number, comments: unknown[]) => ({
+    id,
+    threadContext: { filePath: '/src/a.cs', rightFileStart: { line: 7 } },
+    comments,
+  });
+  const git = {
+    getPullRequestById: async () => PR,
+    getThreads: async () => [
+      thread(1, [
+        { id: 1, content: 'still here', author: { displayName: 'Reviewer' }, publishedDate: new Date(0) },
+        { id: 2, content: '', isDeleted: true, author: { displayName: 'Reviewer' }, publishedDate: new Date(0) },
+      ]),
+      // A wholly deleted thread contributes nothing at all.
+      thread(2, [{ id: 3, content: '', isDeleted: true, author: { displayName: 'Reviewer' }, publishedDate: new Date(0) }]),
+    ],
+  };
+  (provider as unknown as { gitApis: Map<string, Promise<unknown>> }).gitApis.set(orgUrlFor(ref), Promise.resolve(git));
+
+  const comments = await provider.fetchExistingComments(ref);
+  assert.deepEqual(comments.map((c) => c.body), ['still here']);
+  assert.equal(comments.length, 1, 'two tombstones must not become two existing comments');
+});

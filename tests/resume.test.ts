@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runReview } from '../src/commands/review.js';
 import { writePostedMarker } from '../src/util/posted-marker.js';
-import { controlDirForRun, RUNS_ROOT } from '../src/util/tmp.js';
+import { controlDirForRun, ERROR_FILE, RUNS_ROOT } from '../src/util/tmp.js';
 import { prepareSessionContext, resumePlannedSession } from '../src/dispatch/single-session.js';
 import {
   artifactState,
@@ -822,6 +822,73 @@ test('resume — a COMPLETE dry-run is promoted to publish and actually posts', 
     assert.equal(result.exitCode, 0);
     assert.ok(calls.batches.length + calls.singles.length > 0, 'the previewed finding is posted');
     assert.ok(existsSync(join(seeded.dir, 'posted.marker')), 'a publish attempt always writes the marker');
+  } finally {
+    seeded.cleanup();
+  }
+});
+
+test('resume — a companion that produced no output makes the RESUMED run exit 2, not 0', async () => {
+  // The regression this guards: both --resume paths reached finalizeReview
+  // without `operationalFailures`, so "a parseable review is not a completed
+  // review" held on fresh runs only. A run resumed after losing a companion
+  // reported a clean pipeline over delivery it could not account for.
+  //
+  // Deliberately end-to-end through runReview rather than through the helper:
+  // the helper was never the bug, the missing argument at the call site was.
+  const seeded = seedPlannedPartialRun();
+  completeSeededDelivery(seeded);
+  try {
+    writeFileSync(
+      join(seeded.dir, 'companions.json'),
+      JSON.stringify({ plannedReviewers: ['companion:code-review'], missingReviewers: ['companion:code-review'], duplicateReviewers: [] }),
+      'utf8',
+    );
+    const { provider } = fakeProvider();
+    const result = await runReview({
+      homeOverride: TEST_HOME,
+      prUrl: 'u',
+      resumeRunId: 'x',
+      runDir: seeded.dir,
+      dryRun: false,
+      publish: true,
+      provider,
+      resumePlannedSessionFn: async () => {
+        throw new Error('a complete delivery must not re-dispatch');
+      },
+    });
+    assert.equal(result.exitCode, 2, 'incomplete companion delivery is an operational failure on resume too');
+    assert.match(result.summary, /code-review/, 'the summary names which companion was missing');
+    assert.ok(existsSync(join(seeded.dir, ERROR_FILE)), 'exit 2 always leaves error.txt naming the failure');
+  } finally {
+    seeded.cleanup();
+  }
+});
+
+test('resume — a complete companion roster leaves the resumed run at exit 0', async () => {
+  // The other half: without this, a check that always returned a failure would
+  // satisfy the test above and break every clean resume.
+  const seeded = seedPlannedPartialRun();
+  completeSeededDelivery(seeded);
+  try {
+    writeFileSync(
+      join(seeded.dir, 'companions.json'),
+      JSON.stringify({ plannedReviewers: ['companion:code-review'], missingReviewers: [], duplicateReviewers: [] }),
+      'utf8',
+    );
+    const { provider } = fakeProvider();
+    const result = await runReview({
+      homeOverride: TEST_HOME,
+      prUrl: 'u',
+      resumeRunId: 'x',
+      runDir: seeded.dir,
+      dryRun: false,
+      publish: true,
+      provider,
+      resumePlannedSessionFn: async () => {
+        throw new Error('a complete delivery must not re-dispatch');
+      },
+    });
+    assert.equal(result.exitCode, 0);
   } finally {
     seeded.cleanup();
   }

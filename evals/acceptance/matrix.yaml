@@ -1,0 +1,44 @@
+# The acceptance estate: public identifiers only, never secrets.
+#
+# Fill these in once, after creating the three repos (see README.md), then run
+# `node scripts/acceptance-seed.mjs` to create the branches and pull requests.
+# The seeder writes the PR/MR numbers back into this file.
+
+providers:
+  github:
+    # Clone URL the runner uses. Public, so no credential is embedded.
+    clone: https://github.com/guimatheus92/pr-review-acceptance.git
+    # Base URL of the repo, used to build PR URLs.
+    web: https://github.com/guimatheus92/pr-review-acceptance
+    # Filled in by acceptance-seed.mjs.
+    pulls:
+      claude: https://github.com/guimatheus92/pr-review-acceptance/pull/3
+      copilot: https://github.com/guimatheus92/pr-review-acceptance/pull/4
+
+  azuredevops:
+    clone: https://dev.azure.com/guimatheus92/acceptance/_git/pr-review-acceptance
+    web: https://dev.azure.com/guimatheus92/acceptance/_git/pr-review-acceptance
+    pulls:
+      claude: https://dev.azure.com/guimatheus92/acceptance/_git/pr-review-acceptance/pullrequest/1
+      copilot: https://dev.azure.com/guimatheus92/acceptance/_git/pr-review-acceptance/pullrequest/2
+
+  gitlab:
+    clone: https://gitlab.com/guimatheus92/pr-review-acceptance.git
+    web: https://gitlab.com/guimatheus92/pr-review-acceptance
+    pulls:
+      claude: https://gitlab.com/guimatheus92/pr-review-acceptance/-/merge_requests/1
+      copilot: https://gitlab.com/guimatheus92/pr-review-acceptance/-/merge_requests/2
+    # GitLab-only: the wide MR that proves the file list paginates to
+    # completion. 101 files — one past GitLab's 100-per-page /diffs cap, so the
+    # provider has to walk a second page. NOT a truncation trigger:
+    # changes_count was measured exact at 1200 files, so the "N+" form never
+    # appears. See runFilelistCell in scripts/acceptance.mjs.
+    wide: https://gitlab.com/guimatheus92/pr-review-acceptance/-/merge_requests/3
+
+# Branches the seeder creates. One per runtime so two cells never write to the
+# same pull request: sharing one would need a serialization lock, and the second
+# run would dedupe against the first run's comments.
+branches:
+  claude: acc/defects-claude
+  copilot: acc/defects-copilot
+  wide: acc/wide

@@ -215,6 +215,10 @@ On a publish run (the default), every finding lands as a resolvable **inline** r
 - **Never top-level.** GitHub findings post as review comments (one batched review; if the batch fails, the PR is read back and the missing comments are posted one by one). Azure DevOps findings post as threads; GitLab findings post as inline discussions. There is no top-level issue-comment fallback.
 - **Nothing dropped.** Lines outside the diff are snapped to the nearest valid diff line. On GitHub and GitLab, findings that can't anchor where they point (file outside the diff, or no location) are re-anchored to the first valid diff line, keeping the original `file:line` in the comment body. On Azure DevOps, threads are posted at the reported `file:line` as-is (ADO threads are not limited to diff lines), and a finding with no location at all lands as a resolvable PR-level thread; a thread ADO rejects is reported as an error in the summary.
 - **Skipping only in `--dry-run`.** A failed write is retried only after the PR has been read back — a failed write is not proof that nothing was written — and anything that still fails is reported as an error in the summary, never silently dropped.
+- **No summary comment, ever.** The review does not post a verdict, a recap, or a "### Code review" banner when it finishes. The end-of-run summary is a local file (`pr-review-summary.md` in the run directory), never a comment on the PR.
+- **Never reviewed on a partial file list.** The provider's changed-file list is checked against the provider's own count and its truncation flag. On a mismatch pr-review completes the list from your checkout, or fails before caching anything — it never reviews a diff it cannot prove is whole.
+
+Every guarantee this tool makes, with why it exists and what verifies it, is in **[INVARIANTS.md](INVARIANTS.md)**. `pr-review verify` audits a finished run against the whole list.
 
 ## Review passes & skill packs
 
@@ -348,6 +352,12 @@ pr-review review <pr-url> [flags]            # full pipeline
 #   --from-gather <path>    (eval harness) read the gather JSON from a file
 #                           instead of the provider APIs; requires --dry-run
 pr-review status <run-id>                    # live progress, summary, or the recovery command (exit 0/20/21/22; 1 = unknown run-id)
+pr-review verify [run-id] [--pr <url>]       # audit a finished run against INVARIANTS.md (read-only)
+#                           exit 0 every row PASS/SKIP · 1 the audit could not be
+#                           completed (run unresolvable, or the PR read-back failed)
+#                           · 2 at least one invariant FAILed
+#   --offline               skip the live PR read-back; rows that need it report SKIP (exit stays 0)
+#   --json                  emit the rows as JSON for CI
 pr-review gather <pr-url> [--out <path>]     # fetch + cache metadata only
 pr-review post <pr-url> --findings <path>    # post pre-computed findings
 pr-review packs list|sync|add <source>|suggest <tags...|pr-url>   # manage skill packs

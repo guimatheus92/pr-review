@@ -1,0 +1,10 @@
+{
+  "name": "pr-review-acceptance",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Fixture service for the pr-review acceptance matrix. Contains deliberate defects.",
+  "dependencies": {
+    "express": "^4.19.2",
+    "pg": "^8.11.5"
+  }
+}

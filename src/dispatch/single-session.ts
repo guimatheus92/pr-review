@@ -14,6 +14,7 @@ import {
   taskCall,
   taskToolName,
   type Runtime,
+  DEFAULT_MODEL,
 } from './runtime.js';
 import { appendProgress } from '../util/progress.js';
 import type { IndexEntry, PassRoute, ReviewPass } from './pass-select.js';
@@ -702,7 +703,7 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
   };
   const reviewerPlans = buildReviewerPlans(opts, promptContext);
   const runtime = opts.runtime ?? 'copilot';
-  const model = normalizeModel(runtime, opts.defaultModel ?? 'claude-opus-4.8');
+  const model = normalizeModel(runtime, opts.defaultModel ?? DEFAULT_MODEL);
   const immutablePaths = [
     resolve(opts.outDir, 'pr-review-gather.json'),
     contextPath,
@@ -1714,7 +1715,7 @@ export async function runSingleSession(
   }
 
   const runtime = opts.runtime ?? 'copilot';
-  const model = normalizeModel(runtime, opts.defaultModel ?? 'claude-opus-4.8');
+  const model = normalizeModel(runtime, opts.defaultModel ?? DEFAULT_MODEL);
   process.stderr.write(
     `[single-session] dispatching orchestrator (runtime=${runtime}, ${ctx.passes.length} pass(es)` +
       (ctx.triageSkipped.length ? `, ${ctx.triageSkipped.length} skipped by triage: ${ctx.triageSkipped.join(', ')}` : '') +

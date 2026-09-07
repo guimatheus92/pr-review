@@ -1,6 +1,6 @@
 {
   "name": "pr-review",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Generic, plugin-based PR review for GitHub, Azure DevOps, and GitLab. Reviews with parallel passes built from synced skill packs (stack-aware, zero built-in reviewers) in a single session (Copilot CLI or Claude Code), with optional Codex second opinion.",
   "private": true,
   "type": "module",
@@ -12,6 +12,8 @@
     "build:watch": "tsc --watch",
     "bundle": "node scripts/bundle.mjs",
     "dogfood": "node scripts/dogfood.mjs",
+    "acceptance": "node scripts/acceptance.mjs",
+    "acceptance:seed": "node scripts/acceptance-seed.mjs",
     "test": "node scripts/test.mjs",
     "clean": "rimraf dist",
     "prepare": "npm run build"

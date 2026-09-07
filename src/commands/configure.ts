@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { DEFAULT_MODEL } from '../dispatch/runtime.js';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
@@ -56,7 +57,7 @@ export async function runConfigureInteractive(): Promise<void> {
     return answer.trim() || fallback;
   };
   try {
-    cfg.default_model = await ask('Default model', cfg.default_model ?? 'claude-opus-4.8');
+    cfg.default_model = await ask('Default model', cfg.default_model ?? DEFAULT_MODEL);
     // No reviewer dirs: standalone reviewers are never dispatched — skills are the only content.
     const extraSk = await ask(
       'Extra skills dirs (comma-separated)',

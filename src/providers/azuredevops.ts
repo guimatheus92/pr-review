@@ -487,6 +487,18 @@ export class AzureDevOpsProvider implements PrProvider {
       const file = t.threadContext?.filePath?.replace(/^\//, '');
       const line = t.threadContext?.rightFileStart?.line;
       for (const c of t.comments ?? []) {
+        // Azure DevOps does not remove a deleted comment, it tombstones it:
+        // the entry stays in the thread with `isDeleted: true` and empty
+        // content. Those are not existing comments, and counting them is not
+        // harmless — a fixture PR reviewed a few times carried 183 tombstones
+        // against 2 live comments, and `pr-review verify` read them as 63
+        // inline comments matching no planned finding (INV-POST-06: "a
+        // dispatched agent wrote to the PR") plus 14 duplicated locations
+        // (INV-POST-05). Both were false, and both are the kind of alarm that
+        // gets an invariant switched off. They also reached every review pass
+        // as prior PR discussion, and `dedupeAgainstExisting` compared real
+        // findings against them.
+        if (c.isDeleted) continue;
         const author = c.author?.displayName ?? '<unknown>';
         out.push({
           id: `${t.id}-${c.id}`,

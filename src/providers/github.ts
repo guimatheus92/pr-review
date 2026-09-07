@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import type { ChangedFile, ExistingComment, Finding, PrMetadata, PrRef } from '../types.js';
 import type { BatchComment, PrProvider } from './types.js';
 
+import { isNetworkError } from '../util/retry.js';
 import { execErrorDetail } from '../util/exec-error.js';
 import { parseHttpUrl } from '../util/url.js';
 import { printable } from '../util/text.js';
@@ -64,6 +65,7 @@ function classifyAuthor(login: string): ExistingComment['source'] {
  * and secondary rate limits arrive as 403s. Both recover on backoff.
  */
 export function isTransientGitHubError(err: Error): boolean {
+  if (isNetworkError(err)) return true;
   const status = (err as { status?: number }).status;
   const msg = err.message;
   if (status !== undefined && status >= 500) return true;

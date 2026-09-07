@@ -4,7 +4,7 @@ import pLimit from 'p-limit';
 import type { GitPullRequest, GitPullRequestChange, GitPullRequestCommentThread, Comment } from 'azure-devops-node-api/interfaces/GitInterfaces.js';
 import type { ChangedFile, ExistingComment, Finding, PrMetadata, PrRef } from '../types.js';
 import type { PrProvider } from './types.js';
-import { withRetry } from '../util/retry.js';
+import { isNetworkError, withRetry } from '../util/retry.js';
 import { execErrorDetail } from '../util/exec-error.js';
 import { parseHttpUrl, safeDecode } from '../util/url.js';
 import { countChangedLines } from '../util/diff-lines.js';
@@ -147,6 +147,7 @@ export function hydrateAdoProject(ref: PrRef, project?: { name?: string | null; 
 
 /** Exported for tests. azure-devops-node-api surfaces HTTP codes as `statusCode`; check `status` too so a library change cannot silently kill retries. */
 export function isTransientAdoError(err: Error): boolean {
+  if (isNetworkError(err)) return true;
   const e = err as { statusCode?: number; status?: number };
   const status = e.statusCode ?? e.status;
   return status === 429 || (status !== undefined && status >= 500);

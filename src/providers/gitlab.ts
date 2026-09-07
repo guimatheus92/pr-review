@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import type { ChangedFile, ExistingComment, Finding, PrMetadata, PrRef } from '../types.js';
 import type { PrProvider } from './types.js';
-import { withRetry } from '../util/retry.js';
+import { isNetworkError, withRetry } from '../util/retry.js';
 import { execErrorDetail } from '../util/exec-error.js';
 import { safeDecode } from '../util/url.js';
 import { diffLines } from '../util/diff-lines.js';
@@ -51,6 +51,7 @@ export function classifyAuthor(username: string): ExistingComment['source'] {
 
 /** Exported for tests. GitLab rate-limits as 429 (+ Retry-After); 5xx recover on backoff. */
 export function isTransientGitLabError(err: Error): boolean {
+  if (isNetworkError(err)) return true;
   const status = (err as { status?: number }).status;
   return status === 429 || (status !== undefined && status >= 500);
 }

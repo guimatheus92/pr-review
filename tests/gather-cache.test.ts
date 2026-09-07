@@ -727,3 +727,40 @@ test('runGather — past the guard the git completion generates no patches at al
     rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test('runGather — a PR that wrote its own .pr-review.yaml does not get its excludes counted', async () => {
+  // INV-TRUST-01 reaching the cost decision: runReview will discard a config the
+  // branch authored and count every file, so the cache/flag decisions here must
+  // be taken the same way. 501 rows, one of them the config itself, and globs
+  // that would otherwise hide 100 of them.
+  const paths = ['.pr-review.yaml', ...srcPaths(500)];
+  const { provider } = fakePaying({ ...META, changedFileCount: 501 }, paths);
+  let writes = 0;
+  const result = await withNoRepoDir(async (cwd) =>
+    runGather({
+      ...gatherOpts(provider),
+      cwd,
+      repoExcludes: ['src/f1*.ts', 'src/f2*.ts'],
+      writeGatherCacheFn: () => (writes++, 'x'),
+    }),
+  );
+  assert.equal(writes, 0, 'the run is about to be refused on the real count — do not store an entry for it');
+  assert.equal(result.changedFiles.length, 501, 'the path list is untouched either way');
+});
+
+test('runGather — an UNCHANGED repo config still gets its excludes counted', async () => {
+  // The control for the test above: without it, that assertion would also pass
+  // if repoExcludes were ignored outright, which is the regression decision 1
+  // exists to prevent.
+  const { provider } = fakePaying({ ...META, changedFileCount: 501 }, srcPaths(501));
+  let writes = 0;
+  await withNoRepoDir(async (cwd) =>
+    runGather({
+      ...gatherOpts(provider),
+      cwd,
+      repoExcludes: ['src/f1*.ts', 'src/f2*.ts'],
+      writeGatherCacheFn: () => (writes++, 'x'),
+    }),
+  );
+  assert.equal(writes, 1, 'the repo excludes bring it under the guard, so the run proceeds and the entry is good');
+});

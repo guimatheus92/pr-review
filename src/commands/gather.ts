@@ -9,6 +9,7 @@ import {
   patchPolicy,
   summarizeExclusions,
 } from '../dispatch/diff-filter.js';
+import { changesRepoConfig } from '../config.js';
 import { lastCommentIdFrom } from '../cache/keys.js';
 import { readGatherCache, writeGatherCache } from '../cache/store.js';
 import type { PrProvider } from '../providers/types.js';
@@ -58,15 +59,27 @@ interface GatherCmdOptions {
   extraExcludes?: string[];
   /**
    * `diff_excludes` from the checkout's own `.pr-review.yaml`, loaded
-   * optimistically by the caller. Used ONLY to decide what is worth fetching
-   * (INV-FETCH-04) and never to mark a file excluded — and only once gather has
-   * the complete path list and can see the PR did not author that file
-   * (INV-TRUST-01).
+   * optimistically by the caller. Used ONLY to narrow the in-scope COUNT the
+   * fetch decision is taken over (INV-FETCH-04) — never to mark a file
+   * excluded, and never to decide that one file's content can be skipped.
    *
-   * Without it the fetch decision would be taken over a strictly larger
-   * in-scope set than the one `earlyExitGate` finally counts, and a PR the
-   * repo's own excludes bring back under the guard would be refused for being
-   * too large — a review that works today.
+   * Without it the decision would be taken over a strictly larger set than the
+   * one `earlyExitGate` finally counts, and a PR the repo's own excludes bring
+   * back under the guard would be refused for being too large — a review that
+   * works today.
+   *
+   * These globs are branch-authored, and the asymmetry is what makes that safe
+   * rather than the authorship check gather cannot run here: the options have
+   * to be handed to `fetchChangedFiles` *before* it returns the path list that
+   * an authorship check would need. Extra excludes can only lower the count,
+   * which can only make the run fetch MORE, so nothing can be suppressed.
+   *
+   * ponytail: the residue is cost, not correctness — a PR committing
+   * `diff_excludes: ['**\/*']` drives the count to zero and gets its content
+   * fetched, exactly as every PR did before #27, before being refused on the
+   * real count moments later. Closing that needs the authorship answer one
+   * round-trip earlier than the interface can give it; revisit if a real PR
+   * ever does it.
    */
   repoExcludes?: string[];
   useCache?: boolean;
@@ -335,9 +348,14 @@ export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
     ? await completeFromGit(changedFilesProvider, ref, metadata, opts.cwd ?? process.cwd(), patchOpts)
     : changedFilesProvider;
 
-  // The branch-authored half of `patchOpts` can only lower this count, never
-  // raise it, so a PR cannot talk its way past the guard with its own config.
-  const policy = patchPolicy(changedFilesRaw.map((file) => file.path), patchOpts);
+  // Recomputed on the list that came back, and now the authorship answer IS
+  // available: if the PR wrote the config those globs came from, `runReview`
+  // will discard them (INV-TRUST-01) and count every file, so the cache and
+  // flag decisions below must be taken the same way. Too late to have saved the
+  // fetch — see `repoExcludes` — but not too late to avoid storing an entry for
+  // a run that is about to be refused.
+  const finalOpts = changesRepoConfig(changedFilesRaw) ? { ...patchOpts, countOnlyExcludes: [] } : patchOpts;
+  const policy = patchPolicy(changedFilesRaw.map((file) => file.path), finalOpts);
   // Two different questions, deliberately keyed on two different things.
   //
   // The CACHE asks "was this list assembled while withholding content?" — any

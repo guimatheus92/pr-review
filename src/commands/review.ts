@@ -16,7 +16,7 @@ import { selectPasses, type PassRoute } from '../dispatch/pass-select.js';
 import { ensurePacks } from '../packs/sync.js';
 import { loadLinguist } from '../stack/linguist.js';
 import { detectStack, maskUrl } from '../stack/detect.js';
-import { resolveRuntime, type Runtime, type RuntimeChoice } from '../dispatch/runtime.js';
+import { DEFAULT_MODEL, normalizeModel, resolveRuntime, type Runtime, type RuntimeChoice } from '../dispatch/runtime.js';
 import { detectCodex, mapCodexResult, runCodexReviewer } from '../dispatch/codex.js';
 import { controlDirForRun, ensureRunDir, ERROR_FILE, RUNS_ROOT, sanitizeForFilename } from '../util/tmp.js';
 import { appendProgress } from '../util/progress.js';
@@ -1331,6 +1331,17 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
       // copilot — `verify` and the acceptance matrix would both be asserting
       // against their own input.
       runtime,
+      // The model string actually handed to the CLI, after normalizeModel — the
+      // configured default is NOT it. `claude-opus-4.8` becomes `opus` on claude
+      // and `auto` on copilot, and until now that transformation left no trace,
+      // so a finished run could not say what it asked for.
+      //
+      // Declared ceiling: `auto` is a delegation, not a model. The CLI picks and
+      // does not report the pick — not here, and not in its own logs at default
+      // level (checked against ~/.copilot/logs for a real run: no model name
+      // appears). So `model: "auto"` means "the runtime chose, and nothing
+      // recorded what". To pin the axis for real, pass an explicit `--model`.
+      model: normalizeModel(runtime, config.defaultModel ?? DEFAULT_MODEL),
       installedPlugins: loaded.installedPlugins.map((plugin) => ({
         id: plugin.id,
         version: plugin.version,

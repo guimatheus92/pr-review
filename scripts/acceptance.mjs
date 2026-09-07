@@ -428,6 +428,13 @@ async function runDefectsCell(provider, runtime) {
   if (verifyExit === 1) failures.push('pr-review verify could not complete the audit (exit 1) — the run is unverified, not clean');
 
   const capabilities = readArtifact(runDir, 'capabilities.json');
+  // The model axis, recorded so a cell's result can be attributed to one. Not
+  // asserted against an expected value: the matrix deliberately exercises the
+  // DEFAULT path, which on copilot is `auto` — a delegation the CLI does not
+  // report. Absence is the failure worth catching; "which model auto chose" is
+  // not knowable from any artifact, and a cell that needs that answer must pin
+  // `--model` explicitly.
+  if (!capabilities?.model) failures.push('capabilities.json records no model — the cell cannot be attributed to one');
   if (capabilities?.runtime !== runtime) {
     // The whole runtime axis rests on this: --runtime is an input, and only the
     // artifact can say which CLI actually hosted the session.
@@ -483,6 +490,7 @@ async function runDefectsCell(provider, runtime) {
   return {
     provider,
     runtime,
+    model: capabilities?.model ?? null,
     case: 'defects',
     ok: failures.length === 0,
     failures,
@@ -590,8 +598,9 @@ async function runFilelistCell() {
  * Azure DevOps only, and that is the point. GitHub and GitLab ship each file's
  * patch inside the listing response, so there is nothing to withhold and a cell
  * there would pass whatever the code did. ADO synthesizes every patch from two
- * whole-file `getItem` calls, so this is ~1002 requests that used to be spent
- * before the run was refused for being too large.
+ * whole-file `getItem` calls — two per modified file, one per added file, so
+ * 501 requests on this all-additions fixture — all of them spent before the run
+ * was refused for being too large.
  *
  * What makes it a real assertion rather than a tautology: `gather` must SUCCEED
  * and return all 501 paths (INV-FETCH-01 — the trust gates read paths, and
@@ -755,20 +764,24 @@ for (const provider of PROVIDERS) {
   }
 }
 
+// `model` is reported, never asserted: the matrix exercises the DEFAULT path,
+// which on copilot is `auto` — a delegation the CLI does not report back. A row
+// reading `auto` means "the runtime chose, and nothing recorded what"; pin
+// `--model` on a direct run when a specific model has to be attributed.
 const cell = (r) =>
   r.blocked
-    ? `| ${r.provider} | ${r.runtime} | ${r.case} | 🚧 blocked | - | - | ${r.blocked.replace(/\|/g, '\\|')} |`
+    ? `| ${r.provider} | ${r.runtime} | - | ${r.case} | 🚧 blocked | - | - | ${r.blocked.replace(/\|/g, '\\|')} |`
     : r.skipped
-    ? `| ${r.provider} | ${r.runtime} | ${r.case} | ⏭️ skip | - | - | ${r.skipped} |`
-    : `| ${r.provider} | ${r.runtime} | ${r.case} | ${r.ok ? '✅ pass' : '❌ fail'} | ${r.findings ?? '-'} | ${r.posted ?? '-'} | ${
+    ? `| ${r.provider} | ${r.runtime} | - | ${r.case} | ⏭️ skip | - | - | ${r.skipped} |`
+    : `| ${r.provider} | ${r.runtime} | ${r.model ?? '-'} | ${r.case} | ${r.ok ? '✅ pass' : '❌ fail'} | ${r.findings ?? '-'} | ${r.posted ?? '-'} | ${
         r.ok ? '' : r.failures.join('<br>').replace(/\|/g, '\\|')
       } |`;
 
 const md = [
   `# Acceptance matrix — ${cliVersion}${dryRun ? ' (dry-run)' : ''}`,
   '',
-  '| provider | runtime | case | result | findings | posted | detail |',
-  '|---|---|---|---|---|---|---|',
+  '| provider | runtime | model | case | result | findings | posted | detail |',
+  '|---|---|---|---|---|---|---|---|',
   ...[...results, ...notRun].map(cell),
   '',
 ].join('\n');

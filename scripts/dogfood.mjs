@@ -207,7 +207,24 @@ export function newFilePatch(root, path) {
   ].join('\n');
 }
 
+/**
+ * A path whose whole purpose is to be committed *without* values —
+ * `.env.example`, `config.sample.yaml`, `secrets.template.json`.
+ *
+ * The name check below refuses on the name alone, which is right for a file
+ * that holds live credentials and wrong for the file a repo is supposed to
+ * commit next to it: adding `.env.example` made `sensitiveTrackedPatch` refuse
+ * the entire branch diff, so dogfood — a required pre-PR step — could not run
+ * at all. Exempting these from the NAME check only; the content scan still runs
+ * on them, so a template with a real value in it is still refused.
+ */
+function templatePath(path) {
+  const base = path.replace(/\\/g, '/').split('/').at(-1) ?? '';
+  return /(?:^|\.)(?:example|sample|template|dist|default)(?:\.[A-Za-z0-9]+)?$/i.test(base);
+}
+
 function sensitiveUntrackedPath(path) {
+  if (templatePath(path)) return false;
   const normalized = path.replace(/\\/g, '/');
   const base = normalized.split('/').at(-1) ?? '';
   return (

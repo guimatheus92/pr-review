@@ -2,8 +2,9 @@ import * as azdev from 'azure-devops-node-api';
 import { execFileSync, execSync } from 'node:child_process';
 import pLimit from 'p-limit';
 import type { GitPullRequest, GitPullRequestChange, GitPullRequestCommentThread, Comment } from 'azure-devops-node-api/interfaces/GitInterfaces.js';
-import type { ChangedFile, ExistingComment, Finding, PrMetadata, PrRef } from '../types.js';
+import type { ChangedFile, ChangedFilesOptions, ExistingComment, Finding, PrMetadata, PrRef } from '../types.js';
 import type { PrProvider } from './types.js';
+import { patchPolicy } from '../dispatch/diff-filter.js';
 import { isNetworkError, withRetry } from '../util/retry.js';
 import { execErrorDetail } from '../util/exec-error.js';
 import { parseHttpUrl, safeDecode } from '../util/url.js';
@@ -363,7 +364,7 @@ export class AzureDevOpsProvider implements PrProvider {
     };
   }
 
-  async fetchChangedFiles(ref: PrRef): Promise<ChangedFile[]> {
+  async fetchChangedFiles(ref: PrRef, opts?: ChangedFilesOptions): Promise<ChangedFile[]> {
     const git = await this.gitApi(ref);
     const pr = await this.getPr(ref);
     const repoId = pr.repository!.id!;
@@ -394,23 +395,41 @@ export class AzureDevOpsProvider implements PrProvider {
       }
       skip = advance;
     }
+    // A folder entry (directory add, or an ancestor of an edited file) has no
+    // content and is not a reviewable file; it would count against the file
+    // guard and cost a getItem call. isFolder is the wire boolean; gitObjectType
+    // arrives as a raw string, never the SDK enum. Dropped up front, before the
+    // patch policy counts what is in scope — a directory add drags in every
+    // ancestor, and those must not push a PR over the guard.
+    const changes = entries
+      .map((change) => ({ change, path: change.item?.path?.replace(/^\//, '') ?? '' }))
+      .filter(
+        ({ change, path }) =>
+          path !== '' &&
+          !change.item?.isFolder &&
+          (change.item as { gitObjectType?: unknown } | undefined)?.gitObjectType !== 'tree',
+      );
+    // INV-FETCH-04: two whole-file getItem calls per modified file is the most
+    // expensive thing this provider does. Do not spend them on a file the review
+    // will never read — an excluded path, or any path at all once the in-scope
+    // count has already refused the run.
+    const policy = patchPolicy(changes.map((c) => c.path), opts);
+    if (policy.omitted) {
+      process.stderr.write(
+        `[ado] ${policy.inScope} in-scope files is past the review guard — listing paths without fetching content\n`,
+      );
+    }
     const limit = pLimit(FILE_FETCH_CONCURRENCY);
     const results = await Promise.all(
-      entries.map((change) =>
-        limit(async (): Promise<ChangedFile | null> => {
-          const path = change.item?.path?.replace(/^\//, '') ?? '';
-          // A folder entry (directory add, or an ancestor of an edited file) has no
-          // content and is not a reviewable file; it would count against the file
-          // guard and cost a getItem call. isFolder is the wire boolean; gitObjectType
-          // arrives as a raw string, never the SDK enum.
-          if (!path || change.item?.isFolder || (change.item as { gitObjectType?: unknown } | undefined)?.gitObjectType === 'tree') return null;
+      changes.map(({ change, path }) =>
+        limit(async (): Promise<ChangedFile> => {
           const { status, basePath } = classifyChange(
             change.changeType,
             path,
             (change as { sourceServerItem?: string }).sourceServerItem,
           );
           let patch: string | undefined;
-          if (status !== 'deleted' && headSha) {
+          if (status !== 'deleted' && headSha && policy.wants(path)) {
             const [headContent, baseContent] = await Promise.all([
               this.fetchFileText(git, repoId, ref.project, path, headSha),
               baseSha && status !== 'added'
@@ -434,7 +453,7 @@ export class AzureDevOpsProvider implements PrProvider {
         }),
       ),
     );
-    return results.filter((f): f is ChangedFile => f !== null);
+    return results;
   }
 
   private async fetchFileText(

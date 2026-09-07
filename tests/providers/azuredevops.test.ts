@@ -190,3 +190,66 @@ test('fetchExistingComments — a tombstoned comment is not an existing comment'
   assert.deepEqual(comments.map((c) => c.body), ['still here']);
   assert.equal(comments.length, 1, 'two tombstones must not become two existing comments');
 });
+
+// ---------------------------------------------------------------------------
+// INV-FETCH-04 — content is fetched only for files that can still reach a pass.
+//
+// ADO is the provider where this is expensive: GitHub and GitLab hand over the
+// patch inside the file listing, ADO synthesizes it from TWO getItem calls per
+// modified file, each downloading the whole file at one revision. The path list
+// is unaffected in every case below — it is what the trust gates read.
+
+const edited = (path: string) => ({ changeType: 2, item: { path } });
+
+test('fetchChangedFiles — above the file guard nothing is fetched: the list is paths, the review is refused anyway', async () => {
+  const entries = Array.from({ length: 501 }, (_, i) => edited(`/src/f${i}.cs`));
+  const { provider, ref, items } = stubbedProvider(() => ({ changeEntries: entries, nextSkip: 0 }));
+  const files = await provider.fetchChangedFiles(ref, { maxPatchedFiles: 500 });
+  assert.equal(items.length, 0, '501 in-scope files trips the guard: not one getItem is worth making');
+  assert.equal(files.length, 501, 'the PATH list stays complete — it feeds the trust gates (INV-FETCH-01)');
+  assert.deepEqual(files.slice(0, 2).map((f) => f.path), ['src/f0.cs', 'src/f1.cs']);
+  assert.ok(files.every((f) => f.patch === undefined), 'no patch was synthesized');
+});
+
+test('fetchChangedFiles — at the guard exactly, every in-scope file is still fetched', async () => {
+  // 500 is allowed (the gate is `>`), so the cheap path must not swallow a PR
+  // the review would have accepted. Two getItem per modified file.
+  const entries = Array.from({ length: 500 }, (_, i) => edited(`/src/f${i}.cs`));
+  const { provider, ref, items } = stubbedProvider(() => ({ changeEntries: entries, nextSkip: 0 }));
+  const files = await provider.fetchChangedFiles(ref, { maxPatchedFiles: 500 });
+  assert.equal(items.length, 1000, 'head + base for each of the 500');
+  assert.ok(files.every((f) => f.patch !== undefined));
+});
+
+test('fetchChangedFiles — an excluded path is listed but never fetched: its patch is discarded seconds later anyway', async () => {
+  const { provider, ref, items } = stubbedProvider(() => ({
+    changeEntries: [edited('/src/a.cs'), edited('/package-lock.json'), edited('/assets/logo.png'), edited('/vendor/dep.cs')],
+    nextSkip: 0,
+  }));
+  const files = await provider.fetchChangedFiles(ref, {
+    excludes: ['**/package-lock.json', '**/vendor/**', '**/*.{png,jpg}'],
+    maxPatchedFiles: 500,
+  });
+  assert.deepEqual(items, ['/src/a.cs', '/src/a.cs'], 'only the reviewable file costs a fetch (head + base)');
+  assert.deepEqual(
+    files.map((f) => f.path),
+    ['src/a.cs', 'package-lock.json', 'assets/logo.png', 'vendor/dep.cs'],
+    'every path is still listed: applyDiffExclusions marks them, gather counts them, trust reads them',
+  );
+  assert.equal(files.find((f) => f.path === 'package-lock.json')?.patch, undefined);
+});
+
+test('fetchChangedFiles — the guard counts in-scope files only, so exclusions can keep a PR reviewable', async () => {
+  // 501 rows, one excluded → 500 in scope → under the guard → the 500 are fetched.
+  const entries = [...Array.from({ length: 500 }, (_, i) => edited(`/src/f${i}.cs`)), edited('/package-lock.json')];
+  const { provider, ref, items } = stubbedProvider(() => ({ changeEntries: entries, nextSkip: 0 }));
+  const files = await provider.fetchChangedFiles(ref, { excludes: ['**/package-lock.json'], maxPatchedFiles: 500 });
+  assert.equal(items.length, 1000, 'the lockfile is not in scope, so the PR is not over the guard');
+  assert.equal(files.length, 501);
+});
+
+test('fetchChangedFiles — with no options every file is fetched: the standalone gather command is unchanged', async () => {
+  const { provider, ref, items } = stubbedProvider(() => ({ changeEntries: [edited('/src/a.cs')], nextSkip: 0 }));
+  await provider.fetchChangedFiles(ref);
+  assert.deepEqual(items, ['/src/a.cs', '/src/a.cs']);
+});

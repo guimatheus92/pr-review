@@ -1,8 +1,14 @@
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { resolvePr } from '../providers/index.js';
-import type { ChangedFile, GatherOutput, PrMetadata, PrRef } from '../types.js';
-import { applyDiffExclusions, summarizeExclusions } from '../dispatch/diff-filter.js';
+import type { ChangedFile, ChangedFilesOptions, GatherOutput, PrMetadata, PrRef } from '../types.js';
+import {
+  applyDiffExclusions,
+  DEFAULT_EXCLUDES,
+  MAX_FILES_GUARD,
+  patchPolicy,
+  summarizeExclusions,
+} from '../dispatch/diff-filter.js';
 import { lastCommentIdFrom } from '../cache/keys.js';
 import { readGatherCache, writeGatherCache } from '../cache/store.js';
 import type { PrProvider } from '../providers/types.js';
@@ -50,6 +56,19 @@ interface GatherCmdOptions {
   prUrl: string;
   outPath?: string;
   extraExcludes?: string[];
+  /**
+   * `diff_excludes` from the checkout's own `.pr-review.yaml`, loaded
+   * optimistically by the caller. Used ONLY to decide what is worth fetching
+   * (INV-FETCH-04) and never to mark a file excluded — and only once gather has
+   * the complete path list and can see the PR did not author that file
+   * (INV-TRUST-01).
+   *
+   * Without it the fetch decision would be taken over a strictly larger
+   * in-scope set than the one `earlyExitGate` finally counts, and a PR the
+   * repo's own excludes bring back under the guard would be refused for being
+   * too large — a review that works today.
+   */
+  repoExcludes?: string[];
   useCache?: boolean;
   /** Test seam; production resolves the provider from prUrl. */
   provider?: PrProvider;
@@ -107,7 +126,13 @@ function refusal(files: ChangedFile[], ref: PrRef, m: PrMetadata, reason: string
  * config (external diff, textconv, relative paths, submodule display) cannot
  * reshape the list; `-z` so non-ASCII paths arrive raw instead of C-quoted.
  */
-async function completeFromGit(files: ChangedFile[], ref: PrRef, m: PrMetadata, cwd: string): Promise<ChangedFile[]> {
+async function completeFromGit(
+  files: ChangedFile[],
+  ref: PrRef,
+  m: PrMetadata,
+  cwd: string,
+  patchOpts: ChangedFilesOptions = {},
+): Promise<ChangedFile[]> {
   const refuse = (reason: string, fetchable = true): Error => refusal(files, ref, m, reason, fetchable);
   const root = gitTopLevel(cwd);
   if (!root) throw refuse('the current directory is not inside a git repository');
@@ -194,6 +219,18 @@ async function completeFromGit(files: ChangedFile[], ref: PrRef, m: PrMetadata, 
     );
   }
 
+  // INV-FETCH-04: the spawn below is per missing file, so on the PRs that reach
+  // this path — the truncated ones, i.e. the largest — it is thousands of git
+  // processes. Skip the ones the review cannot read: excluded paths, and every
+  // path once the union is already past the guard. The policy is taken over the
+  // UNION, not over `missing`, because the guard counts the whole PR.
+  const policy = patchPolicy(union.map((file) => file.path), patchOpts);
+  const wanted = missing.filter((file) => policy.wants(file.path));
+  if (policy.omitted) {
+    process.stderr.write(
+      `[gather] ${policy.inScope} in-scope files is past the review guard — completing paths without generating patches\n`,
+    );
+  }
   // ponytail: one async spawn per missing file, 8 wide. A single pathspec-less
   // diff would need a `diff --git` header parser (headers stay C-quoted even
   // under -z) and a Windows argv budget; revisit only if a real PR makes this
@@ -201,7 +238,7 @@ async function completeFromGit(files: ChangedFile[], ref: PrRef, m: PrMetadata, 
   const limit = pLimit(PATCH_CONCURRENCY);
   try {
     await Promise.all(
-      missing.map((file) =>
+      wanted.map((file) =>
         limit(async () => {
           // Both sides of a rename, or -M sees a bare add; --literal-pathspecs so a
           // `*` or `[` in a file name is a name, not a glob.
@@ -223,10 +260,14 @@ async function completeFromGit(files: ChangedFile[], ref: PrRef, m: PrMetadata, 
   } catch (err) {
     throw refuse('git could not produce a patch for ' + range + ' in ' + root + ' (' + gitDetail(err) + ')', false);
   }
-  const patchless = missing.filter((file) => file.patch === undefined).length;
+  // Only files a patch was actually attempted for can be "patchless" for the
+  // documented reasons; the skipped ones have their own, already reported.
+  const patchless = wanted.filter((file) => file.patch === undefined).length;
+  const skipped = missing.length - wanted.length;
   process.stderr.write(
     '[gather] ' + truncationSummary(files, ref, m) + '; completed ' + missing.length + ' file(s) from git at ' + root +
-      (patchless ? ' (' + patchless + ' without a patch: binary, pure rename, mode-only or a -diff attribute)' : '') + '\n',
+      (patchless ? ' (' + patchless + ' without a patch: binary, pure rename, mode-only or a -diff attribute)' : '') +
+      (skipped ? ' (' + skipped + ' path(s) listed without a patch: excluded from review or past the file guard)' : '') + '\n',
   );
   return union;
 }
@@ -279,12 +320,38 @@ export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
     }
   }
 
-  const changedFilesProvider = await provider.fetchChangedFiles(ref);
+  // INV-FETCH-04: content is fetched only for files that can still reach a pass.
+  // The provider decides per file from this; gather re-derives the same answer
+  // below from the list it got back, so nothing has to be reported across the
+  // interface — same inputs, same policy, one definition.
+  const patchOpts: ChangedFilesOptions = {
+    excludes: [...DEFAULT_EXCLUDES, ...(opts.extraExcludes ?? [])],
+    countOnlyExcludes: opts.repoExcludes ?? [],
+    maxPatchedFiles: MAX_FILES_GUARD,
+  };
+  const changedFilesProvider = await provider.fetchChangedFiles(ref, patchOpts);
   // Incomplete (see listIsIncomplete): completed from the checkout or refused — never reviewed as-is, never cached.
   const changedFilesRaw = listIsIncomplete(changedFilesProvider, metadata)
-    ? await completeFromGit(changedFilesProvider, ref, metadata, opts.cwd ?? process.cwd())
+    ? await completeFromGit(changedFilesProvider, ref, metadata, opts.cwd ?? process.cwd(), patchOpts)
     : changedFilesProvider;
 
+  // The branch-authored half of `patchOpts` can only lower this count, never
+  // raise it, so a PR cannot talk its way past the guard with its own config.
+  const policy = patchPolicy(changedFilesRaw.map((file) => file.path), patchOpts);
+  // Two different questions, deliberately keyed on two different things.
+  //
+  // The CACHE asks "was this list assembled while withholding content?" — any
+  // yes is unsafe to store, including the mixed list a truncated GitHub PR
+  // produces (a handful of provider rows with patches, hundreds of git-completed
+  // rows without). Restored later under a wider exclusion set, that entry looks
+  // like a whole diff.
+  //
+  // The GATE asks the narrower "would a pass be handed paths with no content?",
+  // because that is the state the byte clause below would sum to zero and wave
+  // through — the same condition INV-FETCH-02 grades in `verify`. A provider
+  // that ships patches inside its listing response withheld nothing, so it is
+  // refused by the plain file-count clause, with an accurate message.
+  const patchesOmitted = policy.omitted && !changedFilesRaw.some((file) => file.patch !== undefined);
   const changedFiles = applyDiffExclusions(changedFilesRaw, opts.extraExcludes);
   const exc = summarizeExclusions(changedFiles);
   process.stderr.write(
@@ -298,9 +365,12 @@ export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
     existingComments,
     gatheredAt: new Date().toISOString(),
     changedFilesComplete: true,
+    ...(patchesOmitted ? { patchesOmitted: true as const } : {}),
   };
 
-  if (cacheAllowed) {
+  // Same discipline as changedFilesComplete: a list that could not be assembled
+  // in full is never stored as if it were.
+  if (cacheAllowed && !policy.omitted) {
     try {
       const cachePath = writeCache({ ...out, changedFiles: changedFilesRaw });
       process.stderr.write(`[gather] cached at ${cachePath}\n`);

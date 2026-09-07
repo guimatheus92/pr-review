@@ -861,3 +861,31 @@ test('file guard — a PR whose every file is excluded is refused as nothing to 
     s.restore();
   }
 });
+
+test('file guard — a contentless gather is refused BEFORE exclusions, or the byte clause sums zero and waves it through', async () => {
+  // The order is the whole point. `patchesOmitted` is set only once gather has
+  // already counted more in-scope files than the guard allows, and with every
+  // patch gone the byte clause below it adds up to 0 bytes — a clean pass. Two
+  // in-scope files here, so the count clause cannot save the gate either: only
+  // reading the flag first refuses this run.
+  const s = setup(['src/a.ts', 'src/b.ts']);
+  try {
+    mutateGather(s.gatherFile, (g) => {
+      g.patchesOmitted = true;
+      for (const f of g.changedFiles) delete f.patch;
+    });
+    const result = await runReview({
+      ...BASE,
+      homeOverride: s.home,
+      runDir: s.runDir,
+      fromGather: s.gatherFile,
+      provider: fakeProvider(),
+      selectPassesFn: () => emptySelection(),
+    });
+    assert.equal(result.exitCode, 2);
+    assert.match(result.summary, /PR is too large: more than 500 changed files, so no file content was fetched/);
+    assert.ok(existsSync(join(s.runDir, 'error.txt')));
+  } finally {
+    s.restore();
+  }
+});

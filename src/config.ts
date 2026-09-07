@@ -58,6 +58,26 @@ export interface SkillPack {
  * content, and a renamed upstream file surfaces as a visible missing-baseline
  * warning. Override or disable entirely with `skill_packs:` in yaml.
  */
+export const REPO_CONFIG_FILE = '.pr-review.yaml';
+
+/**
+ * Did the branch under review author its own configuration? A `.pr-review.yaml`
+ * the PR added, modified or renamed away cannot configure that PR's review
+ * (INV-TRUST-01) — `loadConfig` is re-run without the checkout's copy.
+ *
+ * Lives here, next to the file name it tests, because two callers need it and
+ * they sit on opposite sides of the pipeline: `runReview` asks it of a finished
+ * gather, and `runGather` asks it of the raw path list to decide whether the
+ * repo's own `diff_excludes` may narrow what is worth fetching. Case is folded
+ * and separators normalized, the same way the rule-trust gate does it — a PR
+ * committing `.PR-Review.yaml` on a case-insensitive checkout is the same file.
+ */
+export function changesRepoConfig(files: { path: string; previousPath?: string }[]): boolean {
+  const isRepoConfig = (path: string | undefined) =>
+    path?.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase() === REPO_CONFIG_FILE;
+  return files.some((file) => isRepoConfig(file.path) || isRepoConfig(file.previousPath));
+}
+
 export const DEFAULT_PACKS: SkillPack[] = [
   {
     name: 'awesome-copilot',
@@ -309,7 +329,7 @@ export function loadConfig(opts: LoadConfigOpts = {}): { config: Config; sources
     sources.global = globalPath;
   }
 
-  const repoPath = join(repoRoot, '.pr-review.yaml');
+  const repoPath = join(repoRoot, REPO_CONFIG_FILE);
   if (existsSync(repoPath)) {
     const repoRaw = readYamlFile(repoPath);
     // hosts: decides where a credential is sent, so a checkout-local map is never

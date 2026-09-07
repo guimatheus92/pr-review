@@ -3,7 +3,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { runGather } from './gather.js';
 import { commentKey, runPost, snapFindingsToDiff } from './post.js';
 import { loadAll } from '../plugins/loader.js';
-import { loadConfig, type ConfigOverrides } from '../config.js';
+import { changesRepoConfig, loadConfig, type ConfigOverrides } from '../config.js';
 import {
   parseFindingsFile,
   prepareSessionContext,
@@ -11,7 +11,7 @@ import {
   REVIEWER_OUTPUT_FILES,
   runSingleSession,
 } from '../dispatch/single-session.js';
-import { applyDiffExclusions } from '../dispatch/diff-filter.js';
+import { applyDiffExclusions, DEFAULT_EXCLUDES, MAX_FILES_GUARD, MAX_PATCH_BYTES } from '../dispatch/diff-filter.js';
 import { selectPasses, type PassRoute } from '../dispatch/pass-select.js';
 import { ensurePacks } from '../packs/sync.js';
 import { loadLinguist } from '../stack/linguist.js';
@@ -117,9 +117,8 @@ const SEVERITY_RANK: Record<string, number> = {
   NIT: 4,
 };
 
-
-const MAX_FILES_GUARD = 500;
-const MAX_PATCH_BYTES = 2_000_000;
+// MAX_FILES_GUARD / MAX_PATCH_BYTES now live in dispatch/diff-filter.ts: gather
+// asks the same guard what is worth fetching, and it cannot import this module.
 // A capability sidecar is written by a dispatched agent, so its server list is untrusted input
 // on its way into the summary. Bounded like the stack section's dependency list — and per name
 // too, because safeSummaryValue expands every non-alphanumeric character ~6x.
@@ -148,10 +147,9 @@ export function safeSummaryValue(value: unknown): string {
     .join('');
 }
 
+/** The predicate lives in `src/config.ts` beside the file name; `runGather` asks the same question of a raw path list. */
 export function gatherChangesRepoConfig(gather: GatherOutput): boolean {
-  const isRepoConfig = (path: string | undefined) =>
-    path?.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase() === '.pr-review.yaml';
-  return gather.changedFiles.some((file) => isRepoConfig(file.path) || isRepoConfig(file.previousPath));
+  return changesRepoConfig(gather.changedFiles);
 }
 
 export function samePrIdentity(requested: PrRef, saved: PrRef): boolean {
@@ -308,6 +306,13 @@ function earlyExitGate(gather: GatherOutput): string | null {
   if (!m.title.trim()) return 'PR has no title — author needs to fill it in before review.';
   if (m.description.trim().length < 10) {
     return `PR description is missing or too short (${m.description.trim().length} chars). Please write a brief description of what changed and why.`;
+  }
+  // Before the exclusions, deliberately: gather omits patches only once it has
+  // already counted more in-scope files than the guard allows, and with every
+  // patch absent the byte clause below sums to zero and would wave the run
+  // through on a PR nobody can review.
+  if (gather.patchesOmitted) {
+    return `PR is too large: more than ${MAX_FILES_GUARD} changed files, so no file content was fetched. Split into smaller PRs.`;
   }
   const inScope = gather.changedFiles.filter((f) => !f.excluded);
   if (inScope.length === 0) {
@@ -1108,6 +1113,15 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   const trustedConfig = loadConfig({
     cwd: invocationCwd, repoRoot: cwd, homeOverride: opts.homeOverride, cliOverrides, includeRepoConfig: false,
   }).config;
+  // The checkout-local config, loaded before gather so its `diff_excludes` can
+  // tell gather what is not worth fetching (INV-FETCH-04). Whether it may be
+  // TRUSTED is unknowable until the file list exists, so gather takes it as
+  // count-only: it can make gather fetch more, never less. Hoisted rather than
+  // added — the same value is what `config` resolves to below on the normal
+  // path, so this is one load where there used to be one, not two.
+  const optimisticConfig = loadConfig({
+    cwd: invocationCwd, repoRoot: cwd, homeOverride: opts.homeOverride, cliOverrides,
+  }).config;
   const { provider, ref } = resolvePr(opts.prUrl, trustedConfig.hosts, opts.provider);
   const outDir = opts.runDir ?? ensureRunDir(ref);
   if (opts.runDir) mkdirSync(opts.runDir, { recursive: true });
@@ -1130,13 +1144,12 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
         prUrl: opts.prUrl,
         useCache: opts.useCache,
         extraExcludes: trustedConfig.diffExcludes,
+        repoExcludes: optimisticConfig.diffExcludes,
         provider,
         cwd,
       });
   const repoConfigChanged = gatherChangesRepoConfig(gather);
-  const config = repoConfigChanged
-    ? trustedConfig
-    : loadConfig({ cwd: invocationCwd, repoRoot: cwd, homeOverride: opts.homeOverride, cliOverrides }).config;
+  const config = repoConfigChanged ? trustedConfig : optimisticConfig;
   gather = { ...gather, changedFiles: applyDiffExclusions(gather.changedFiles, config.diffExcludes) };
   if (repoConfigChanged) {
     process.stderr.write('[config] .pr-review.yaml changed by this PR — checkout-local configuration ignored as untrusted\n');

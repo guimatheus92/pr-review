@@ -62,6 +62,18 @@ function fileEnv() {
   return fileEnvCache;
 }
 /** `process.env` first, then the local file. Never logs the value. */
+/**
+ * The credential files' values, for handing to a child process.
+ *
+ * The product's own providers read `process.env` and must never learn about a
+ * test credential file — so the harness injects, rather than the CLI reading.
+ * Environment variables still win: the caller spreads `process.env` last.
+ */
+export function credentialEnv() {
+  return { ...fileEnv() };
+}
+
+/** `process.env` first, then the credential files. Never logs the value. */
 function credential(...names) {
   for (const name of names) {
     if (process.env[name]) return process.env[name];

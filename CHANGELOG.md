@@ -4,6 +4,15 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+### Changed
+- **The acceptance matrix distinguishes BLOCKED from FAIL.** A cell that cannot run — today, the Copilot runtime with its premium requests exhausted — reports `🚧 blocked` with the reason and is counted apart from the passes, never as a product failure. With zero premium requests the CLI refuses every capable model, `auto` falls back to one that cannot carry a nine-pass orchestration, and `INV-DEL-01` then correctly refuses to post a partial review; reporting that as FAIL sends someone hunting a bug that does not exist. The probe is a courtesy — if it cannot answer, the cell runs and the real assertions speak.
+
+### Fixed
+- **The acceptance control fixture was not actually clean.** `greetHandler` exists so `must_not_find` fails if a reviewer flags correct code, but it carried a doc comment ("greet a user by name") that its body contradicted (it greets by email). The first live cell flagged the mismatch, correctly, and the assertion failed on a real defect in the control rather than on a false positive.
+
+### Documentation
+- The mistakes this work cost, written where the next person hits them: `AGENTS.md` on how a green test can encode the defect (an assertion transcribing current output, a fixture comparing shapes the product never writes, a control that answers its own question) and on scripted edits that slice ranges or pass through a shell heredoc; `evals/acceptance/README.md` on re-seeding without rewriting the base branch, on the Azure DevOps directory switch, on the GitLab granular-PAT screen, and on BLOCKED vs FAIL; and the acceptance workflow on why its dry-run flag is written `== false` (Actions treats `''` as falsy, so the natural-looking form always dry-runs).
+
 ## [0.12.0] — 2026-09-05
 
 ### Added

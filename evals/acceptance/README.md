@@ -38,6 +38,15 @@ that can read the answer out of the diff satisfies `must_find` without applying
 any knowledge at all, and the suite goes green while proving nothing. The
 defects are ordinary-looking code; what they are is documented *here* instead.
 
+**The control must be genuinely correct, not merely intended to be.** `greetHandler`
+exists so `must_not_find` fails if the reviewer flags clean code — which only
+works while the code really is clean. It shipped with a doc comment reading
+"greet a user by name" over a body that greets by email; the first live cell
+flagged the mismatch, correctly, and the assertion failed. The reviewer was
+right and the fixture was wrong. When a `must_not_find` fires, read the finding
+before touching the regex: the assertion catching a real defect in the control
+is the assertion doing its job.
+
 ## One-time setup
 
 Only the account and repo creation is manual. Everything after is one command.
@@ -45,8 +54,20 @@ Only the account and repo creation is manual. Everything after is one command.
 1. **Azure DevOps** — create an organisation at <https://dev.azure.com>.
    The free tier is unchanged (5 Basic users, unlimited private repos), but
    creating a *new* organisation now requires an active Azure subscription;
-   within the free tier the cost is still $0. Create a **public** project
-   `acceptance` and an empty repo `pr-review-acceptance`.
+   within the free tier the cost is still $0. Create a project `acceptance` and
+   an empty repo `pr-review-acceptance`.
+
+   If "Continue" does nothing on the creation form, the answer is almost
+   certainly **Switch directory** — the picker has to be on the Entra tenant
+   that owns the subscription, and it silently defaults to another one you
+   belong to. Owner on the subscription, the spending limit, and the quota id
+   are all red herrings here; they were each diagnosed confidently and each was
+   wrong. `az account show --query '{sub:id, tenant:tenantId}'` tells you which
+   tenant the subscription actually lives in.
+
+   An organisation policy may forbid public projects, in which case make it
+   private — the runner clones with a credential, so nothing depends on the
+   fixtures being public.
    PAT (User settings → Personal access tokens) with:
    - **Code** → Read & write
    - **Pull Request Threads** → Read & write
@@ -58,6 +79,12 @@ Only the account and repo creation is manual. Everything after is one command.
    least the **Developer** role on the project.
    Use a *personal* access token: project access tokens require Premium on
    gitlab.com.
+
+   If the token form shows no `api` checkbox, you are on the newer **granular**
+   PAT screen, which lists resources (Merge requests, Repository, …) instead of
+   the classic scopes. Either switch it back to the standard scope list, or
+   grant **Merge requests: read+write** plus **Repository: read** — the same
+   reach under a different name.
 
 3. **GitHub** — create an empty **public** repo `pr-review-acceptance`.
    For CI only, a fine-grained PAT scoped to that repo with **Pull requests:
@@ -77,6 +104,14 @@ Only the account and repo creation is manual. Everything after is one command.
    It pushes `main`, force-pushes one defect branch per runtime, opens the pull
    requests, and writes their URLs back into `matrix.yaml`. Idempotent — re-run
    it whenever the fixture content changes or a PR gets closed by accident.
+
+   **Idempotent means it clones the existing history, never recreates it.** The
+   first version ran `git init` and force-pushed a fresh `main`; every open PR
+   pointed at commits that no longer had a merge base, so GitHub closed all of
+   them the moment it ran a second time. The defect *branches* are force-pushed
+   (they are derived content), `main` never is. Anything that rewrites the base
+   branch is not a re-seed, it is a new estate — and it takes the pull requests
+   with it.
 
 ## Running it
 
@@ -136,6 +171,25 @@ exists — so a fork PR can never reach them.
 | `defects/docs/notes.md` | Noise, and it must not say so: a fixture that states its own expected outcome is telling the reviewer the answer. |
 | `defects/_package-lock.json` | Must be dropped by `applyDiffExclusions`. |
 | `acc/wide` (GitLab only) | 101 files, so GitLab reports `changes_count: "100+"` and the truncated-file-list gate actually fires. GitHub needs 3000+ files and Azure DevOps reports no count at all, so the gate is only reachable here. |
+
+## BLOCKED is not FAIL
+
+A cell that could not run reports `🚧 blocked` and is counted apart from the
+passes — never folded into them, never rendered as a failure.
+
+Today the only blocker is the Copilot runtime with its premium requests
+exhausted: `runtimeBlockedReason` in `scripts/acceptance.mjs` reads
+`quota_snapshots.premium_interactions` before spending the cell. With zero
+remaining, the CLI refuses every capable model, `--model auto` resolves to a
+small non-premium one, and that model declares `DONE` two dispatches into a
+nine-pass orchestration. `INV-DEL-01` then correctly refuses to post a partial
+review, and the cell fails — on a product that behaved exactly as specified.
+
+That distinction is the whole point. Reported as FAIL it reads as a pr-review
+bug, and someone spends a day looking for it; it was reported that way once, in
+those words, and the actual cause was a quota counter. The probe is a courtesy —
+if it cannot answer (no `gh`, no network) the cell runs and the real assertions
+speak. `--runtime claude` is never blocked by it.
 
 ## Resetting
 

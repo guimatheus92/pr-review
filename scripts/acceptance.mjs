@@ -133,6 +133,46 @@ function checkoutFor(provider) {
   return dir;
 }
 
+/**
+ * Can this runtime actually do the work right now?
+ *
+ * A cell that cannot run is BLOCKED, never FAIL. Reporting a product defect
+ * because an account is out of quota is the same lie `verify` refuses when it
+ * insists a SKIP carry its reason — and the more expensive lie, because it
+ * sends someone hunting a bug that does not exist. I made exactly that call
+ * once in this repo's history and told the user the Copilot CLI "reports
+ * success without executing what it dispatched"; the truth was zero premium
+ * requests on the account.
+ *
+ * Observed: with `premium_interactions` exhausted the Copilot CLI rejects every
+ * capable model and `auto` resolves to a small non-premium one, which ends a
+ * 9-pass orchestration after two dispatches. INV-DEL-01 then correctly refuses
+ * to post a partial review. Nothing in that chain is a pr-review failure.
+ */
+function runtimeBlockedReason(runtime) {
+  if (runtime !== 'copilot') return null;
+  try {
+    const token = execFileSync('gh', ['auth', 'token'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (!token) return null;
+    const raw = execFileSync(
+      'curl',
+      ['-s', '-H', `Authorization: token ${token}`, '-H', 'Editor-Version: copilot-cli', 'https://api.github.com/copilot_internal/user'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+    const parsed = JSON.parse(raw);
+    const quota = parsed?.quota_snapshots?.premium_interactions;
+    if (!quota || quota.unlimited) return null;
+    const remaining = Number(quota.remaining ?? quota.percent_remaining ?? 0);
+    if (remaining > 0 || quota.overage_permitted) return null;
+    const resets = parsed.quota_reset_date ?? 'the plan reset date';
+    return `Copilot premium requests exhausted (0 remaining, overage not permitted). Every capable model is refused and \`auto\` falls back to a non-premium one that cannot carry a multi-pass orchestration. Resets ${resets}.`;
+  } catch {
+    // The probe is a courtesy, not a gate. If it cannot answer, run the cell and
+    // let the real assertions speak.
+    return null;
+  }
+}
+
 /** The run `verify` resolved for this PR — the runner never guesses a run dir. */
 function verifyRun(prUrl) {
   let raw = '';
@@ -165,6 +205,10 @@ function readArtifact(runDir, name) {
 async function runDefectsCell(provider, runtime) {
   const prUrl = matrix.providers[provider]?.pulls?.[runtime];
   const failures = [];
+  const blocked = runtimeBlockedReason(runtime);
+  if (blocked) {
+    return { provider, runtime, case: 'defects', ok: true, blocked, failures: [], prUrl };
+  }
   if (!prUrl) {
     return { provider, runtime, case: 'defects', ok: false, failures: ['no PR URL in matrix.yaml — run scripts/acceptance-seed.mjs'] };
   }
@@ -343,7 +387,13 @@ for (const provider of wantProviders) {
       results.push({ provider, runtime, case: 'defects', ok: false, failures: [safeLogValue(err.message)], durationMs: Date.now() - began });
     }
     const last = results[results.length - 1];
-    console.log(last.ok ? `✓ ${provider}/${runtime}` : `✗ ${provider}/${runtime}\n    ${last.failures.join('\n    ')}`);
+    console.log(
+      last.blocked
+        ? `🚧 ${provider}/${runtime} BLOCKED — ${last.blocked}`
+        : last.ok
+          ? `✓ ${provider}/${runtime}`
+          : `✗ ${provider}/${runtime}\n    ${last.failures.join('\n    ')}`,
+    );
   }
 }
 
@@ -391,7 +441,9 @@ for (const provider of PROVIDERS) {
 }
 
 const cell = (r) =>
-  r.skipped
+  r.blocked
+    ? `| ${r.provider} | ${r.runtime} | ${r.case} | 🚧 blocked | - | - | ${r.blocked.replace(/\|/g, '\\|')} |`
+    : r.skipped
     ? `| ${r.provider} | ${r.runtime} | ${r.case} | ⏭️ skip | - | - | ${r.skipped} |`
     : `| ${r.provider} | ${r.runtime} | ${r.case} | ${r.ok ? '✅ pass' : '❌ fail'} | ${r.findings ?? '-'} | ${r.posted ?? '-'} | ${
         r.ok ? '' : r.failures.join('<br>').replace(/\|/g, '\\|')
@@ -415,5 +467,13 @@ if (results.length === 0) {
   console.error('no cell ran — check --provider / --runtime / --case against the matrix');
   process.exit(1);
 }
-console.log(failed.length === 0 ? `all ${results.length} cell(s) passed` : `${failed.length}/${results.length} cell(s) FAILED`);
+// A blocked cell proved nothing, so it is counted apart from the passes rather
+// than folded into them — a tally that hides it is how "we ran the matrix"
+// quietly comes to mean less than it sounds.
+const blockedCells = results.filter((r) => r.blocked);
+console.log(
+  failed.length === 0
+    ? `${results.length - blockedCells.length} cell(s) passed, ${blockedCells.length} blocked`
+    : `${failed.length}/${results.length - blockedCells.length} cell(s) FAILED, ${blockedCells.length} blocked`,
+);
 process.exit(failed.length === 0 ? 0 : 1);

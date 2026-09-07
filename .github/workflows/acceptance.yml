@@ -93,6 +93,11 @@ jobs:
 
       - name: Run the acceptance cell
         run: |
+          # The dry-run flag is written `inputs.publish == false && ... || ''`
+          # and not the natural-looking `inputs.publish && '' || '--dry-run'`,
+          # which always yields '--dry-run': Actions treats '' as falsy, so the
+          # true branch falls through to the false one and publish=true would
+          # silently never post.
           node scripts/acceptance.mjs \
             --provider "${{ matrix.provider }}" \
             --runtime copilot \

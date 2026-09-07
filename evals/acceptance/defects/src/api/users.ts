@@ -7,13 +7,11 @@ interface User {
   email: string;
 }
 
-/** Look a user up by id and return its public fields. */
 export async function getUserHandler(req: Request, res: Response): Promise<Response> {
   const result = await query<User>('SELECT id, email FROM users WHERE id = ' + req.params.id);
   return res.json(result.rows[0] ?? null);
 }
 
-/** Greet a user by name. */
 export async function greetHandler(req: Request, res: Response): Promise<Response> {
   audit.log(req);
   const result = await q<User>('SELECT email FROM users WHERE id = $1', [req.params.id]);

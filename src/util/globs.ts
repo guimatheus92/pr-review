@@ -17,7 +17,6 @@ const NEVER = /(?!)/;
 const MAX_PATTERN_LENGTH = 512;
 /** `**` compiles to `.*`; several of them in one anchored pattern is what backtracks. Real patterns use one or two. */
 const MAX_WILD_SEGMENTS = 4;
-const rejected = new Set<string>();
 
 /**
  * Refuse a pattern that would cost more to match than it can be worth.
@@ -38,12 +37,11 @@ function globToRegex(pattern: string): RegExp {
   const hit = compiled.get(pattern);
   if (hit) return hit;
   if (tooComplex(pattern)) {
-    if (!rejected.has(pattern)) {
-      rejected.add(pattern);
-      process.stderr.write(
-        `[globs] ignoring an over-complex glob (${pattern.length} chars, ${pattern.split('**').length - 1} '**' segments): matching it would cost more than the pattern can be worth\n`,
-      );
-    }
+    // Warned once per pattern without a second set to track it: the line below
+    // caches NEVER, so every later call returns at the lookup above.
+    process.stderr.write(
+      `[globs] ignoring an over-complex glob (${pattern.length} chars, ${pattern.split('**').length - 1} '**' segments): matching it would cost more than the pattern can be worth\n`,
+    );
     compiled.set(pattern, NEVER);
     return NEVER;
   }

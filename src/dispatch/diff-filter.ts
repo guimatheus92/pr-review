@@ -56,6 +56,16 @@ export function applyDiffExclusions(files: ChangedFile[], extraExcludes: string[
   });
 }
 
+/** The answer `patchPolicy` returns: per file, globally, and the count it was decided on. */
+export interface PatchPolicy {
+  /** Can this file's content still reach a review pass? */
+  wants(path: string): boolean;
+  /** True when the in-scope count already exceeds the guard: no file is worth fetching. */
+  omitted: boolean;
+  /** In-scope count the decision was taken over — for the log line that explains the skip. */
+  inScope: number;
+}
+
 /**
  * Which of these paths are worth fetching content for (INV-FETCH-04) — the one
  * question both cost sites ask: the Azure DevOps provider before spending two
@@ -72,15 +82,6 @@ export function applyDiffExclusions(files: ChangedFile[], extraExcludes: string[
  * folded in here, so `fetchChangedFiles(ref)` with no options still fetches
  * everything and the standalone `gather` command is unchanged.
  */
-export interface PatchPolicy {
-  /** Can this file's content still reach a review pass? */
-  wants(path: string): boolean;
-  /** True when the in-scope count already exceeds the guard: no file is worth fetching. */
-  omitted: boolean;
-  /** In-scope count the decision was taken over — for the log line that explains the skip. */
-  inScope: number;
-}
-
 export function patchPolicy(paths: string[], opts: ChangedFilesOptions = {}): PatchPolicy {
   const trusted = opts.excludes ?? [];
   // Counting uses the wider list, suppressing uses only the trusted one — see

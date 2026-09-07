@@ -50,12 +50,26 @@ assertion catching a real defect in the control is the assertion working.
 That was the first shape, and it is unachievable: with 17 reviewers and ~88 raw
 findings on a six-file PR, *something* true can be said about any code. Written
 that way, the check asserts the reviewer is not thorough — the opposite of the
-property worth having. What must actually hold is narrower: the control is not
-flagged **for either planted defect**. That keeps the pair causal (the SQLi and
-audit findings track the defect, not the file) without demanding silence. The
-patterns are scoped to those two classes and anchored to the finding's title,
-because a correct finding about the broken handler may well name the good one
-while contrasting the two — observed on the first live cell.
+property worth having. What must hold is narrower: the control is not flagged
+**for either planted defect**, which is what keeps `must_find` causal.
+
+**And it is asserted on `file:line`, not on wording.** Four regex shapes were
+tried in `expected.yaml` and all four failed on *correct* reviews:
+
+| Shape | Failed on |
+|---|---|
+| `greetHandler` anywhere | a correct finding about the broken handler that named the good one while contrasting them |
+| the same, anchored to the title | `"getUserHandler does not audit-log, but greetHandler does"` |
+| title anchor + defect class | the same finding — its title names both |
+| names greetHandler but not getUserHandler | SQL-injection findings whose body cited greetHandler as the positive contrast and identified the broken code by snippet, never by name |
+
+Which function a finding *mentions* says nothing about which one it is *about*.
+Where it is anchored says exactly that. `controlFalsePositives` in
+`scripts/acceptance.mjs` reads `greetHandler`'s line range out of the fixture
+source — so editing the fixture cannot silently retarget the check — and fails
+the cell on any finding anchored inside that range citing SQLi or the audit
+rule. A missing control handler fails too, rather than passing an assertion that
+has quietly stopped existing.
 
 ## One-time setup
 

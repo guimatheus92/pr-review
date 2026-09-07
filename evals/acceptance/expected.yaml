@@ -19,6 +19,19 @@ must_find:
 # One generic "this file has problems" finding must not satisfy all three.
 distinct_findings: true
 
+# NOTE: the control-handler assertion does NOT live here.
+#
+# It was tried four times as a regex over finding text and failed four times,
+# each time on a CORRECT review: a title anchor caught "getUserHandler does not
+# audit-log, but greetHandler does"; requiring both names caught SQL-injection
+# findings whose body cited greetHandler as the positive contrast without
+# naming the broken function at all. Prose is the wrong instrument for "is this
+# finding ABOUT the control" — the answer is where the finding is anchored, not
+# which words it uses.
+#
+# `controlFalsePositives` in scripts/acceptance.mjs asserts it on file:line,
+# computing greetHandler's range from the fixture source so it cannot drift.
+
 must_not_find:
   # The control handler must not be flagged for EITHER planted defect: it
   # parameterises its query and it calls audit.log. That is what makes the
@@ -37,20 +50,10 @@ must_not_find:
   # actually meaningful: the SQLi and audit findings track the defect, not the
   # file.
   #
-  # Three lookaheads. The middle one is the load-bearing part and took three
-  # live cells to arrive at: a finding that names BOTH handlers is comparing
-  # them, and the subject of a comparison is the broken one. Anchoring on the
-  # title instead ("^[^\n]*greetHandler") failed on
-  # "getUserHandler does not audit-log, but greetHandler does" — a correct
-  # finding, flagged as a false positive, which is the failure mode that gets
-  # an assertion deleted rather than fixed.
-  #
-  # Known blind spot, stated rather than papered over: a finding that wrongly
-  # includes the control AND names the broken handler in the same breath slips
-  # through. That is the right trade — this check crying wolf on correct
-  # reviews is a certainty, that miss is a maybe.
-  - "^(?=[\\s\\S]*greetHandler)(?![\\s\\S]*getUserHandler)(?=[\\s\\S]*(sql injection|parameteri[sz]|string concatenation|interpolat))"
-  - "^(?=[\\s\\S]*greetHandler)(?![\\s\\S]*getUserHandler)(?=[\\s\\S]*(ACC-LOG-002|audit[ .\\-]log|missing audit))"
+  # Nothing text-matched here today. The control assertion moved to
+  # `controlFalsePositives` (see the note above); this list stays because it is
+  # the right home for any expectation that genuinely is about wording.
+  []
 
 stack:
   include:

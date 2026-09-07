@@ -186,6 +186,57 @@ async function runtimeBlockedReason(runtime) {
 }
 
 /**
+ * Findings that flag the CONTROL handler for one of the planted defects.
+ *
+ * The control (`greetHandler`) parameterises its query and calls `audit.log`,
+ * so a finding anchored inside it that cites SQL injection or the audit rule is
+ * a false positive — and that is what keeps `must_find` causal rather than
+ * vacuous: without it, a fixture broken enough to flag everything would pass.
+ *
+ * Asserted on file:line, not on wording. Four regex shapes were tried in
+ * expected.yaml and all four failed on CORRECT reviews — the last one on
+ * SQL-injection findings whose body cited greetHandler as the positive contrast
+ * without naming the broken function at all. Which function a finding *mentions*
+ * says nothing about which one it is *about*; where it is anchored says exactly
+ * that. The range is read from the fixture source so editing the fixture cannot
+ * silently retarget the assertion.
+ */
+const PLANTED_DEFECTS = [
+  ['SQL injection', /sql injection|parameteri[sz]|string concatenation|ACC-SQL-001/i],
+  ['the missing audit call', /ACC-LOG-002|audit[ .\-]log|missing audit/i],
+];
+
+function controlFalsePositives(findings) {
+  const source = join(ACCEPTANCE, 'defects', 'src', 'api', 'users.ts');
+  const lines = readFileSync(source, 'utf8').split(/\r?\n/);
+  const start = lines.findIndex((l) => /export async function greetHandler/.test(l));
+  if (start === -1) {
+    // The fixture no longer has the control. That is not a pass — it is the
+    // assertion quietly ceasing to exist.
+    return ['the control handler `greetHandler` is gone from the fixture — the false-positive assertion cannot run'];
+  }
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (lines[i] === '}') {
+      end = i;
+      break;
+    }
+  }
+  const out = [];
+  for (const f of findings) {
+    if (!f.file?.endsWith('src/api/users.ts')) continue;
+    const line = Number(f.line);
+    if (!Number.isInteger(line) || line < start + 1 || line > end + 1) continue;
+    for (const [what, re] of PLANTED_DEFECTS) {
+      if (re.test(`${f.title ?? ''}\n${f.body ?? ''}`)) {
+        out.push(`false positive on the control: ${what} reported at ${f.file}:${line} (greetHandler, lines ${start + 1}-${end + 1}) — ${safeLogValue(String(f.title ?? '').slice(0, 120))}`);
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * The newest run directory for a PR, by mtime.
  *
  * By mtime and not by name: the directory name ends in a timestamp, so sorting
@@ -351,6 +402,7 @@ async function runDefectsCell(provider, runtime) {
   for (const { pattern, finding } of matchExpectedFindings(expected.must_not_find ?? [], findings, false)) {
     if (finding) failures.push(`must_not_find matched: ${safeLogValue(pattern)} → ${safeLogValue(finding.title)}`);
   }
+  failures.push(...controlFalsePositives(findings));
 
   const companions = readArtifact(runDir, 'companions.json');
   if (!companions) failures.push('companions.json is missing');

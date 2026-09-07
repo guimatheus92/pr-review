@@ -175,7 +175,11 @@ async function runDefectsCell(provider, runtime) {
   if (resetOnly) return { provider, runtime, case: 'defects', ok: true, failures: [], prUrl, resetOnly: true };
   const cwd = checkoutFor(provider);
 
-  const argv = [CLI, 'review', prUrl, '--no-cache', '--runtime', runtime, ...(dryRun ? ['--dry-run'] : [])];
+  // --no-codex: the matrix proves providers x runtimes. Codex is an optional
+  // sibling, and an enabled-but-failing one blocks completion — so a Codex
+  // outage (a usage limit, say) would fail all six cells for a reason that has
+  // nothing to do with what they test. Codex has its own coverage.
+  const argv = [CLI, 'review', prUrl, '--no-cache', '--no-codex', '--runtime', runtime, ...(dryRun ? ['--dry-run'] : [])];
   let reviewExit = 0;
   try {
     run(process.execPath, argv, { cwd, stdio: ['ignore', 'inherit', 'inherit'] });

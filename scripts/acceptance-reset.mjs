@@ -61,7 +61,7 @@ function fileEnv() {
   }
   return fileEnvCache;
 }
-/** `process.env` first, then the local file. Never logs the value. */
+
 /**
  * The credential files' values, for handing to a child process.
  *
@@ -187,7 +187,23 @@ export function parsePrUrl(url) {
 }
 
 async function api(url, token, init = {}) {
-  const res = await fetch(url, {
+  // node's network errors are the bare string "fetch failed", which tells a cell
+  // report nothing about which provider call died. Name it.
+  let res;
+  try {
+    res = await apiFetch(url, token, init);
+  } catch (cause) {
+    throw new Error(`${init.method ?? 'GET'} ${url} failed to connect: ${cause?.message ?? cause}`, { cause });
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`${init.method ?? 'GET'} ${url} → ${res.status} ${res.statusText} ${body.slice(0, 300)}`);
+  }
+  return res;
+}
+
+function apiFetch(url, token, init = {}) {
+  return fetch(url, {
     ...init,
     headers: {
       authorization: authHeader(token),
@@ -197,11 +213,6 @@ async function api(url, token, init = {}) {
       ...(init.headers ?? {}),
     },
   });
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`${init.method ?? 'GET'} ${url} → ${res.status} ${res.statusText} ${body.slice(0, 300)}`);
-  }
-  return res;
 }
 
 async function githubPaged(url, token) {

@@ -94,6 +94,14 @@ This is the only thing that exercises Azure DevOps and GitLab for real, and the 
 
 1. `node scripts/release.mjs <patch|minor|major|x.y.z>` — bumps the version in every manifest (`package.json`, `package-lock.json`, `plugin.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`), verifies no stale version string survives, rolls the CHANGELOG, rebuilds the bundle, commits, and tags.
 2. `git push --follow-tags`.
-3. Users update via `/plugin install pr-review@pr-review` (inside `copilot` or `claude`).
+3. **Create the GitHub Release** — `release.mjs` stops at the tag, and a pushed tag does **not** appear on the `/releases` page. Every version since v0.4.0 has one, named `vX.Y.Z` with the CHANGELOG section as its body:
+
+   ```bash
+   # extract this version's CHANGELOG section, then:
+   gh release create vX.Y.Z --title "vX.Y.Z" --notes-file <file> --verify-tag
+   ```
+
+   `--verify-tag` makes the command fail rather than invent a tag if step 2 was skipped.
+4. Users update via `/plugin install pr-review@pr-review` (inside `copilot` or `claude`).
 
 No npm publish — distribution is via the Copilot CLI / Claude Code plugin marketplaces only.

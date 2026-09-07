@@ -21,6 +21,12 @@ providers:
     pulls:
       claude: https://dev.azure.com/guimatheus92/acceptance/_git/pr-review-acceptance/pullrequest/1
       copilot: https://dev.azure.com/guimatheus92/acceptance/_git/pr-review-acceptance/pullrequest/2
+    # Azure DevOps-only: 501 files, one past the 500-file review guard, so the
+    # run is refused and INV-FETCH-04 says nothing may be fetched for it. ADO is
+    # the only provider where that costs anything — two whole-file getItem calls
+    # per changed file, ~1002 requests before #27. See runNoFetchCell in
+    # scripts/acceptance.mjs.
+    huge:
 
   gitlab:
     clone: https://gitlab.com/guimatheus92/pr-review-acceptance.git
@@ -42,3 +48,4 @@ branches:
   claude: acc/defects-claude
   copilot: acc/defects-copilot
   wide: acc/wide
+  huge: acc/huge

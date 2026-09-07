@@ -29,6 +29,12 @@ const PROVIDERS = ['github', 'azuredevops', 'gitlab'];
 // changes_count was measured exact at 1200 files on this estate, so the "N+"
 // form the truncation flag keys on never appears. See runFilelistCell.
 const WIDE_FILES = 101;
+// One past MAX_FILES_GUARD (500), so the PR is refused and INV-FETCH-04 says
+// nothing may be fetched for it. Azure DevOps only: it is the provider that
+// pays two whole-file getItem calls per changed file, so it is the only one
+// where "did we fetch?" is worth thousands of requests. On GitHub or GitLab the
+// same branch would prove nothing — their patches arrive inside the listing.
+const HUGE_FILES = 501;
 
 const argv = process.argv.slice(2);
 const dryRun = argv.includes('--dry-run');
@@ -226,7 +232,7 @@ async function seedProvider(provider, matrix) {
 
     const urls = {};
     for (const [runtime, branch] of Object.entries(matrix.branches)) {
-      if (runtime === 'wide') continue;
+      if (runtime === 'wide' || runtime === 'huge') continue;
       git(['checkout', '-q', '-B', branch, 'main'], work, secrets);
       copyTree(join(ACCEPTANCE, 'defects'), work);
       commitTree(work, 'feat: add user lookup and the nightly report job', secrets);
@@ -259,7 +265,28 @@ async function seedProvider(provider, matrix) {
       git(['checkout', '-q', 'main'], work, secrets);
     }
 
-    return { urls, wide };
+    // Azure DevOps only: a PR past the 500-file guard, so the run is refused and
+    // INV-FETCH-04 says not one byte of content may be fetched for it. ADO is
+    // the only provider where that costs anything — two whole-file getItem calls
+    // per changed file, ~1002 requests before #27.
+    let huge = null;
+    if (provider === 'azuredevops') {
+      const branch = matrix.branches.huge;
+      git(['checkout', '-q', '-B', branch, 'main'], work, secrets);
+      mkdirSync(join(work, 'huge'), { recursive: true });
+      for (let i = 0; i < HUGE_FILES; i++) {
+        writeFileSync(join(work, 'huge', `f${String(i).padStart(4, '0')}.txt`), `line ${i}\n`, 'utf8');
+      }
+      commitTree(work, `chore: ${HUGE_FILES} files to exceed the review guard`, secrets);
+      if (!dryRun) {
+        push(branch);
+        huge = await ensurePr(provider, cfg, token, branch, `Acceptance: ${HUGE_FILES}-file change (no-fetch guard)`);
+        console.log(`  ${provider}/huge: ${huge}`);
+      }
+      git(['checkout', '-q', 'main'], work, secrets);
+    }
+
+    return { urls, wide, huge };
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
@@ -283,6 +310,7 @@ for (const provider of only) {
       matrix.providers[provider].pulls[runtime] = url;
     }
     if (result.wide) matrix.providers[provider].wide = result.wide;
+    if (result.huge) matrix.providers[provider].huge = result.huge;
   } catch (err) {
     failures++;
     console.error(`✗ ${provider}: ${err.message}`);
@@ -314,6 +342,11 @@ if (!dryRun && failures === 0) {
     if (wide) {
       const url = matrix.providers[current]?.wide;
       return url ? `${wide[1]}${url}` : line;
+    }
+    const huge = /^( {4}huge:\s*)(.*)$/.exec(line);
+    if (huge) {
+      const url = matrix.providers[current]?.huge;
+      return url ? `${huge[1]}${url}` : line;
     }
     return line;
   });

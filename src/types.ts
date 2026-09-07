@@ -74,8 +74,8 @@ export interface ChangedFile {
  *
  * Providers whose listing endpoint already carries the patch (GitHub, GitLab)
  * ignore this: there is nothing to save. Azure DevOps synthesizes its patch
- * from two whole-file `getItem` calls, so this is the difference between ~6000
- * requests and none on a PR that is about to be refused for being too large.
+ * from two whole-file `getItem` calls, so this is the difference between hundreds
+ * or thousands of requests and none on a PR about to be refused as too large.
  */
 export interface ChangedFilesOptions {
   /** Trusted diff-exclusion globs. A matching path is listed without a patch — `applyDiffExclusions` would discard it moments later anyway. */

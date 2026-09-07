@@ -811,3 +811,27 @@ test('runGather — an entry that withheld nothing is still served when the excl
   );
   assert.equal(fetches(), 0, 'served from cache, as before');
 });
+
+test('runGather — patchesRequired lifts the file guard: `pr-review post` needs the map, it is not reviewing', async () => {
+  // `pr-review post` gathers ONLY to build buildValidLinesMap. With the guard
+  // applied, a >500-file PR hands it an empty map: nothing snaps, GitHub has no
+  // anchor to re-anchor to, and every comment posts at whatever line the
+  // reviewer named — the 422-on-the-batch failure that call exists to prevent.
+  const { provider } = fakePaying({ ...META, changedFileCount: 501 }, srcPaths(501));
+  const result = await withNoRepoDir(async (cwd) =>
+    runGather({ ...gatherOpts(provider), cwd, patchesRequired: true, writeGatherCacheFn: () => 'x' }),
+  );
+  assert.ok(result.changedFiles.every((f) => f.patch), 'every patch fetched despite 501 in-scope files');
+  assert.equal(result.patchesOmitted, undefined);
+});
+
+test('runGather — without patchesRequired the same PR is path-only: the guard is the default, not the exception', async () => {
+  // The control. `review` and `gather` both take the guard; only a caller that
+  // says it needs the content opts out.
+  const { provider } = fakePaying({ ...META, changedFileCount: 501 }, srcPaths(501));
+  const result = await withNoRepoDir(async (cwd) =>
+    runGather({ ...gatherOpts(provider), cwd, writeGatherCacheFn: () => 'x' }),
+  );
+  assert.ok(result.changedFiles.every((f) => f.patch === undefined));
+  assert.equal(result.patchesOmitted, true);
+});

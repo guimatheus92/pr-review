@@ -215,8 +215,14 @@ on its first 100 files, from 0.6 through 0.10, because `$top` defaults to 100.
 
 **Always:** `pr-review-gather.json` carries the PR's title, description, author,
 state, draft flag, base and head SHA and branch, linked work items, every
-changed file with its patch, and the existing comment thread. Every pass reads
-that artifact; nothing in the pipeline re-fetches per pass.
+changed file — with its patch wherever one can exist and the run needs it, see
+INV-FETCH-04 — and the existing comment thread. Every pass reads that artifact;
+nothing in the pipeline re-fetches per pass.
+
+The patch is absent in exactly three cases, none of which is a pass reviewing
+blind: a file that has no diff anywhere (binary, pure rename, mode-only), a path
+the diff exclusions drop, and a run already refused as too large, which fetches
+no content at all and is marked `patchesOmitted`.
 
 **Why:** A reviewer missing the description or the existing discussion re-raises
 what was already answered, and per-pass fetching multiplies rate-limit exposure

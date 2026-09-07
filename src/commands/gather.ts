@@ -84,6 +84,18 @@ interface GatherCmdOptions {
    * in `src/util/globs.ts` rather than here, because every caller wants it.
    */
   repoExcludes?: string[];
+  /**
+   * The caller needs every in-scope patch, whatever the file count — so the
+   * too-many-files guard does not apply to it.
+   *
+   * `pr-review post` is the case: it gathers ONLY to build the valid-line map
+   * (`buildValidLinesMap`), and an empty map means no finding can snap and
+   * GitHub has no anchor to re-anchor to, so every comment posts at whatever
+   * line the reviewer named — the 422-on-the-batch failure that call exists to
+   * prevent. It is not reviewing the PR, so "the review is refused anyway" does
+   * not hold for it.
+   */
+  patchesRequired?: boolean;
   useCache?: boolean;
   /** Test seam; production resolves the provider from prUrl. */
   provider?: PrProvider;
@@ -311,7 +323,7 @@ export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
   const patchOpts: ChangedFilesOptions = {
     excludes: [...DEFAULT_EXCLUDES, ...(opts.extraExcludes ?? [])],
     countOnlyExcludes: opts.repoExcludes ?? [],
-    maxPatchedFiles: MAX_FILES_GUARD,
+    ...(opts.patchesRequired ? {} : { maxPatchedFiles: MAX_FILES_GUARD }),
   };
 
   const cacheAllowed = useCache && (ref.provider !== 'azuredevops' || ref.project !== undefined);

@@ -268,7 +268,7 @@ async function seedProvider(provider, matrix) {
     // Azure DevOps only: a PR past the 500-file guard, so the run is refused and
     // INV-FETCH-04 says not one byte of content may be fetched for it. ADO is
     // the only provider where that costs anything — two whole-file getItem calls
-    // per changed file, ~1002 requests before #27.
+    // per modified file (one per added file — as here), 501 requests before #27.
     let huge = null;
     if (provider === 'azuredevops') {
       const branch = matrix.branches.huge;

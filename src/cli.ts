@@ -257,10 +257,13 @@ program
         }));
       }
       // Line snapping needs the diff; without it, findings citing lines
-      // outside the diff 422 on the batch and burn retries per comment.
+      // outside the diff 422 on the batch and burn retries per comment. Hence
+      // patchesRequired: this command is not reviewing the PR, so the
+      // too-many-files guard that lets `review` skip content (INV-FETCH-04)
+      // would leave it with the empty map it exists to avoid.
       let gather: GatherOutput | undefined;
       try {
-        gather = await runGather({ prUrl });
+        gather = await runGather({ prUrl, patchesRequired: true });
       } catch (err) {
         process.stderr.write(
           `[post] gather failed (${(err as Error).message.split('\n')[0]}); posting without line snapping\n`,

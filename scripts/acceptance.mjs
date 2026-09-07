@@ -172,12 +172,27 @@ async function runtimeBlockedReason(runtime) {
     });
     if (!res.ok) return null;
     const parsed = await res.json();
-    const quota = parsed?.quota_snapshots?.premium_interactions;
-    if (!quota || quota.unlimited) return null;
-    const remaining = Number(quota.remaining ?? quota.percent_remaining ?? 0);
-    if (remaining > 0 || quota.overage_permitted) return null;
+    // Read only the quotas that GOVERN this plan. `has_quota: false` means the
+    // counter does not apply — and reading it anyway is how this probe reported
+    // BLOCKED on an account that had budget: an `individual` plan on
+    // token-based billing carries premium_interactions at
+    // {has_quota: false, entitlement: 0, remaining: 0}, which looks identical to
+    // exhaustion and is not. The plan's real budget was `chat`, with 83 of 200
+    // left. A probe that cannot tell "not entitled to this counter" from "spent
+    // this counter" skips cells that would have run.
+    const snapshots = Object.entries(parsed?.quota_snapshots ?? {}).filter(
+      ([, q]) => q && q.has_quota !== false && Number(q.entitlement ?? 0) !== 0,
+    );
+    if (snapshots.length === 0) return null;
+    const spent = snapshots.filter(([, q]) => {
+      if (q.unlimited || q.overage_permitted) return false;
+      return Number(q.remaining ?? q.quota_remaining ?? q.percent_remaining ?? 0) <= 0;
+    });
+    // Blocked only when EVERY governing quota is spent. One exhausted counter
+    // beside a funded one is not a runtime that cannot work.
+    if (spent.length !== snapshots.length) return null;
     const resets = parsed.quota_reset_date ?? 'the plan reset date';
-    return `Copilot premium requests exhausted (0 remaining, overage not permitted). Every capable model is refused and \`auto\` falls back to a non-premium one that cannot carry a multi-pass orchestration. Resets ${resets}.`;
+    return `every Copilot quota on this plan is spent (${spent.map(([name]) => name).join(', ')}; overage not permitted), so the CLI refuses every capable model and \`auto\` falls back to one that cannot carry a multi-pass orchestration. Resets ${resets}.`;
   } catch {
     // The probe is a courtesy, not a gate. If it cannot answer, run the cell and
     // let the real assertions speak.
@@ -639,11 +654,19 @@ const notRun = [];
 for (const provider of PROVIDERS) {
   for (const runtime of RUNTIMES) {
     if (results.some((r) => r.provider === provider && r.runtime === runtime && r.case === 'defects')) continue;
+    // Say why THIS cell did not run, which is not always the interesting
+    // reason. `--runtime copilot` on a laptop skipped the claude cells with
+    // "no Anthropic credential here by design" — a CI-only explanation, wrong
+    // and alarming on a machine that has the credential and simply was not
+    // asked. A skip reason that is not true is worse than a bare "not
+    // requested": it invents a constraint the reader then works around.
     const why = !wantProviders.includes(provider)
       ? 'provider not requested'
-      : runtime === 'claude'
-        ? 'no Anthropic credential here by design — run `npm run acceptance -- --runtime claude` locally'
-        : 'runtime not requested';
+      : !wantRuntimes.includes(runtime)
+        ? 'runtime not requested'
+        : runtime === 'claude' && process.env.CI
+          ? 'no Anthropic credential in CI by design — run `npm run acceptance -- --runtime claude` locally'
+          : 'did not run';
     notRun.push({ provider, runtime, case: 'defects', skipped: why });
   }
 }

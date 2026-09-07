@@ -97,18 +97,19 @@ Three places, in this precedence order:
    `GITLAB_TOKEN`. Always wins. This is what CI uses: the workflow maps its
    environment secrets onto these names, so CI and a local run take the same
    code path.
-2. **`~/.pr-review/acceptance.env`** — `KEY=value` per line, `#` for comments.
-   Optional, local only.
-3. **The provider CLIs' own logins** — `gh auth token`,
+2. **`.env` at the repo root** — `cp .env.example .env` and fill it in.
+   `KEY=value` per line, `#` for comments.
+3. **`~/.pr-review/acceptance.env`** — same format, for anyone who would rather
+   keep credentials outside the checkout entirely.
+4. **The provider CLIs' own logins** — `gh auth token`,
    `az account get-access-token`, `glab config get token`. An existing login is
    enough and nothing extra is stored.
 
-The file sits under `~/.pr-review/`, **not** in the checkout, on purpose. A
-`.env` at the repo root depends on `.gitignore` staying correct forever, and
-every way it leaks anyway is routine: `git add -A` after someone edits the
-ignore file, a dogfood run with `--include-untracked`, a CI step that uploads
-the workspace. Nothing in this repository can reach `~/.pr-review/`, so the
-question does not arise.
+A credential file inside the repository is the one arrangement where a stray
+`git add -A` could publish a token, so three independent things stop it:
+`.gitignore` lists `.env`, only `.env.example` is committed and it holds no
+values, and the dogfood gate refuses any untracked path matching `^.env`
+before it writes an artifact.
 
 The product itself never reads that file — `src/providers/*` read only
 `process.env`. The runner loads it and injects the values into the CLI it

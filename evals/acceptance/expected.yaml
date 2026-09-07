@@ -20,17 +20,29 @@ must_find:
 distinct_findings: true
 
 must_not_find:
-  # The control handler is correct on both counts. Flagging it is a false
-  # positive, and without this line a fixture broken enough to flag everything
-  # would still pass.
+  # The control handler must not be flagged for EITHER planted defect: it
+  # parameterises its query and it calls audit.log. That is what makes the
+  # must_find entries above causal rather than vacuous — a fixture broken enough
+  # that everything gets flagged cannot satisfy both halves.
   #
-  # Anchored to the TITLE, deliberately. matchExpectedFindings tests
-  # "title<newline>body", so a bare "greetHandler" substring also matched a
-  # CORRECT finding about the broken handler next door that mentioned the good
-  # one while contrasting the two — observed on the first live claude cell. A
-  # finding *about* greetHandler names it in the title; one that discusses it in
-  # passing does not, and that distinction is the whole assertion.
-  - "^[^\\n]*greetHandler"
+  # Scoped to the two defect classes, and NOT written as a bare "no finding may
+  # name greetHandler". Three live cells taught that lesson in order: a correct
+  # finding about the broken handler that named the good one while contrasting
+  # them; a genuine doc-comment/code mismatch in the control; and a genuine type
+  # over-claim (`q<User>` on a query selecting only `email`). Every one of those
+  # was the reviewer being right. With 17 reviewers and ~88 raw findings on a
+  # six-file PR, *something* will be said about any function, so "the reviewer
+  # is silent about this code" asserts that the reviewer is not thorough — the
+  # opposite of the property worth testing. What must hold is narrower and
+  # actually meaningful: the SQLi and audit findings track the defect, not the
+  # file.
+  #
+  # Each pattern is two lookaheads: the first keeps it to findings whose TITLE
+  # is about greetHandler (a finding merely mentioning it in passing is not
+  # about it), the second requires the defect class anywhere in title or body,
+  # so the two can appear in either order.
+  - "^(?=[^\\n]*greetHandler)(?=[\\s\\S]*(sql injection|parameteri[sz]|string concatenation|interpolat))"
+  - "^(?=[^\\n]*greetHandler)(?=[\\s\\S]*(ACC-LOG-002|audit\\.log|audit log|missing audit))"
 
 stack:
   include:

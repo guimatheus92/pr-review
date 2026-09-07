@@ -324,40 +324,83 @@ async function runDefectsCell(provider, runtime) {
  * review an unknown file list. A positive-only assertion here would pass even
  * if the gate were deleted.
  */
+/**
+ * The MR's own file count, as GitLab reports it — the number `gather` has to
+ * match to call its list complete.
+ *
+ * Returns `{ count }` when GitLab gives an exact number and `{ truncated }`
+ * when it gives the `"N+"` form. The estate has never produced the second (it
+ * reads "1200" for 1200 files), and the cell treats it as a signal that the
+ * world changed rather than quietly passing: if GitLab starts truncating here,
+ * the live refusal path becomes reachable and this cell should assert it.
+ */
+async function gitlabChangesCount(prUrl) {
+  const { project, number, origin } = parsePrUrl(prUrl);
+  const { value } = resolveToken('gitlab', new URL(prUrl).host);
+  const res = await fetch(`${origin}/api/v4/projects/${encodeURIComponent(project)}/merge_requests/${number}`, {
+    headers: { Authorization: `Bearer ${value}` },
+  });
+  if (!res.ok) throw new Error(`GitLab MR read failed: ${res.status}`);
+  const raw = (await res.json()).changes_count;
+  if (typeof raw === 'string' && raw.endsWith('+')) return { truncated: raw };
+  const count = Number(raw);
+  return Number.isInteger(count) ? { count } : {};
+}
+
 async function runFilelistCell() {
   const prUrl = matrix.providers.gitlab?.wide;
   const failures = [];
   if (!prUrl) return { provider: 'gitlab', runtime: '-', case: 'filelist', ok: false, failures: ['no wide MR URL in matrix.yaml'] };
 
-  const cwd = checkoutFor('gitlab');
-  try {
-    const out = run(process.execPath, [CLI, 'gather', prUrl, '--no-cache', '--out', join(outDir, 'filelist-gather.json')], { cwd });
-    void out;
-    const gather = readArtifact(outDir, 'filelist-gather.json');
-    if (gather?.changedFilesComplete !== true) failures.push('gather from the fixture checkout did not mark the file list complete');
-    if ((gather?.changedFiles?.length ?? 0) < 100) failures.push(`gather returned ${gather?.changedFiles?.length ?? 0} files, expected >= 100`);
-  } catch (err) {
-    failures.push(`gather from the fixture checkout failed: ${safeLogValue(String(err.stderr ?? err.message).slice(0, 300))}`);
+  // What the wide MR proves live is PAGINATION, not truncation. GitLab serves
+  // /diffs 100 entries per page, so a complete list here means the provider
+  // walked every page — the exact bug that had Azure DevOps reviewing every
+  // >100-file PR on its first 100 (`$top` default) from 0.6 through 0.10.
+  //
+  // It does NOT prove the refusal path, and no live provider can: the list has
+  // to actually come back incomplete for a refusal to be correct. Measured on
+  // this estate, GitLab's `changes_count` is exact at least through 1200 files
+  // ("1200", not "1200+"), so the truncation flag never trips. The refusal is
+  // covered hermetically by tests/gather.test.ts, which can stub a short list
+  // against a high count. Naming that ceiling is the point — a live assertion
+  // written for a truncation that never happens tests nothing, and the first
+  // version of this cell asserted the *opposite* of correct behaviour: it
+  // demanded a refusal on a list that was complete and therefore safe.
+  const reported = await gitlabChangesCount(prUrl);
+  if (reported.truncated) {
+    failures.push(
+      `GitLab now reports changes_count "${reported.truncated}" for this MR — truncation is live, so this cell must assert the refusal path again (see tests/gather.test.ts for the shape)`,
+    );
   }
-
-  const elsewhere = mkdtempSync(join(tmpdir(), 'acc-unrelated-'));
-  try {
-    // stderr PIPED, not inherited: the refusal message is the assertion here,
-    // and an inherited stream leaves err.stderr null — the check would then
-    // report "refused for an unexpected reason" every time it worked.
-    run(process.execPath, [CLI, 'gather', prUrl, '--no-cache', '--out', join(outDir, 'filelist-negative.json')], {
-      cwd: elsewhere,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    failures.push('gather from an unrelated directory SUCCEEDED — the truncated-list gate did not refuse');
-  } catch (err) {
-    const stderr = String(err.stderr ?? '') + String(err.stdout ?? '');
-    if (!/truncated|not the PR's repository|not inside a git repository|refusing to review an unknown file list/i.test(stderr)) {
-      failures.push(`gather refused for an unexpected reason: ${safeLogValue(stderr.slice(0, 300))}`);
+  const expected = reported.count ?? null;
+  const cwd = checkoutFor('gitlab');
+  const gathers = [
+    ['the fixture checkout', cwd, 'filelist-gather.json'],
+    // From an unrelated directory too: a COMPLETE list needs no checkout to
+    // corroborate it, so this must succeed and agree file for file.
+    ['an unrelated directory', mkdtempSync(join(tmpdir(), 'acc-unrelated-')), 'filelist-elsewhere.json'],
+  ];
+  const seen = [];
+  for (const [where, dir, artifact] of gathers) {
+    try {
+      run(process.execPath, [CLI, 'gather', prUrl, '--no-cache', '--out', join(outDir, artifact)], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
+      const gather = readArtifact(outDir, artifact);
+      const files = gather?.changedFiles?.length ?? 0;
+      if (gather?.changedFilesComplete !== true) failures.push(`gather from ${where} did not mark the file list complete`);
+      if (expected != null && files !== expected) {
+        failures.push(`gather from ${where} returned ${files} files, provider reports ${expected}`);
+      }
+      if (files <= 100) failures.push(`gather from ${where} returned ${files} files — at or below one API page, so pagination is not exercised`);
+      seen.push(files);
+    } catch (err) {
+      failures.push(`gather from ${where} failed: ${safeLogValue(String(err.stderr ?? err.message).slice(0, 300))}`);
     }
   }
+  if (seen.length === 2 && seen[0] !== seen[1]) {
+    failures.push(`the two gathers disagree: ${seen[0]} files from the checkout, ${seen[1]} from an unrelated directory`);
+  }
 
-  return { provider: 'gitlab', runtime: '-', case: 'filelist', ok: failures.length === 0, failures, prUrl };
+  return { provider: 'gitlab', runtime: '-', case: 'filelist', ok: failures.length === 0, failures, prUrl, files: seen[0] };
 }
 
 // --- the matrix ------------------------------------------------------------

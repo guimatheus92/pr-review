@@ -24,7 +24,11 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ACCEPTANCE = join(ROOT, 'evals', 'acceptance');
 const MATRIX = join(ACCEPTANCE, 'matrix.yaml');
 const PROVIDERS = ['github', 'azuredevops', 'gitlab'];
-const WIDE_FILES = 101; // GitLab reports changes_count "100+" above 100
+// One file past GitLab's 100-per-page /diffs cap, so the provider has to walk a
+// second page for the list to come back complete. NOT a truncation trigger:
+// changes_count was measured exact at 1200 files on this estate, so the "N+"
+// form the truncation flag keys on never appears. See runFilelistCell.
+const WIDE_FILES = 101;
 
 const argv = process.argv.slice(2);
 const dryRun = argv.includes('--dry-run');
@@ -225,10 +229,10 @@ async function seedProvider(provider, matrix) {
       git(['checkout', '-q', 'main'], work, secrets);
     }
 
-    // GitLab only: the wide MR that trips the truncated-file-list gate. GitLab
-    // is the sole provider that declares truncation (changes_count "100+");
-    // GitHub needs 3000+ files and Azure DevOps reports no count at all, so
-    // forcing this case there would prove nothing.
+    // GitLab only: the wide MR that proves the provider paginates its file list
+    // to completion. GitLab pages /diffs at 100, so this is reachable cheaply
+    // here; GitHub's list stops at 3000 and Azure DevOps reports no count at
+    // all, so forcing the case there would cost far more and prove less.
     let wide = null;
     if (provider === 'gitlab') {
       const branch = matrix.branches.wide;

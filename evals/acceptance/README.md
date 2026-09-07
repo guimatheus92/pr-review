@@ -38,14 +38,24 @@ that can read the answer out of the diff satisfies `must_find` without applying
 any knowledge at all, and the suite goes green while proving nothing. The
 defects are ordinary-looking code; what they are is documented *here* instead.
 
-**The control must be genuinely correct, not merely intended to be.** `greetHandler`
-exists so `must_not_find` fails if the reviewer flags clean code — which only
-works while the code really is clean. It shipped with a doc comment reading
-"greet a user by name" over a body that greets by email; the first live cell
-flagged the mismatch, correctly, and the assertion failed. The reviewer was
-right and the fixture was wrong. When a `must_not_find` fires, read the finding
-before touching the regex: the assertion catching a real defect in the control
-is the assertion doing its job.
+**The control must be genuinely correct, not merely intended to be.** Three live
+cells found three real problems with it, in order: a doc comment reading "greet
+a user by name" over a body that greets by email; `q<User>` typing the row of a
+query that selects only `email`; and no error handling around the awaited query.
+Every one of those was the reviewer being right and the fixture being wrong. So
+when a `must_not_find` fires, read the finding before touching the regex — the
+assertion catching a real defect in the control is the assertion working.
+
+**But "the reviewer says nothing about this function" is the wrong assertion.**
+That was the first shape, and it is unachievable: with 17 reviewers and ~88 raw
+findings on a six-file PR, *something* true can be said about any code. Written
+that way, the check asserts the reviewer is not thorough — the opposite of the
+property worth having. What must actually hold is narrower: the control is not
+flagged **for either planted defect**. That keeps the pair causal (the SQLi and
+audit findings track the defect, not the file) without demanding silence. The
+patterns are scoped to those two classes and anchored to the finding's title,
+because a correct finding about the broken handler may well name the good one
+while contrasting the two — observed on the first live cell.
 
 ## One-time setup
 
@@ -164,13 +174,33 @@ exists — so a fork PR can never reach them.
 |---|---|
 | `.claude/skills/team-rules.md` | `ACC-LOG-002` is a rule id no generic reviewer can invent. A finding containing that string is proof the repo's own skill reached the session as project context — and, because the gate is `cwdIsPrRepo`, proof the cell ran inside the clone. |
 | `defects/src/api/users.ts` | SQL built by concatenation **and** a handler with no `audit.log` — one generic defect, one repo-rule defect, in one file. Also the TypeScript language tag. |
-| `defects/src/api/users.ts` → `greetHandler` | The control. Correct on both counts; `must_not_find: greetHandler` fails if the reviewer flags it, so a fixture broken enough to flag everything cannot pass. |
+| `defects/src/api/users.ts` → `greetHandler` | The control. Parameterised **and** audited, so `must_not_find` fails if either planted defect is reported against it — which is what makes `must_find` causal instead of vacuous. Scoped to those two classes on purpose: see below. |
 | `defects/scripts/report.py` | `shell=True` with interpolated input. Python tag, and a second unmistakable defect so the assertion set is not single-file. |
 | `defects/_requirements.txt` | Adds `django` — exercises dependency detection from the **PR's own manifest diff**, a different code path from the checkout scan that yields `express`/`pg`. |
 | `defects/db/schema.sql` | SQL language tag with zero defect signal. |
 | `defects/docs/notes.md` | Noise, and it must not say so: a fixture that states its own expected outcome is telling the reviewer the answer. |
 | `defects/_package-lock.json` | Must be dropped by `applyDiffExclusions`. |
-| `acc/wide` (GitLab only) | 101 files, so GitLab reports `changes_count: "100+"` and the truncated-file-list gate actually fires. GitHub needs 3000+ files and Azure DevOps reports no count at all, so the gate is only reachable here. |
+| `acc/wide` (GitLab only) | 101 files — one past GitLab's 100-per-page `/diffs` cap, so a complete list proves the provider **paginates to completion**. That is the bug class that had Azure DevOps reviewing every >100-file PR on its first 100 (`$top` default) from 0.6 through 0.10. Cheapest to reach on GitLab: GitHub's list stops at 3000 and Azure DevOps reports no count at all. |
+
+## What the live matrix cannot prove
+
+**The file-list refusal path.** INV-FETCH-01 says an incomplete list is unknown
+rather than empty, and the run refuses when it cannot complete one. Refusing is
+only *correct* when the list really is short, and no live provider will produce
+that on demand: GitLab's `changes_count` was measured exact at 1200 files on
+this estate ("1200", never "1200+"), so the truncation flag it keys on never
+trips. The `filelist` cell therefore proves the half that is reachable — that a
+101-file MR paginates to a complete list, from inside the checkout *and* from an
+unrelated directory, both agreeing with the provider's own count — and leaves
+the refusal to `tests/gather.test.ts`, which can stub a short list against a
+high count.
+
+The first version of that cell asserted the opposite: it demanded a refusal from
+an unrelated directory, on a list that was complete and therefore safe to use.
+It failed against correct behaviour, which is the only reason the wrong premise
+("GitLab reports `100+` above 100 files") was ever measured. `gitlabChangesCount`
+now fails the cell if GitLab starts truncating, because that would make the
+refusal path live and this cell's ceiling obsolete.
 
 ## BLOCKED is not FAIL
 

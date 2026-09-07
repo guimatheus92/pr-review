@@ -318,7 +318,9 @@ function earlyExitGate(gather: GatherOutput): string | null {
   }
   const totalBytes = inScope.reduce((n, f) => n + (f.patch?.length ?? 0), 0);
   if (totalBytes > MAX_PATCH_BYTES) {
-    return `PR diff is too large: ${(totalBytes / 1024 / 1024).toFixed(1)} MB of patches (limit ${MAX_PATCH_BYTES / 1024 / 1024} MB). Split into smaller PRs.`;
+    // Both numbers go through the same divisor: an unrounded limit rendered as
+    // "1.9073486328125 MB" next to a rounded "2.3 MB" reads as a broken tool.
+    return `PR diff is too large: ${(totalBytes / 1024 / 1024).toFixed(1)} MB of patches (limit ${(MAX_PATCH_BYTES / 1024 / 1024).toFixed(1)} MB). Split into smaller PRs.`;
   }
   return null;
 }

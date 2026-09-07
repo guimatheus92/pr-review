@@ -174,7 +174,27 @@ export function taskToolName(runtime: Runtime): string {
 
 // ponytail: the copilot-style default model id is not a valid claude CLI id;
 // map only that one known default, pass anything user-specified through as-is.
+/**
+ * The shipped default, as it appears in config, docs and `configure`.
+ *
+ * It is never handed to a runtime verbatim — `normalizeModel` turns it into
+ * each runtime's own stable alias first. A concrete model id is exactly the
+ * thing a vendor retires underneath you: Copilot CLI 1.0.83 answers
+ * `Error: Model "claude-opus-4.8" from --model flag is not available.` and exits
+ * 1 before dispatching a single pass, which reads downstream as every reviewer
+ * having failed to deliver.
+ */
+export const DEFAULT_MODEL = 'claude-opus-4.8';
+
+/**
+ * Map the default onto whatever each runtime calls "the good one", and pass an
+ * explicit choice through untouched.
+ *
+ * `auto` is Copilot's documented "let Copilot pick" value, and `opus` is
+ * claude's family alias. Both survive a model being renamed or retired; a
+ * pinned id does not.
+ */
 export function normalizeModel(runtime: Runtime, model: string): string {
-  if (runtime === 'claude' && model === 'claude-opus-4.8') return 'opus';
-  return model;
+  if (model !== DEFAULT_MODEL) return model;
+  return runtime === 'claude' ? 'opus' : 'auto';
 }

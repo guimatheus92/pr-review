@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { RUNTIME_CHOICES, type RuntimeChoice } from './dispatch/runtime.js';
+import { DEFAULT_MODEL, RUNTIME_CHOICES, type RuntimeChoice } from './dispatch/runtime.js';
 import { PROVIDERS, type Provider } from './types.js';
 import { safeSegment } from './util/tmp.js';
 
@@ -99,7 +99,7 @@ export const DEFAULT_PACKS: SkillPack[] = [
 ];
 
 const DEFAULTS: Config = {
-  defaultModel: 'claude-opus-4.8',
+  defaultModel: DEFAULT_MODEL,
   autodiscover: true,
   reviewers: [],
   reviewersDirs: [],

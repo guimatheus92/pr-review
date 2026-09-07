@@ -20,7 +20,7 @@
 // and `pr-review packs sync` done at least once.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -173,6 +173,69 @@ function runtimeBlockedReason(runtime) {
   }
 }
 
+/**
+ * The newest run directory for a PR, by mtime.
+ *
+ * By mtime and not by name: the directory name ends in a timestamp, so sorting
+ * lexically looks right until two providers' runs sit side by side and
+ * `azuredevops__` outranks `gitlab__` regardless of when either ran.
+ */
+function latestRunDirFor(prUrl) {
+  const { provider, number } = parsePrUrl(prUrl);
+  let entries = [];
+  try {
+    entries = readdirSync(RUNS_ROOT);
+  } catch {
+    return null;
+  }
+  const mine = entries.filter((name) => name.startsWith(`${provider}__`) && name.includes(`__${number}__`)).map((name) => join(RUNS_ROOT, name));
+  let newest = null;
+  for (const dir of mine) {
+    try {
+      const at = statSync(dir).mtimeMs;
+      if (!newest || at > newest.at) newest = { dir, at };
+    } catch {
+      // Vanished between readdir and stat; nothing to choose from it.
+    }
+  }
+  return newest?.dir ?? null;
+}
+
+/**
+ * Did the agent CLI refuse to work, rather than the review failing?
+ *
+ * Read from the run's own failure logs after the fact, because this class of
+ * refusal is invisible until you spend the cell: a rate limit is not a counter
+ * you can query, it is a 429 on the next request. Deliberately narrow — it
+ * matches the vendor's own refusal wording, so a genuine pipeline failure that
+ * merely mentions a limit somewhere cannot borrow the excuse.
+ */
+const RUNTIME_REFUSAL =
+  /(?:hit|reached|exceeded) your rate limit|rate limit.{0,40}reset|quota (?:exceeded|exhausted)|premium (?:request|interaction)s?.{0,40}(?:exhaust|exceed|limit)|insufficient_quota|billing (?:hard )?limit|Model "[^"]+"[^\n]{0,80}is not available/i;
+
+function runtimeRefusedToWork(prUrl) {
+  const runDir = latestRunDirFor(prUrl);
+  if (!runDir) return null;
+  for (const name of ['orchestrator-failure.log', 'error.txt']) {
+    const path = join(runDir, name);
+    if (!existsSync(path)) continue;
+    let text = '';
+    try {
+      text = readFileSync(path, 'utf8');
+    } catch {
+      continue;
+    }
+    const hit = text.match(RUNTIME_REFUSAL);
+    if (!hit) continue;
+    const line = text
+      .split(/\r?\n/)
+      .find((l) => RUNTIME_REFUSAL.test(l))
+      ?.trim();
+    return `the agent CLI refused to work, so nothing was reviewed: ${safeLogValue((line ?? hit[0]).slice(0, 200))}`;
+  }
+  return null;
+}
+
 /** The run `verify` resolved for this PR — the runner never guesses a run dir. */
 function verifyRun(prUrl) {
   let raw = '';
@@ -229,6 +292,14 @@ async function runDefectsCell(provider, runtime) {
     run(process.execPath, argv, { cwd, stdio: ['ignore', 'inherit', 'inherit'] });
   } catch (err) {
     reviewExit = err.status ?? 1;
+    // A runtime that refused to work is BLOCKED, not FAIL — and the quota probe
+    // above cannot see every way that happens. It reads the premium-request
+    // counter, but a rate limit ("wait for your limit to reset in 5 hours")
+    // only appears on use: the session exits in seconds, every pass reads as
+    // failed to deliver, and INV-DEL-01 correctly refuses the partial review.
+    // Every layer behaved; the account did not.
+    const stalled = runtimeRefusedToWork(prUrl);
+    if (stalled) return { provider, runtime, case: 'defects', ok: true, blocked: stalled, failures: [], prUrl };
     failures.push(`review exited ${reviewExit}`);
   }
 

@@ -207,13 +207,24 @@ refusal path live and this cell's ceiling obsolete.
 A cell that could not run reports `🚧 blocked` and is counted apart from the
 passes — never folded into them, never rendered as a failure.
 
-Today the only blocker is the Copilot runtime with its premium requests
-exhausted: `runtimeBlockedReason` in `scripts/acceptance.mjs` reads
-`quota_snapshots.premium_interactions` before spending the cell. With zero
-remaining, the CLI refuses every capable model, `--model auto` resolves to a
-small non-premium one, and that model declares `DONE` two dispatches into a
-nine-pass orchestration. `INV-DEL-01` then correctly refuses to post a partial
-review, and the cell fails — on a product that behaved exactly as specified.
+Two checks, because the account can refuse in two different ways.
+
+**Before the cell**, `runtimeBlockedReason` reads
+`quota_snapshots.premium_interactions`. With zero remaining, the CLI refuses
+every capable model, `--model auto` resolves to a small non-premium one, and
+that model declares `DONE` two dispatches into a nine-pass orchestration.
+`INV-DEL-01` then correctly refuses to post a partial review, and the cell
+fails — on a product that behaved exactly as specified.
+
+**After a failed review**, `runtimeRefusedToWork` reads the run's own
+`orchestrator-failure.log` / `error.txt` for the vendor's refusal wording. A
+rate limit ("You've hit your rate limit… reset in 5 hours") is not a counter
+anything can query in advance; it is a 429 on the next request, and the session
+exits in seconds with every pass unfulfilled. The pattern is deliberately
+narrow and matched both ways in review: a genuine pipeline failure that merely
+mentions a limit, or says something else "is not available", must stay a FAIL —
+a blocked classification that swallows a real defect is worse than the FAIL it
+replaces.
 
 That distinction is the whole point. Reported as FAIL it reads as a pr-review
 bug, and someone spends a day looking for it; it was reported that way once, in

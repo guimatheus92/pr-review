@@ -7,13 +7,13 @@
 providers:
   github:
     # Clone URL the runner uses. Public, so no credential is embedded.
-    clone: https://github.com/CHANGE-ME/pr-review-acceptance.git
+    clone: https://github.com/guimatheus92/pr-review-acceptance.git
     # Base URL of the repo, used to build PR URLs.
-    web: https://github.com/CHANGE-ME/pr-review-acceptance
+    web: https://github.com/guimatheus92/pr-review-acceptance
     # Filled in by acceptance-seed.mjs.
     pulls:
-      claude: null
-      copilot: null
+      claude: https://github.com/guimatheus92/pr-review-acceptance/pull/1
+      copilot: https://github.com/guimatheus92/pr-review-acceptance/pull/2
 
   azuredevops:
     clone: https://dev.azure.com/CHANGE-ME/acceptance/_git/pr-review-acceptance

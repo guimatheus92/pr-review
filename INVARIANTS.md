@@ -245,6 +245,35 @@ present and otherwise fails with the exact command for the user to run.
 
 **Check:** run
 
+### INV-FETCH-04 — No content is fetched for a file that will not be reviewed
+
+**Always:** File **content** is fetched only for files that can still reach a
+review pass. A file the diff exclusions will discard gets no content fetch, and
+once the in-scope count passes the too-many-files guard nothing is fetched for
+any file: the list is completed with path-only rows and the run is refused. The
+**path** list is unaffected — it is always complete (INV-FETCH-01), because it,
+not the content, is what every trust gate reads.
+
+**Why:** The guard runs after gather, so a 3000-file Azure DevOps PR paid ~6000
+`getItem` calls — each downloading a whole file at both revisions — and was then
+refused for being too large. The same shape hit exclusions at any size: a
+`package-lock.json` was fetched twice and its patch discarded on the next line
+by `applyDiffExclusions`. Work that cannot reach a pass is work no PR should pay
+for.
+
+**A patch-less row is never silently reviewed.** A gather that omitted patches
+is marked, is never cached (a cached path-only list would come back as a whole
+diff under a wider exclusion set), and the guard reads that mark *before*
+exclusions — otherwise the byte-size gate sees 0 bytes and passes.
+
+**Enforced:** `src/providers/azuredevops.ts`, `src/commands/gather.ts`,
+`src/commands/review.ts`, `src/dispatch/diff-filter.ts`
+
+**Verified:** `tests/providers/azuredevops.test.ts`, `tests/gather-cache.test.ts`,
+`tests/zero-passes.test.ts`
+
+**Check:** tests-only
+
 ---
 
 ## CTX — the run always knows what it is reviewing with

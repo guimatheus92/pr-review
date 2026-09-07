@@ -1042,3 +1042,85 @@ test('verify — a check that throws renders FAIL rather than vanishing from the
     f.cleanup();
   }
 });
+
+test('verify — on Azure DevOps a finding outside every hunk is graded where the reviewer put it, not snapped', async () => {
+  // The audit recomputes the posting shape to recognize the run's own comments,
+  // so it has to apply the same provider policy `runPost` did. ADO does not
+  // snap: the comment really is at line 900, and grading it at a snapped line
+  // would report a correct run as posting somewhere it never planned to
+  // (INV-POST-06) while the finding it did post looks unlanded (INV-POST-01).
+  //
+  // The existing fixture cannot catch that — its finding sits at src/a.ts:2,
+  // inside the patch, so it yields the same key snapped or not.
+  const f = adoRun();
+  try {
+    const path = join(f.runDir, 'pr-review-findings.json');
+    const findings = JSON.parse(readFileSync(path, 'utf8'));
+    findings.finalFindings = [
+      { severity: 'HIGH', title: 'far', body: 'far from any hunk', file: 'src/a.ts', line: 900 },
+    ];
+    writeFileSync(path, JSON.stringify(findings), 'utf8');
+    f.comments = [comment({ body: 'far from any hunk', file: 'src/a.ts', line: 900 })];
+    const one = row(await rowsFor(f), 'INV-POST-01');
+    assert.equal(one.status, 'pass', `expected the unsnapped line to be recognized, got: ${one.evidence}`);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — INV-FETCH-02 does not FAIL a run that was refused before fetching anything', async () => {
+  // pr-review-gather.json is written before earlyExitGate refuses, so a >500-file
+  // run leaves an auditable artifact with no patches in it. Grading that FAIL is
+  // a red audit for the exact state INV-FETCH-04 mandates — the kind of alarm
+  // that gets an invariant switched off.
+  const f = healthyRun();
+  try {
+    const path = join(f.runDir, 'pr-review-gather.json');
+    const gather = JSON.parse(readFileSync(path, 'utf8'));
+    gather.patchesOmitted = true;
+    for (const file of gather.changedFiles) delete file.patch;
+    writeFileSync(path, JSON.stringify(gather), 'utf8');
+    const two = row(await rowsFor(f), 'INV-FETCH-02');
+    assert.equal(two.status, 'skip', `expected a reasoned skip, got ${two.status}: ${two.evidence}`);
+    assert.match(two.evidence, /past the file guard/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — INV-FETCH-02 does not FAIL a PR that has no lines to carry', async () => {
+  // A pure-rename / mode-only / binary PR. Azure DevOps is where this appeared:
+  // its synthesized patch used to be the whole file, so even a rename produced a
+  // truthy patch and this clause never fired.
+  const f = healthyRun();
+  try {
+    const path = join(f.runDir, 'pr-review-gather.json');
+    const gather = JSON.parse(readFileSync(path, 'utf8'));
+    gather.changedFiles = [
+      { path: 'src/new-name.ts', status: 'renamed', previousPath: 'src/old-name.ts', additions: 0, deletions: 0 },
+    ];
+    writeFileSync(path, JSON.stringify(gather), 'utf8');
+    const two = row(await rowsFor(f), 'INV-FETCH-02');
+    assert.equal(two.status, 'pass', `a rename carries no lines anywhere: ${two.evidence}`);
+    assert.match(two.evidence, /none adding or removing a line/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — INV-FETCH-02 still FAILs when a file that HAS changed lines carries no patch', async () => {
+  // The control for the two exemptions above: without it they would also excuse
+  // the real defect the clause exists to catch — passes handed paths, no content.
+  const f = healthyRun();
+  try {
+    const path = join(f.runDir, 'pr-review-gather.json');
+    const gather = JSON.parse(readFileSync(path, 'utf8'));
+    gather.changedFiles = [{ path: 'src/a.ts', status: 'modified', additions: 12, deletions: 3 }];
+    writeFileSync(path, JSON.stringify(gather), 'utf8');
+    const two = row(await rowsFor(f), 'INV-FETCH-02');
+    assert.equal(two.status, 'fail');
+    assert.match(two.evidence, /no in-scope changed file carries a patch/);
+  } finally {
+    f.cleanup();
+  }
+});

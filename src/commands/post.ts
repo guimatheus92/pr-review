@@ -1,7 +1,7 @@
 import { resolvePr } from '../providers/index.js';
 import { buildValidLinesMap, snapLineToDiff } from '../dispatch/line-snap.js';
 import { RETRY_BACKOFF_MS, withRetry } from '../util/retry.js';
-import type { ChangedFile, ExistingComment, Finding, GatherOutput, PrRef, ReviewerOutput } from '../types.js';
+import type { ChangedFile, ExistingComment, Finding, GatherOutput, PrRef, Provider, ReviewerOutput } from '../types.js';
 import type { BatchComment, PrProvider } from '../providers/types.js';
 
 interface PostOptions {
@@ -29,18 +29,53 @@ export interface PostResult {
 }
 
 /**
+ * Where a provider's findings are allowed to land. Both halves are properties
+ * of the provider's comment API, and the two must be decided together in ONE
+ * place: `runPost` applies this shape, and `resumeReview` and `verify` both
+ * RECOMPUTE it to recognize the run's own comments on the PR. Let the three
+ * drift and a resume writes a comment twice, or `verify` grades a correct run
+ * as posting to locations it never planned (INV-POST-05, INV-POST-06).
+ *
+ * - GitHub and GitLab: review comments attach only to lines in the diff, so
+ *   findings snap, and a finding that cannot anchor is re-anchored rather than
+ *   dropped (INV-POST-07 — nothing is ever dropped).
+ * - Azure DevOps: threads are NOT limited to diff lines, so a finding posts at
+ *   the line the reviewer named. That is what the docs have always promised;
+ *   it used to be true only by accident, because the synthesized patch carried
+ *   the whole file as context and every line was therefore "in the diff". Now
+ *   that the patch is real hunks, snapping would drag a finding to the nearest
+ *   changed line instead of leaving it where it belongs.
+ */
+export function postingPolicy(provider: Provider): { snap: boolean; reanchor: boolean } {
+  return provider === 'azuredevops' ? { snap: false, reanchor: false } : { snap: true, reanchor: true };
+}
+
+/** `postingPolicy(provider)` applied — the one call every site should use. */
+export function postingShape(findings: Finding[], changedFiles: ChangedFile[], provider: Provider): Finding[] {
+  const { snap, reanchor } = postingPolicy(provider);
+  return snapFindingsToDiff(findings, changedFiles, reanchor, snap).findings;
+}
+
+/**
  * Snap located findings to the nearest valid diff line. When reanchor is set
  * (GitHub: review comments only attach to diff lines, and no finding may be
  * dropped), findings that cannot anchor where the reviewer pointed — file
  * outside the diff, or no location at all — are re-anchored to the first
  * valid line of the first changed file, with the original location kept in
  * the body. Without a valid anchor a bad path would 422 the whole batch.
+ *
+ * Prefer `postingShape`: the (snap, reanchor) pair is a property of the
+ * provider, and three call sites have to agree on it.
  */
 export function snapFindingsToDiff(
   findings: Finding[],
   changedFiles: ChangedFile[],
   reanchor: boolean,
+  snap = true,
 ): { findings: Finding[]; snapped: number; reanchored: number; anchor: { file: string; line: number } | null } {
+  // With snapping off there is nothing to compute a map for: every located
+  // finding passes through at the line it names.
+  if (!snap && !reanchor) return { findings, snapped: 0, reanchored: 0, anchor: null };
   const validLines = buildValidLinesMap(changedFiles);
   let anchor: { file: string; line: number } | null = null;
   if (reanchor) {
@@ -416,8 +451,8 @@ export async function runPost(opts: PostOptions): Promise<PostResult> {
   // finding must land as a resolvable inline review thread.
   let findings = allFindings;
   if (opts.gather) {
-    const reanchor = provider.name === 'github' || provider.name === 'gitlab';
-    const snap = snapFindingsToDiff(allFindings, opts.gather.changedFiles, reanchor);
+    const { snap: doSnap, reanchor } = postingPolicy(provider.name);
+    const snap = snapFindingsToDiff(allFindings, opts.gather.changedFiles, reanchor, doSnap);
     findings = snap.findings;
     if (snap.snapped > 0) process.stderr.write(`[post] snapped ${snap.snapped} finding line(s) to the diff\n`);
     if (snap.reanchored > 0) {

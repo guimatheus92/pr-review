@@ -2,8 +2,9 @@ import * as azdev from 'azure-devops-node-api';
 import { execFileSync, execSync } from 'node:child_process';
 import pLimit from 'p-limit';
 import type { GitPullRequest, GitPullRequestChange, GitPullRequestCommentThread, Comment } from 'azure-devops-node-api/interfaces/GitInterfaces.js';
-import type { ChangedFile, ExistingComment, Finding, PrMetadata, PrRef } from '../types.js';
+import type { ChangedFile, ChangedFilesOptions, ExistingComment, Finding, PrMetadata, PrRef } from '../types.js';
 import type { PrProvider } from './types.js';
+import { patchPolicy } from '../dispatch/diff-filter.js';
 import { isNetworkError, withRetry } from '../util/retry.js';
 import { execErrorDetail } from '../util/exec-error.js';
 import { parseHttpUrl, safeDecode } from '../util/url.js';
@@ -169,15 +170,84 @@ export function synthesizePatch(
 ): string {
   const baseLines = (base ?? '').split('\n');
   const headLines = (head ?? '').split('\n');
+  // Every branch produces the same flat marked list and hands it to toHunks, so
+  // the four shapes (add, delete, LCS, the coarse MAX_LCS_CELLS fallback) cannot
+  // drift apart in how they are framed.
   if (!base && head) {
-    return `--- /dev/null\n+++ b/${path} (${headSha.slice(0, 12)})\n${headLines.map((l) => `+${l}`).join('\n')}`;
+    const hunks = toHunks(headLines.map((l) => `+${l}`));
+    return hunks && `--- /dev/null\n+++ b/${path} (${headSha.slice(0, 12)})\n${hunks}`;
   }
   if (base && !head) {
-    return `--- a/${path} (${baseSha.slice(0, 12)})\n+++ /dev/null\n${baseLines.map((l) => `-${l}`).join('\n')}`;
+    const hunks = toHunks(baseLines.map((l) => `-${l}`));
+    return hunks && `--- a/${path} (${baseSha.slice(0, 12)})\n+++ /dev/null\n${hunks}`;
   }
-  const lcs = lcsLineDiff(baseLines, headLines);
+  const hunks = toHunks(lcsLineDiff(baseLines, headLines).split('\n'));
+  if (!hunks) return '';
   const header = `--- a/${path} (${baseSha.slice(0, 12)})\n+++ b/${path} (${headSha.slice(0, 12)})`;
-  return `${header}\n${lcs}`;
+  return `${header}\n${hunks}`;
+}
+
+/** Lines of context around each change, matching git's own `-U3` default. */
+const HUNK_CONTEXT = 3;
+
+/**
+ * Group a flat marked diff (` `/`+`/`-` per line, covering the WHOLE file) into
+ * real `@@` hunks.
+ *
+ * Azure DevOps has no diff endpoint, so the patch is synthesized here from the
+ * two full file bodies — and until now it was emitted as the whole file, every
+ * unchanged line included as context. That is a valid unified diff and the line
+ * numbers were right, but it made every downstream size scale with the size of
+ * the FILES rather than the size of the CHANGE: the gather cache, the `## Diff`
+ * block of `pr-context.md` that each pass reads, and the 2 MB patch budget.
+ *
+ * Returns `''` when nothing changed — a preamble with no hunks is not a patch,
+ * and a truthy-but-contentless string is what INV-FETCH-02 grades as content.
+ */
+export function toHunks(lines: string[], context = HUNK_CONTEXT): string {
+  const ranges: Array<[number, number]> = [];
+  for (let i = 0; i < lines.length; i++) {
+    const mark = lines[i]![0];
+    if (mark !== '+' && mark !== '-') continue;
+    const start = Math.max(0, i - context);
+    const end = Math.min(lines.length - 1, i + context);
+    const last = ranges[ranges.length - 1];
+    // `last[1] + 1` merges windows that merely touch: git emits one hunk there,
+    // and two abutting hunks would repeat a context line on both sides.
+    if (last && start <= last[1] + 1) last[1] = Math.max(last[1], end);
+    else ranges.push([start, end]);
+  }
+  if (ranges.length === 0) return '';
+
+  // How many lines each side has consumed BEFORE index i — walked once, so the
+  // hunk headers cost one pass rather than one per range.
+  const oldBefore: number[] = [];
+  const newBefore: number[] = [];
+  let oldSeen = 0;
+  let newSeen = 0;
+  for (const line of lines) {
+    oldBefore.push(oldSeen);
+    newBefore.push(newSeen);
+    if (line[0] !== '+') oldSeen++;
+    if (line[0] !== '-') newSeen++;
+  }
+
+  const out: string[] = [];
+  for (const [start, end] of ranges) {
+    let oldCount = 0;
+    let newCount = 0;
+    for (let i = start; i <= end; i++) {
+      if (lines[i]![0] !== '+') oldCount++;
+      if (lines[i]![0] !== '-') newCount++;
+    }
+    // A side with no lines points at the line BEFORE the hunk, which is how git
+    // writes a created file (`@@ -0,0 +1,N @@`) and a deleted one.
+    const oldStart = oldCount === 0 ? oldBefore[start]! : oldBefore[start]! + 1;
+    const newStart = newCount === 0 ? newBefore[start]! : newBefore[start]! + 1;
+    out.push(`@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`);
+    for (let i = start; i <= end; i++) out.push(lines[i]!);
+  }
+  return out.join('\n');
 }
 
 /** Exported for tests. */
@@ -363,7 +433,7 @@ export class AzureDevOpsProvider implements PrProvider {
     };
   }
 
-  async fetchChangedFiles(ref: PrRef): Promise<ChangedFile[]> {
+  async fetchChangedFiles(ref: PrRef, opts?: ChangedFilesOptions): Promise<ChangedFile[]> {
     const git = await this.gitApi(ref);
     const pr = await this.getPr(ref);
     const repoId = pr.repository!.id!;
@@ -394,30 +464,50 @@ export class AzureDevOpsProvider implements PrProvider {
       }
       skip = advance;
     }
+    // A folder entry (directory add, or an ancestor of an edited file) has no
+    // content and is not a reviewable file; it would count against the file
+    // guard and cost a getItem call. isFolder is the wire boolean; gitObjectType
+    // arrives as a raw string, never the SDK enum. Dropped up front, before the
+    // patch policy counts what is in scope — a directory add drags in every
+    // ancestor, and those must not push a PR over the guard.
+    const changes = entries
+      .map((change) => ({ change, path: change.item?.path?.replace(/^\//, '') ?? '' }))
+      .filter(
+        ({ change, path }) =>
+          path !== '' &&
+          !change.item?.isFolder &&
+          (change.item as { gitObjectType?: unknown } | undefined)?.gitObjectType !== 'tree',
+      );
+    // INV-FETCH-04: two whole-file getItem calls per modified file is the most
+    // expensive thing this provider does. Do not spend them on a file the review
+    // will never read — an excluded path, or any path at all once the in-scope
+    // count has already refused the run.
+    const policy = patchPolicy(changes.map((c) => c.path), opts);
+    if (policy.omitted) {
+      process.stderr.write(
+        `[ado] ${policy.inScope} in-scope files is past the review guard — listing paths without fetching content\n`,
+      );
+    }
     const limit = pLimit(FILE_FETCH_CONCURRENCY);
     const results = await Promise.all(
-      entries.map((change) =>
-        limit(async (): Promise<ChangedFile | null> => {
-          const path = change.item?.path?.replace(/^\//, '') ?? '';
-          // A folder entry (directory add, or an ancestor of an edited file) has no
-          // content and is not a reviewable file; it would count against the file
-          // guard and cost a getItem call. isFolder is the wire boolean; gitObjectType
-          // arrives as a raw string, never the SDK enum.
-          if (!path || change.item?.isFolder || (change.item as { gitObjectType?: unknown } | undefined)?.gitObjectType === 'tree') return null;
+      changes.map(({ change, path }) =>
+        limit(async (): Promise<ChangedFile> => {
           const { status, basePath } = classifyChange(
             change.changeType,
             path,
             (change as { sourceServerItem?: string }).sourceServerItem,
           );
           let patch: string | undefined;
-          if (status !== 'deleted' && headSha) {
+          if (status !== 'deleted' && headSha && policy.wants(path)) {
             const [headContent, baseContent] = await Promise.all([
               this.fetchFileText(git, repoId, ref.project, path, headSha),
               baseSha && status !== 'added'
                 ? this.fetchFileText(git, repoId, ref.project, basePath, baseSha)
                 : Promise.resolve(null),
             ]);
-            patch = synthesizePatch(path, baseContent, headContent, baseSha ?? '', headSha);
+            // '' means no hunks — an encoding- or mode-only change. Patch-less
+            // is the honest row; a preamble with nothing under it reads as content.
+            patch = synthesizePatch(path, baseContent, headContent, baseSha ?? '', headSha) || undefined;
           }
           const { additions, deletions } = countChangedLines(patch ?? '');
           // Keyed on basePath, not on the label: ADD|RENAME and DELETE|RENAME are
@@ -434,7 +524,7 @@ export class AzureDevOpsProvider implements PrProvider {
         }),
       ),
     );
-    return results.filter((f): f is ChangedFile => f !== null);
+    return results;
   }
 
   private async fetchFileText(

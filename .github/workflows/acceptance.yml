@@ -169,3 +169,38 @@ jobs:
       - name: Report
         if: always()
         run: cat "$RUNNER_TEMP/acc/acceptance-report.md" >> "$GITHUB_STEP_SUMMARY" || true
+
+  nofetch:
+    name: azuredevops / no-fetch guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: acceptance
+    if: ${{ inputs.provider == 'all' || inputs.provider == 'azuredevops' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      # No agent CLI and no posting: INV-FETCH-04 is decided entirely in
+      # `gather` and the early-exit gate, so this cell is seconds. Azure
+      # DevOps-only because ADO is the only provider that pays per file for its
+      # patches — elsewhere there is nothing to withhold and nothing to prove.
+      - name: Run the no-fetch guard
+        run: node scripts/acceptance.mjs --provider azuredevops --case nofetch --out "$RUNNER_TEMP/acc" --checkout "$RUNNER_TEMP/fixture"
+        env:
+          AZURE_DEVOPS_PAT: ${{ secrets.ACC_AZURE_DEVOPS_PAT }}
+      - name: Report
+        if: always()
+        run: cat "$RUNNER_TEMP/acc/acceptance-report.md" >> "$GITHUB_STEP_SUMMARY" || true
+      # The one artifact that says WHICH of the 501 rows carried a patch is
+      # nofetch-gather.json, and a failing cell is exactly when it is needed.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: acceptance-nofetch
+          path: ${{ runner.temp }}/acc
+          retention-days: 14
+          if-no-files-found: warn

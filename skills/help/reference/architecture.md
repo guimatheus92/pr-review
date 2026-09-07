@@ -20,8 +20,8 @@ Node CLI (deterministic plumbing)
   2. resolveRuntime()           → copilot | claude | auto (probe PATH: copilot first, then claude)
   3. ensurePacks() + loadLinguist() → clone missing skill packs, load the Linguist language index (fail-soft, in parallel with gather)
   4. detectCompanions()         → check installed companion plugins (per runtime)
-  5. runGather()                → fetch metadata + comments in parallel, paginated file list checked against the provider's count and completed from the local checkout when short (cached only once complete)
-  6. earlyExitGate()            → abort if PR is malformed/too large (exit 2 + error.txt)
+  5. runGather()                → fetch metadata + comments in parallel, paginated file list checked against the provider's count and completed from the local checkout when short (cached only once complete). File CONTENT is fetched only where a pass could read it: never for an excluded path, and not at all once the in-scope count is already past the guard below
+  6. earlyExitGate()            → abort if PR is malformed/too large (exit 2 + error.txt); reads the "content withheld" flag before applying exclusions, since a patch-less run measures 0 bytes
   7. loadAll({ skillsOnly })    → repo skills + pack skills + installed-plugin skills; rules the PR itself changed are dropped as untrusted
   8. detectStack()              → canonical Linguist languages + categorized ecosystem/dependency/token evidence from root and changed-file manifests
   9. selectPasses()             → project skills = context in every pass; passes ranked by evidence tier (glob > dependency > weak glob > tag, cap 6) + every baseline (on top of the cap); overflow/unmatched/index-mode → skills-index.md
@@ -81,7 +81,7 @@ src/
 ├── providers/
 │   ├── types.ts             # PrProvider interface
 │   ├── github.ts            # @octokit/rest, single-attempt inline review writes (post.ts owns reconciliation/retry; no issue-comment fallback)
-│   ├── azuredevops.ts       # azure-devops-node-api, LCS diff synthesis (per-run PR/git API cache)
+│   ├── azuredevops.ts       # azure-devops-node-api, LCS diff synthesis into @@ hunks (per-run PR/git API cache)
 │   ├── gitlab.ts            # plain fetch, per-discussion posting
 │   ├── identity.ts          # canonicalPrAuthority: legacy visualstudio.com / encoded HTTPS / ssh.dev.azure.com remotes → one authority (incl. ADO project)
 │   └── index.ts             # detectProvider(url) switch

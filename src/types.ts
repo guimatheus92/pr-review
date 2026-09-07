@@ -66,6 +66,37 @@ export interface ChangedFile {
   excludedReason?: string;
 }
 
+/**
+ * What a caller of `fetchChangedFiles` already knows about which files can
+ * still reach a review pass (INV-FETCH-04). Both fields are advisory and
+ * concern **content only** — a provider must list every path either way, since
+ * the path list is what the trust gates read.
+ *
+ * Providers whose listing endpoint already carries the patch (GitHub, GitLab)
+ * ignore this: there is nothing to save. Azure DevOps synthesizes its patch
+ * from two whole-file `getItem` calls, so this is the difference between hundreds
+ * or thousands of requests and none on a PR about to be refused as too large.
+ */
+export interface ChangedFilesOptions {
+  /** Trusted diff-exclusion globs. A matching path is listed without a patch — `applyDiffExclusions` would discard it moments later anyway. */
+  excludes?: string[];
+  /**
+   * Globs that may shrink the in-scope COUNT but may never suppress an
+   * individual file's content. This asymmetry is the whole reason the field
+   * exists separately: these come from the checkout's own `.pr-review.yaml`,
+   * which the branch under review can write.
+   *
+   * Counting with them is safe in one direction only — extra excludes can just
+   * make the run *less* likely to be refused, i.e. more likely to fetch — so a
+   * PR cannot use them to get itself skipped past the guard. Letting them
+   * suppress a file would be the opposite: `diff_excludes: ['**\/*']` in a
+   * branch-authored config would deliver a review with no diff at all.
+   */
+  countOnlyExcludes?: string[];
+  /** The too-many-files guard. Once more than this many paths are in scope the run is refused, so no file's content is worth fetching. */
+  maxPatchedFiles?: number;
+}
+
 export interface ExistingComment {
   id: string;
   author: string;
@@ -92,6 +123,30 @@ export interface GatherOutput {
    * refetched once.
    */
   changedFilesComplete?: true;
+  /**
+   * Set when gather skipped content fetches because the in-scope count already
+   * exceeded the too-many-files guard (INV-FETCH-04). The path list is still
+   * complete; the in-scope rows simply carry no patch.
+   *
+   * `earlyExitGate` reads this BEFORE applying exclusions — with no patches the
+   * byte-size clause sums to zero and would wave the run through — and gather
+   * never caches such an output: a path-only list restored under a wider
+   * exclusion set would come back looking like a whole diff.
+   */
+  patchesOmitted?: true;
+  /**
+   * The exclusion globs this gather withheld file content for (INV-FETCH-04).
+   *
+   * The cache stores RAW rows and the hit path re-applies the CURRENT run's
+   * exclusions, so an entry is only reusable while every glob it withheld under
+   * is still excluded. Otherwise those rows come back in scope carrying no
+   * patch — reviewed blind, with nothing to signal it. The sets are compared
+   * literally: glob subsumption is undecidable, so a differing list refetches.
+   *
+   * Absent on entries written before 0.13, which withheld nothing — every
+   * provider fetched every patch — so their absence is not a reason to refetch.
+   */
+  contentExcludes?: string[];
 }
 
 export interface ReviewerDefinition {

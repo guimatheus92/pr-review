@@ -41,7 +41,7 @@ Run these in order. Do not skip a step because the previous one looked fine.
 
 4. **The matrix — all three providers, every time.**
    ```bash
-   npm run acceptance                    # 3 providers x 2 runtimes + the file-list gate
+   npm run acceptance                    # 3 providers x 2 runtimes + the file-list and no-fetch gates
    ```
    GitHub alone is not a result. Azure DevOps and GitLab have full providers and
    **zero** non-stubbed coverage anywhere else in this repo, so a matrix narrowed

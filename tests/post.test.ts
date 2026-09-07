@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { commentKey, snapFindingsToDiff } from '../src/commands/post.js';
+import { commentKey, postingPolicy, postingShape, snapFindingsToDiff } from '../src/commands/post.js';
 import type { ChangedFile, Finding } from '../src/types.js';
 
 const PATCH = [
@@ -46,7 +47,10 @@ test('snapFindingsToDiff — reanchor moves findings outside the diff to a valid
   assert.equal(findings[1].body, 'the body');
 });
 
-test('snapFindingsToDiff — without reanchor (ADO), unanchorable findings pass through untouched', () => {
+// Not "(ADO)" any more: Azure DevOps now turns snapping off too, so its shape is
+// the early return in snapFindingsToDiff, asserted through postingShape below.
+// This still pins the reanchor flag on its own, which is what it always tested.
+test('snapFindingsToDiff — without reanchor, unanchorable findings pass through untouched', () => {
   const input = [finding('src/not-in-diff.ts', 5), finding()];
   const { findings, reanchored } = snapFindingsToDiff(input, FILES, false);
   assert.equal(reanchored, 0);
@@ -510,4 +514,56 @@ test('runPost — a transient error that never clears stops retrying and falls b
   assert.equal(fake.singles.length, 3, 'and the leftovers go per-comment');
   assert.equal(result.posted, 3);
   assertNoDuplicateComments(fake);
+});
+
+// ---------------------------------------------------------------------------
+// The posting shape, decided once per provider.
+//
+// `runPost` applies it, and `resumeReview` and `verify` both RECOMPUTE it to
+// recognize the run's own comments on the PR. Three copies of the rule used to
+// sit in three files; drift between them means a resume writes a comment twice
+// (INV-POST-05) or verify grades a correct run as posting where it never
+// planned to (INV-POST-06). One function now, asserted per provider.
+
+test('postingPolicy — GitHub and GitLab anchor to the diff; Azure DevOps posts where the reviewer pointed', () => {
+  assert.deepEqual(postingPolicy('github'), { snap: true, reanchor: true });
+  assert.deepEqual(postingPolicy('gitlab'), { snap: true, reanchor: true });
+  assert.deepEqual(postingPolicy('azuredevops'), { snap: false, reanchor: false });
+});
+
+test('postingShape — an Azure DevOps finding far from any hunk keeps its own line', () => {
+  // The regression this guards. ADO threads are not limited to diff lines, and
+  // the docs have always said findings post at the reported file:line — but that
+  // was true only because the synthesized patch carried the WHOLE file as
+  // context, so every line was "in the diff". Real hunks would have dragged this
+  // finding from line 900 to line 13, silently, on every ADO review.
+  const input = [finding('src/a.ts', 900)];
+  assert.deepEqual(postingShape(input, FILES, 'azuredevops').map((f) => f.line), [900]);
+  assert.deepEqual(postingShape(input, FILES, 'github').map((f) => f.line), [13], 'GitHub still snaps: a 422 otherwise');
+});
+
+test('postingShape — no call site keeps its own copy of the rule', () => {
+  // This asserted `postingShape(x) deepEqual postingShape(x)` — a tautology for
+  // any pure function, which still passed if runPost, resumeReview or verify
+  // re-inlined its own reanchor rule. That drift is the whole risk (INV-POST-05
+  // double-post, INV-POST-06 false audit), so read the source instead: the three
+  // modules must reach the shape through the shared helper, not rebuild it.
+  const root = fileURLToPath(new URL('../src/commands/', import.meta.url));
+  for (const file of ['post.ts', 'review.ts', 'verify.ts']) {
+    const source = readFileSync(join(root, file), 'utf8');
+    const inlined = source.match(/===\s*'github'\s*\|\|[^\n]*'gitlab'/g) ?? [];
+    assert.deepEqual(
+      inlined,
+      [],
+      `${file} rebuilds the provider posting rule inline; call postingPolicy/postingShape instead`,
+    );
+    assert.match(source, /posting(Policy|Shape)\(/, `${file} must reach the posting shape through the shared helper`);
+  }
+});
+
+test('postingShape — Azure DevOps still never drops a finding: a location-less one passes through', () => {
+  // INV-POST-07. Without reanchoring, ADO posts it as a PR-level resolvable
+  // thread; what must never happen is it disappearing here.
+  const input = [finding(), finding('src/not-in-diff.ts', 5)];
+  assert.deepEqual(postingShape(input, FILES, 'azuredevops'), input);
 });

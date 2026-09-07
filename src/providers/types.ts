@@ -1,4 +1,4 @@
-import type { ChangedFile, ExistingComment, Finding, PrMetadata, PrRef, Provider } from '../types.js';
+import type { ChangedFile, ChangedFilesOptions, ExistingComment, Finding, PrMetadata, PrRef, Provider } from '../types.js';
 
 export interface BatchComment {
   path: string;
@@ -19,8 +19,17 @@ export interface PrProvider {
   parseUrl(url: string): PrRef | null;
   /** Set `changedFileCount` whenever the API offers an exact count, `changedFileListTruncated` when it signals a cap — gather compares the list against them. */
   fetchMetadata(ref: PrRef): Promise<PrMetadata>;
-  /** MUST paginate to completion. An incomplete list is unknown, never empty: it feeds every trust gate keyed on changed paths. */
-  fetchChangedFiles(ref: PrRef): Promise<ChangedFile[]>;
+  /**
+   * MUST paginate to completion. An incomplete list is unknown, never empty: it
+   * feeds every trust gate keyed on changed paths.
+   *
+   * `opts` narrows CONTENT only (INV-FETCH-04): a provider that pays per file
+   * for its patches skips the ones the caller says cannot reach a review pass.
+   * It never narrows the PATH list — every changed path is returned regardless,
+   * or the completeness gate and the trust gates lose the same rows. Honouring
+   * it is optional: GitHub and GitLab get patches inside the listing response.
+   */
+  fetchChangedFiles(ref: PrRef, opts?: ChangedFilesOptions): Promise<ChangedFile[]>;
   /**
    * Existing comments on the PR. `since`, when given, asks the provider to
    * return only comments created/updated at or after it: the reconciliation

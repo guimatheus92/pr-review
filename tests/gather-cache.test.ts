@@ -5,7 +5,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { refreshCachedGatherIdentity, runGather } from '../src/commands/gather.js';
-import type { ChangedFile, GatherOutput, PrMetadata, PrRef } from '../src/types.js';
+import { MAX_FILES_GUARD, patchPolicy } from '../src/dispatch/diff-filter.js';
+import type { ChangedFile, ChangedFilesOptions, GatherOutput, PrMetadata, PrRef } from '../src/types.js';
 import type { PrProvider } from '../src/providers/types.js';
 
 test('refreshCachedGatherIdentity — authoritative ADO project upgrades a stale cached payload', () => {
@@ -558,4 +559,279 @@ test('runGather — structural refusals (shallow, criss-cross) do not tell the u
     rmSync(shallow, { recursive: true, force: true });
     rmSync(repo, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// INV-FETCH-04 — gather does not pay for files the review will not read.
+//
+// Two cost sites, one policy: the provider (Azure DevOps spends two whole-file
+// getItem calls per modified file) and the truncated-list completion below (one
+// `git diff-tree -p` process per missing file, on the largest PRs there are).
+
+/**
+ * A provider that PAYS for its patches, the way Azure DevOps does, so it
+ * honours the options. It calls the product's own `patchPolicy` rather than
+ * re-deciding: what is under test here is gather's plumbing — the options it
+ * builds, the flag it derives, the cache entry it declines to write.
+ */
+function fakePaying(
+  metadata: PrMetadata,
+  paths: string[],
+): { provider: PrProvider; seen: () => ChangedFilesOptions | undefined } {
+  let seen: ChangedFilesOptions | undefined;
+  const provider: PrProvider = {
+    name: 'github', authEnv: () => ({}), parseUrl: () => ({ ...GH_REF, baseUrl: 'https://api.github.com' }),
+    fetchMetadata: async () => metadata,
+    fetchChangedFiles: async (_ref, opts) => {
+      seen = opts;
+      const policy = patchPolicy(paths, opts);
+      return paths.map((path) => ({
+        path,
+        status: 'modified' as const,
+        additions: 1,
+        deletions: 0,
+        ...(policy.wants(path) ? { patch: '@@ -1,1 +1,2 @@\n x\n+y' } : {}),
+      }));
+    },
+    fetchExistingComments: async () => [],
+    postLineComment: async () => null,
+    isTransientError: () => false,
+  };
+  return { provider, seen: () => seen };
+}
+
+const srcPaths = (n: number, prefix = 'src/f') => Array.from({ length: n }, (_, i) => `${prefix}${i}.ts`);
+const gatherOpts = (provider: PrProvider, extra: Record<string, unknown> = {}) => ({
+  prUrl: GH_REF.url, provider, readGatherCacheFn: () => null, ...extra,
+});
+
+test('runGather — the fetch policy it hands the provider is the guard and the exclusions the gate will use', async () => {
+  const { provider, seen } = fakePaying(META, ['src/a.ts']);
+  await withNoRepoDir(async (cwd) => {
+    await runGather({ ...gatherOpts(provider), cwd, extraExcludes: ['**/legacy/**'], writeGatherCacheFn: () => 'x' });
+  });
+  assert.equal(seen()?.maxPatchedFiles, MAX_FILES_GUARD, 'the provider is told the same limit the review enforces');
+  assert.ok(seen()?.excludes?.includes('**/package-lock.json'), 'the built-in exclusions travel with it');
+  assert.ok(seen()?.excludes?.includes('**/legacy/**'), 'and so do the configured ones');
+});
+
+test('runGather — past the guard a paying provider returns paths only: flagged, and never cached', async () => {
+  const { provider } = fakePaying({ ...META, changedFileCount: 501 }, srcPaths(501));
+  let writes = 0;
+  const result = await withNoRepoDir(async (cwd) =>
+    runGather({ ...gatherOpts(provider), cwd, writeGatherCacheFn: () => (writes++, 'x') }),
+  );
+  assert.equal(result.changedFiles.length, 501, 'the PATH list is complete — the trust gates read it (INV-FETCH-01)');
+  assert.equal(result.changedFilesComplete, true);
+  assert.ok(result.changedFiles.every((f) => f.patch === undefined), 'no content was fetched');
+  assert.equal(result.patchesOmitted, true, 'the gate needs this before the byte clause sums zero');
+  assert.equal(writes, 0, 'a path-only list restored under wider excludes would look like a whole diff');
+});
+
+test('runGather — a provider that ships patches for free is refused on the count, not as contentless', async () => {
+  // GitHub and GitLab carry the patch in the listing response, so nothing was
+  // withheld here and the gate must say "501 changed files", not "no content
+  // was fetched". The entry is still not cached: the cache keys on the POLICY,
+  // because the mixed list below is indistinguishable from this one row by row,
+  // and an over-guard entry is worthless anyway — the run it would serve is
+  // refused for the same reason this one was.
+  const { provider } = fakeGithub({ ...META, changedFileCount: 501 }, srcPaths(501).map(file));
+  let writes = 0;
+  const result = await withNoRepoDir(async (cwd) =>
+    runGather({ ...gatherOpts(provider), cwd, writeGatherCacheFn: () => (writes++, 'x') }),
+  );
+  assert.equal(result.patchesOmitted, undefined, 'the flag records what happened, not what the policy allowed');
+  assert.equal(writes, 0, 'nothing assembled under a withholding policy is stored');
+});
+
+test('runGather — the guard counts in-scope files, so an excluded file keeps a 501-row PR fetchable', async () => {
+  const { provider } = fakePaying({ ...META, changedFileCount: 501 }, [...srcPaths(500), 'package-lock.json']);
+  const result = await withNoRepoDir(async (cwd) =>
+    runGather({ ...gatherOpts(provider), cwd, writeGatherCacheFn: () => 'x' }),
+  );
+  assert.equal(result.patchesOmitted, undefined, '500 in scope is under the guard');
+  assert.ok(result.changedFiles.find((f) => f.path === 'src/f0.ts')?.patch, 'the reviewable files were fetched');
+  assert.equal(result.changedFiles.find((f) => f.path === 'package-lock.json')?.patch, undefined, 'the lockfile never was');
+});
+
+test("runGather — the repo's own diff_excludes still keep a large PR reviewable, exactly as before", async () => {
+  // 600 rows, 150 under a glob only the checkout's .pr-review.yaml knows about.
+  // The review would count 450 and proceed, so gather must not refuse it first:
+  // that is the regression the count-only channel exists to prevent.
+  const paths = [...srcPaths(450), ...srcPaths(150, 'generated/g')];
+  const { provider } = fakePaying({ ...META, changedFileCount: 600 }, paths);
+  const result = await withNoRepoDir(async (cwd) =>
+    runGather({ ...gatherOpts(provider), cwd, repoExcludes: ['**/generated/**'], writeGatherCacheFn: () => 'x' }),
+  );
+  assert.equal(result.patchesOmitted, undefined, '450 in scope after the repo excludes — under the guard');
+  assert.ok(result.changedFiles.find((f) => f.path === 'src/f0.ts')?.patch, 'the review proceeds, so the content is needed');
+});
+
+test('runGather — branch-authored excludes can never suppress a file: they narrow the count, nothing else', async () => {
+  // The attack the count-only channel is shaped to refuse: a PR commits
+  // `diff_excludes: ['**/*']` and its own diff disappears from the review.
+  const { provider } = fakePaying({ ...META, changedFileCount: 3 }, ['src/a.ts', 'src/b.ts', 'src/c.ts']);
+  const result = await withNoRepoDir(async (cwd) =>
+    runGather({ ...gatherOpts(provider), cwd, repoExcludes: ['**/*'], writeGatherCacheFn: () => 'x' }),
+  );
+  assert.ok(
+    result.changedFiles.every((f) => f.patch !== undefined),
+    'every file still carries its diff — a PR cannot exclude itself out of being read',
+  );
+  assert.equal(result.patchesOmitted, undefined);
+});
+
+test('runGather — git completion lists an excluded path without spawning a patch for it', async () => {
+  // The cache holds the RAW rows, before applyDiffExclusions strips patches, so
+  // it is the one place the skipped work is observable: pre-fix this carried the
+  // lockfile's real git patch.
+  const { repo, baseSha, headSha } = prRepo();
+  try {
+    const { provider } = fakeGithub({ ...META, baseSha, headSha, changedFileCount: 6 }, [{ ...file('a.ts'), patch: '@@\n+provider' }]);
+    let cached: GatherOutput | undefined;
+    await runGather({ ...gatherOpts(provider), cwd: repo, writeGatherCacheFn: (v) => (cached = v, 'x') });
+    const raw = (path: string) => cached!.changedFiles.find((f) => f.path === path)!;
+    assert.equal(raw('package-lock.json').patch, undefined, 'no `git diff-tree -p` was spawned for an excluded path');
+    assert.ok(raw('b.ts').patch?.startsWith('@@ -0,0 +1'), 'the reviewable additions still get their patch');
+    assert.equal(raw('package-lock.json').status, 'added', 'the row — and the path the trust gates read — is still there');
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('runGather — past the guard the git completion generates no patches at all, and nothing is cached', async () => {
+  const repo = mkdtempSync(join(tmpdir(), 'pr-review-huge-'));
+  try {
+    git(repo, 'init', '-q', '-b', 'main');
+    git(repo, 'remote', 'add', 'origin', 'https://github.com/o/r.git');
+    writeFileSync(join(repo, 'seed.ts'), 'seed\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'base');
+    const baseSha = git(repo, 'rev-parse', 'HEAD');
+    for (const path of srcPaths(501)) {
+      mkdirSync(join(repo, 'src'), { recursive: true });
+      writeFileSync(join(repo, path), `${path}\n`);
+    }
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'head');
+    const headSha = git(repo, 'rev-parse', 'HEAD');
+    // The provider lists one file and reports 501: the completion has 500 to add.
+    const { provider } = fakeGithub({ ...META, baseSha, headSha, changedFileCount: 501 }, [{ ...file('src/f0.ts'), patch: '@@\n+provider' }]);
+    let writes = 0;
+    const result = await runGather({ ...gatherOpts(provider), cwd: repo, writeGatherCacheFn: () => (writes++, 'x') });
+    assert.equal(result.changedFiles.length, 501, 'every path is still completed — that is INV-FETCH-01');
+    const completed = result.changedFiles.filter((f) => f.path !== 'src/f0.ts');
+    assert.ok(completed.every((f) => f.patch === undefined), '500 git processes not spawned');
+    assert.equal(writes, 0, 'and the half-empty list is not cached');
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('runGather — a PR that wrote its own .pr-review.yaml does not get its excludes counted', async () => {
+  // INV-TRUST-01 reaching the cost decision: runReview will discard a config the
+  // branch authored and count every file, so the cache/flag decisions here must
+  // be taken the same way. 501 rows, one of them the config itself, and globs
+  // that would otherwise hide 100 of them.
+  const paths = ['.pr-review.yaml', ...srcPaths(500)];
+  const { provider } = fakePaying({ ...META, changedFileCount: 501 }, paths);
+  let writes = 0;
+  const result = await withNoRepoDir(async (cwd) =>
+    runGather({
+      ...gatherOpts(provider),
+      cwd,
+      repoExcludes: ['src/f1*.ts', 'src/f2*.ts'],
+      writeGatherCacheFn: () => (writes++, 'x'),
+    }),
+  );
+  assert.equal(writes, 0, 'the run is about to be refused on the real count — do not store an entry for it');
+  assert.equal(result.changedFiles.length, 501, 'the path list is untouched either way');
+});
+
+test('runGather — an UNCHANGED repo config still gets its excludes counted', async () => {
+  // The control for the test above: without it, that assertion would also pass
+  // if repoExcludes were ignored outright, which is the regression decision 1
+  // exists to prevent.
+  const { provider } = fakePaying({ ...META, changedFileCount: 501 }, srcPaths(501));
+  let writes = 0;
+  await withNoRepoDir(async (cwd) =>
+    runGather({
+      ...gatherOpts(provider),
+      cwd,
+      repoExcludes: ['src/f1*.ts', 'src/f2*.ts'],
+      writeGatherCacheFn: () => (writes++, 'x'),
+    }),
+  );
+  assert.equal(writes, 1, 'the repo excludes bring it under the guard, so the run proceeds and the entry is good');
+});
+
+test('runGather — an entry that withheld content is refetched when the next run excludes less', async () => {
+  // The hole INV-FETCH-04 opened: under the guard, a paying provider still
+  // withholds patches for EXCLUDED paths, and that entry is cached. The key is
+  // headSha + last comment id and carries no exclusion set, so `pr-review
+  // gather` (which passes none) would hit it, pull those rows back into scope
+  // with no patch, and hand the passes a file to review blind.
+  const paths = ['src/a.ts', 'legacy/old.ts'];
+  const { provider } = fakePaying({ ...META, changedFileCount: 2 }, paths);
+  let cached: GatherOutput | undefined;
+  await withNoRepoDir(async (cwd) =>
+    runGather({ ...gatherOpts(provider), cwd, extraExcludes: ['**/legacy/**'], writeGatherCacheFn: (v) => (cached = v, 'x') }),
+  );
+  assert.ok(cached, 'the entry is written — the run itself was fine');
+  assert.equal(cached!.changedFiles.find((f) => f.path === 'legacy/old.ts')?.patch, undefined, 'its content was withheld');
+  assert.ok(cached!.contentExcludes?.includes('**/legacy/**'), 'and the entry records the globs that made it conditional');
+
+  // Same head SHA, narrower exclusions: the entry must not be served.
+  const { provider: second, seen } = fakePaying({ ...META, changedFileCount: 2 }, paths);
+  const result = await withNoRepoDir(async (cwd) =>
+    runGather({
+      ...gatherOpts(second),
+      cwd,
+      readGatherCacheFn: () => ({ data: cached!, path: 'hit.json', ageMs: 1 }),
+      writeGatherCacheFn: () => 'x',
+    }),
+  );
+  assert.ok(seen(), 'the provider was asked again rather than the stale entry served');
+  assert.ok(result.changedFiles.find((f) => f.path === 'legacy/old.ts')?.patch, 'and the row now carries its content');
+});
+
+test('runGather — an entry that withheld nothing is still served when the exclusions change', async () => {
+  // The control. GitHub and GitLab carry the patch inside the listing response,
+  // so nothing is conditional and invalidating their entries on every config
+  // edit would be a cost with no saving behind it.
+  const { provider } = fakeGithub({ ...META, changedFileCount: 2 }, [file('src/a.ts'), file('legacy/old.ts')]);
+  let cached: GatherOutput | undefined;
+  await withNoRepoDir(async (cwd) =>
+    runGather({ ...gatherOpts(provider), cwd, extraExcludes: ['**/legacy/**'], writeGatherCacheFn: (v) => (cached = v, 'x') }),
+  );
+  assert.equal(cached!.contentExcludes, undefined, 'nothing was withheld, so nothing is conditional');
+  const { provider: second, fetches } = fakeGithub({ ...META, changedFileCount: 2 }, []);
+  await withNoRepoDir(async (cwd) =>
+    runGather({ ...gatherOpts(second), cwd, readGatherCacheFn: () => ({ data: cached!, path: 'hit.json', ageMs: 1 }), writeGatherCacheFn: () => 'x' }),
+  );
+  assert.equal(fetches(), 0, 'served from cache, as before');
+});
+
+test('runGather — patchesRequired lifts the file guard: `pr-review post` needs the map, it is not reviewing', async () => {
+  // `pr-review post` gathers ONLY to build buildValidLinesMap. With the guard
+  // applied, a >500-file PR hands it an empty map: nothing snaps, GitHub has no
+  // anchor to re-anchor to, and every comment posts at whatever line the
+  // reviewer named — the 422-on-the-batch failure that call exists to prevent.
+  const { provider } = fakePaying({ ...META, changedFileCount: 501 }, srcPaths(501));
+  const result = await withNoRepoDir(async (cwd) =>
+    runGather({ ...gatherOpts(provider), cwd, patchesRequired: true, writeGatherCacheFn: () => 'x' }),
+  );
+  assert.ok(result.changedFiles.every((f) => f.patch), 'every patch fetched despite 501 in-scope files');
+  assert.equal(result.patchesOmitted, undefined);
+});
+
+test('runGather — without patchesRequired the same PR is path-only: the guard is the default, not the exception', async () => {
+  // The control. `review` and `gather` both take the guard; only a caller that
+  // says it needs the content opts out.
+  const { provider } = fakePaying({ ...META, changedFileCount: 501 }, srcPaths(501));
+  const result = await withNoRepoDir(async (cwd) =>
+    runGather({ ...gatherOpts(provider), cwd, writeGatherCacheFn: () => 'x' }),
+  );
+  assert.ok(result.changedFiles.every((f) => f.patch === undefined));
+  assert.equal(result.patchesOmitted, true);
 });

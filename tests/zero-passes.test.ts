@@ -739,3 +739,153 @@ test('runReview — the --context-only preview renders every degraded entry, inc
     s.restore();
   }
 });
+
+// ---------------------------------------------------------------------------
+// The too-many-files / too-many-bytes guard (INV-FETCH-04).
+//
+// Until now this gate had no test at all: `MAX_FILES_GUARD`, `MAX_PATCH_BYTES`
+// and the "everything excluded" clause were the only product contract in the
+// repo with neither an invariant ID nor an assertion. It is load-bearing now —
+// gather asks the same question to decide what it is worth fetching — so the
+// boundary has to be pinned on both sides, not just past it.
+
+/** Rewrite the fixture gather in place; the shape a real run reads is the contract. */
+function mutateGather(gatherFile: string, edit: (g: GatherOutput) => void): void {
+  const gather = JSON.parse(readFileSync(gatherFile, 'utf8')) as GatherOutput;
+  edit(gather);
+  writeFileSync(gatherFile, JSON.stringify(gather), 'utf8');
+}
+
+function paths(n: number, prefix = 'src/f'): string[] {
+  return Array.from({ length: n }, (_, i) => `${prefix}${i}.ts`);
+}
+
+test('file guard — 501 in-scope files is refused with the count and the limit, exit 2', async () => {
+  const s = setup(paths(501));
+  try {
+    const result = await runReview({
+      ...BASE,
+      homeOverride: s.home,
+      runDir: s.runDir,
+      fromGather: s.gatherFile,
+      provider: fakeProvider(),
+      selectPassesFn: () => emptySelection(),
+    });
+    assert.equal(result.exitCode, 2);
+    assert.match(result.summary, /PR is too large: 501 changed files \(limit 500\)/);
+    assert.ok(existsSync(join(s.runDir, 'error.txt')), 'a refused prerequisite is a failed run for status');
+    assert.ok(!existsSync(join(s.runDir, 'pr-review-summary.md')), 'no done-state artifact on refusal');
+  } finally {
+    s.restore();
+  }
+});
+
+test('file guard — 500 is under the limit: the boundary is > not >=, and exclusions are what counts', async () => {
+  // 501 rows, one of them a lockfile: DEFAULT_EXCLUDES drops it, leaving exactly
+  // 500 in scope. The run must get past the file clause — it stops later, on the
+  // injected empty pass selection, which is a different refusal entirely.
+  const s = setup([...paths(500), 'package-lock.json']);
+  try {
+    const result = await runReview({
+      ...BASE,
+      homeOverride: s.home,
+      runDir: s.runDir,
+      fromGather: s.gatherFile,
+      provider: fakeProvider(),
+      selectPassesFn: () => emptySelection(),
+    });
+    assert.doesNotMatch(result.summary, /too large/, '500 in-scope files is allowed; an excluded file is not in scope');
+    assert.match(result.summary, /nothing to review with — no skills matched/, 'it reached pass selection');
+  } finally {
+    s.restore();
+  }
+});
+
+test('byte guard — patches over 2 MB are refused, and excluded files do not count toward the total', async () => {
+  const s = setup(['src/a.ts', 'src/b.ts']);
+  try {
+    // 1.2 MB each: over the 2 MB total, under it individually — the gate sums.
+    mutateGather(s.gatherFile, (g) => {
+      for (const f of g.changedFiles) f.patch = `@@ -1,1 +1,2 @@\n context\n+${'x'.repeat(1_200_000)}`;
+    });
+    const result = await runReview({
+      ...BASE,
+      homeOverride: s.home,
+      runDir: s.runDir,
+      fromGather: s.gatherFile,
+      provider: fakeProvider(),
+      selectPassesFn: () => emptySelection(),
+    });
+    assert.equal(result.exitCode, 2);
+    // Both figures share a divisor: the limit must not render as 1.9073486328125.
+    assert.match(result.summary, /PR diff is too large: 2\.[0-9] MB of patches \(limit 1\.9 MB\)\./);
+  } finally {
+    s.restore();
+  }
+});
+
+test('byte guard — the same bytes under an excluded path are not counted: applyDiffExclusions drops the patch first', async () => {
+  const s = setup(['src/a.ts', 'vendor/big.ts']);
+  try {
+    mutateGather(s.gatherFile, (g) => {
+      for (const f of g.changedFiles) f.patch = `@@ -1,1 +1,2 @@\n context\n+${'x'.repeat(1_200_000)}`;
+    });
+    const result = await runReview({
+      ...BASE,
+      homeOverride: s.home,
+      runDir: s.runDir,
+      fromGather: s.gatherFile,
+      provider: fakeProvider(),
+      selectPassesFn: () => emptySelection(),
+    });
+    assert.doesNotMatch(result.summary, /too large/, 'vendor/ is excluded, so its 1.2 MB never reaches the sum');
+  } finally {
+    s.restore();
+  }
+});
+
+test('file guard — a PR whose every file is excluded is refused as nothing to review, not as too large', async () => {
+  const s = setup(['package-lock.json', 'dist/bundle.js', 'assets/logo.png']);
+  try {
+    const result = await runReview({
+      ...BASE,
+      homeOverride: s.home,
+      runDir: s.runDir,
+      fromGather: s.gatherFile,
+      provider: fakeProvider(),
+      selectPassesFn: () => emptySelection(),
+    });
+    assert.equal(result.exitCode, 2);
+    assert.match(result.summary, /No reviewable files \(everything excluded by diff filters\)/);
+  } finally {
+    s.restore();
+  }
+});
+
+test('file guard — a contentless gather is refused BEFORE exclusions, or the byte clause sums zero and waves it through', async () => {
+  // The order is the whole point. `patchesOmitted` is set only once gather has
+  // already counted more in-scope files than the guard allows, and with every
+  // patch gone the byte clause below it adds up to 0 bytes — a clean pass. Two
+  // in-scope files here, so the count clause cannot save the gate either: only
+  // reading the flag first refuses this run.
+  const s = setup(['src/a.ts', 'src/b.ts']);
+  try {
+    mutateGather(s.gatherFile, (g) => {
+      g.patchesOmitted = true;
+      for (const f of g.changedFiles) delete f.patch;
+    });
+    const result = await runReview({
+      ...BASE,
+      homeOverride: s.home,
+      runDir: s.runDir,
+      fromGather: s.gatherFile,
+      provider: fakeProvider(),
+      selectPassesFn: () => emptySelection(),
+    });
+    assert.equal(result.exitCode, 2);
+    assert.match(result.summary, /PR is too large: more than 500 changed files, so no file content was fetched/);
+    assert.ok(existsSync(join(s.runDir, 'error.txt')));
+  } finally {
+    s.restore();
+  }
+});

@@ -52,7 +52,7 @@ const list = (name, fallback) => (flag(name) ?? fallback).split(',').map((s) => 
 
 const wantProviders = list('provider', PROVIDERS.join(','));
 const wantRuntimes = list('runtime', RUNTIMES.join(','));
-const wantCases = list('case', 'defects,filelist');
+const wantCases = list('case', 'defects,filelist,nofetch');
 const dryRun = has('dry-run');
 const resetOnly = has('reset-only');
 // Lazily: naming --out must not still mint an empty temp directory.
@@ -549,7 +549,7 @@ async function runFilelistCell() {
   // to actually come back incomplete for a refusal to be correct. Measured on
   // this estate, GitLab's `changes_count` is exact at least through 1200 files
   // ("1200", not "1200+"), so the truncation flag never trips. The refusal is
-  // covered hermetically by tests/gather.test.ts, which can stub a short list
+  // covered hermetically by tests/gather-cache.test.ts, which can stub a short list
   // against a high count. Naming that ceiling is the point — a live assertion
   // written for a truncation that never happens tests nothing, and the first
   // version of this cell asserted the *opposite* of correct behaviour: it
@@ -557,7 +557,7 @@ async function runFilelistCell() {
   const reported = await gitlabChangesCount(prUrl);
   if (reported.truncated) {
     failures.push(
-      `GitLab now reports changes_count "${reported.truncated}" for this MR — truncation is live, so this cell must assert the refusal path again (see tests/gather.test.ts for the shape)`,
+      `GitLab now reports changes_count "${reported.truncated}" for this MR — truncation is live, so this cell must assert the refusal path again (see tests/gather-cache.test.ts for the shape)`,
     );
   }
   const expected = reported.count ?? null;
@@ -589,6 +589,75 @@ async function runFilelistCell() {
   }
 
   return { provider: 'gitlab', runtime: '-', case: 'filelist', ok: failures.length === 0, failures, prUrl, files: seen[0] };
+}
+
+/**
+ * INV-FETCH-04, live and LLM-free: a PR past the 500-file guard costs no
+ * content fetch at all.
+ *
+ * Azure DevOps only, and that is the point. GitHub and GitLab ship each file's
+ * patch inside the listing response, so there is nothing to withhold and a cell
+ * there would pass whatever the code did. ADO synthesizes every patch from two
+ * whole-file `getItem` calls — two per modified file, one per added file, so
+ * 501 requests on this all-additions fixture — all of them spent before the run
+ * was refused for being too large.
+ *
+ * What makes it a real assertion rather than a tautology: `gather` must SUCCEED
+ * and return all 501 paths (INV-FETCH-01 — the trust gates read paths, and
+ * withholding content must never shorten the list), while every one of them
+ * comes back without a patch, nothing is cached, and a `review` of the same PR
+ * is refused. Asserting the refusal alone would pass with the file list gone.
+ */
+async function runNoFetchCell() {
+  const prUrl = matrix.providers.azuredevops?.huge;
+  const failures = [];
+  if (!prUrl) {
+    return { provider: 'azuredevops', runtime: '-', case: 'nofetch', ok: false, failures: ['no huge PR URL in matrix.yaml — run `npm run acceptance:seed`'] };
+  }
+
+  let files = 0;
+  const started = Date.now();
+  try {
+    run(process.execPath, [CLI, 'gather', prUrl, '--no-cache', '--out', join(outDir, 'nofetch-gather.json')], {
+      cwd: checkoutFor('azuredevops'),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const gather = readArtifact(outDir, 'nofetch-gather.json');
+    files = gather?.changedFiles?.length ?? 0;
+    if (files <= 500) {
+      failures.push(`gather returned ${files} files — the fixture must be past the 500-file guard for this cell to mean anything`);
+    }
+    if (gather?.changedFilesComplete !== true) failures.push('the file list was not marked complete — paths must never be withheld');
+    const withPatch = (gather?.changedFiles ?? []).filter((f) => f.patch).length;
+    if (withPatch > 0) failures.push(`${withPatch} file(s) carry a patch — content was fetched for a PR that cannot be reviewed`);
+    if (gather?.patchesOmitted !== true) failures.push('the gather is not flagged as contentless, so earlyExitGate would measure 0 bytes and pass it');
+  } catch (err) {
+    failures.push(`gather failed: ${safeLogValue(String(err.stderr ?? err.message).slice(0, 300))}`);
+  }
+  // Wall-clock is the crudest possible proof, and the most direct: 1002
+  // sequential-ish getItem calls against a live ADO org cannot finish this fast.
+  const elapsedMs = Date.now() - started;
+
+  // The other half: the run really is refused, and refused for this reason.
+  //
+  // `--runtime copilot` is not a request to run copilot — nothing is dispatched
+  // here. `resolveRuntime` returns an explicit choice without probing PATH, and
+  // it is called BEFORE `earlyExitGate`; on a CI runner with neither CLI
+  // installed the run would otherwise die on "No agent runtime found" and this
+  // cell would report a failure that has nothing to do with the guard.
+  try {
+    run(process.execPath, [CLI, 'review', prUrl, '--dry-run', '--no-codex', '--no-companions', '--runtime', 'copilot'], {
+      cwd: checkoutFor('azuredevops'),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    failures.push('review exited 0 on a 501-file PR — the guard did not fire');
+  } catch (err) {
+    const text = String(err.stdout ?? '') + String(err.stderr ?? '');
+    if (err.status !== 2) failures.push(`review exited ${err.status}, expected 2`);
+    if (!/too large/i.test(text)) failures.push(`review was refused, but not as too large: ${safeLogValue(text.slice(-300))}`);
+  }
+
+  return { provider: 'azuredevops', runtime: '-', case: 'nofetch', ok: failures.length === 0, failures, prUrl, files, elapsedMs };
 }
 
 // --- the matrix ------------------------------------------------------------
@@ -638,6 +707,22 @@ if (wantCases.includes('filelist') && wantProviders.includes('gitlab') && !reset
   }
   const last = results[results.length - 1];
   console.log(last.ok ? '✓ gitlab/filelist' : `✗ gitlab/filelist\n    ${last.failures.join('\n    ')}`);
+}
+
+if (wantCases.includes('nofetch') && wantProviders.includes('azuredevops') && !resetOnly) {
+  console.log(`\n=== azuredevops / no-fetch guard ===`);
+  const began = Date.now();
+  try {
+    results.push({ ...(await runNoFetchCell()), durationMs: Date.now() - began });
+  } catch (err) {
+    results.push({ provider: 'azuredevops', runtime: '-', case: 'nofetch', ok: false, failures: [safeLogValue(err.message)], durationMs: Date.now() - began });
+  }
+  const last = results[results.length - 1];
+  console.log(
+    last.ok
+      ? `✓ azuredevops/nofetch — ${last.files} paths, no content, ${last.elapsedMs} ms`
+      : `✗ azuredevops/nofetch\n    ${last.failures.join('\n    ')}`,
+  );
 }
 
 const cliVersion = (() => {

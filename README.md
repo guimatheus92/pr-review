@@ -217,6 +217,7 @@ On a publish run (the default), every finding lands as a resolvable **inline** r
 - **Skipping only in `--dry-run`.** A failed write is retried only after the PR has been read back — a failed write is not proof that nothing was written — and anything that still fails is reported as an error in the summary, never silently dropped.
 - **No summary comment, ever.** The review does not post a verdict, a recap, or a "### Code review" banner when it finishes. The end-of-run summary is a local file (`pr-review-summary.md` in the run directory), never a comment on the PR.
 - **Never reviewed on a partial file list.** The provider's changed-file list is checked against the provider's own count and its truncation flag. On a mismatch pr-review completes the list from your checkout, or fails before caching anything — it never reviews a diff it cannot prove is whole.
+- **Never pays for what it will not read.** A PR too large to review is refused *before* its content is downloaded, and a file the diff filters exclude costs no fetch at all. On Azure DevOps, where every changed file is diffed from two full downloads, that is the difference between a thousand requests and none.
 
 Every guarantee this tool makes, with why it exists and what verifies it, is in **[INVARIANTS.md](INVARIANTS.md)**. `pr-review verify` audits a finished run against the whole list.
 

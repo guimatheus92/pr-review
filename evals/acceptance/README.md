@@ -166,7 +166,7 @@ Only the account and repo creation is manual. Everything after is one command.
 ```bash
 npm run build                      # the matrix drives dist/cli.cjs, not src/
 pr-review packs sync               # passes come from packs
-npm run acceptance                 # all six cells + the file-list gate
+npm run acceptance                 # all six cells + the file-list and no-fetch gates
 npm run acceptance -- --provider gitlab --runtime copilot
 npm run acceptance -- --dry-run    # no posting; the posting rows report SKIP
 npm run acceptance -- --reset-only # clean the fixture PRs and stop
@@ -221,6 +221,7 @@ exists — so a fork PR can never reach them.
 | `defects/docs/notes.md` | Noise, and it must not say so: a fixture that states its own expected outcome is telling the reviewer the answer. |
 | `defects/_package-lock.json` | Must be dropped by `applyDiffExclusions`. |
 | `acc/wide` (GitLab only) | 101 files — one past GitLab's 100-per-page `/diffs` cap, so a complete list proves the provider **paginates to completion**. That is the bug class that had Azure DevOps reviewing every >100-file PR on its first 100 (`$top` default) from 0.6 through 0.10. Cheapest to reach on GitLab: GitHub's list stops at 3000 and Azure DevOps reports no count at all. |
+| `acc/huge` (Azure DevOps only) | 501 files — one past the 500-file review guard, so the run is refused and INV-FETCH-04 says **nothing may be fetched for it**. ADO-only on purpose: it is the one provider that pays per file for its patches (one whole-file `getItem` per added file, two per modified one — 501 requests on this all-additions fixture before #27), so it is the only place where "did we fetch?" is worth asserting. On GitHub and GitLab the patch arrives inside the listing response — there is nothing to withhold, and the same branch would pass whatever the code did. |
 
 ## What the live matrix cannot prove
 
@@ -232,10 +233,20 @@ this estate ("1200", never "1200+"), so the truncation flag it keys on never
 trips. The `filelist` cell therefore proves the half that is reachable — that a
 101-file MR paginates to a complete list, from inside the checkout *and* from an
 unrelated directory, both agreeing with the provider's own count — and leaves
-the refusal to `tests/gather.test.ts`, which can stub a short list against a
+the refusal to `tests/gather-cache.test.ts`, which can stub a short list against a
 high count.
 
-The first version of that cell asserted the opposite: it demanded a refusal from
+**Why the `nofetch` cell asserts a success and a refusal together.** A cell that
+only checked "the 501-file PR is refused" would pass with the file list deleted
+entirely — the guard would still fire, for the wrong reason. So it first
+requires `gather` to SUCCEED and return all 501 paths marked complete
+(INV-FETCH-01: withholding content must never shorten the list), with not one
+of them carrying a patch, and only then requires `review` to exit 2 as too
+large. The wall-clock is reported alongside because it is the crudest and most
+direct evidence available: a thousand live `getItem` calls cannot finish in the
+seconds this cell takes.
+
+The first version of the `filelist` cell asserted the opposite: it demanded a refusal from
 an unrelated directory, on a list that was complete and therefore safe to use.
 It failed against correct behaviour, which is the only reason the wrong premise
 ("GitLab reports `100+` above 100 files") was ever measured. `gitlabChangesCount`

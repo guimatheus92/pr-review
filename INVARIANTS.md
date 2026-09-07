@@ -206,8 +206,8 @@ on its first 100 files, from 0.6 through 0.10, because `$top` defaults to 100.
 **Enforced:** `src/commands/gather.ts`, `src/providers/github.ts`,
 `src/providers/azuredevops.ts`, `src/providers/gitlab.ts`
 
-**Verified:** `tests/gather-cache.test.ts`, `tests/providers/azuredevops.test.ts`,
-`tests/providers/gitlab.test.ts`
+**Verified:** `tests/gather-cache.test.ts`, `tests/providers/github.test.ts`,
+`tests/providers/azuredevops.test.ts`, `tests/providers/gitlab.test.ts`
 
 **Check:** run+pr
 
@@ -215,8 +215,14 @@ on its first 100 files, from 0.6 through 0.10, because `$top` defaults to 100.
 
 **Always:** `pr-review-gather.json` carries the PR's title, description, author,
 state, draft flag, base and head SHA and branch, linked work items, every
-changed file with its patch, and the existing comment thread. Every pass reads
-that artifact; nothing in the pipeline re-fetches per pass.
+changed file — with its patch wherever one can exist and the run needs it, see
+INV-FETCH-04 — and the existing comment thread. Every pass reads that artifact;
+nothing in the pipeline re-fetches per pass.
+
+The patch is absent in exactly three cases, none of which is a pass reviewing
+blind: a file that has no diff anywhere (binary, pure rename, mode-only), a path
+the diff exclusions drop, and a run already refused as too large, which fetches
+no content at all and is marked `patchesOmitted`.
 
 **Why:** A reviewer missing the description or the existing discussion re-raises
 what was already answered, and per-pass fetching multiplies rate-limit exposure
@@ -244,6 +250,37 @@ present and otherwise fails with the exact command for the user to run.
 **Verified:** `tests/gather-cache.test.ts`, `tests/tmp.test.ts`
 
 **Check:** run
+
+### INV-FETCH-04 — No content is fetched for a file that will not be reviewed
+
+**Always:** File **content** is fetched only for files that can still reach a
+review pass. A file the diff exclusions will discard gets no content fetch, and
+once the in-scope count passes the too-many-files guard nothing is fetched for
+any file: the list is completed with path-only rows and the run is refused. The
+**path** list is unaffected — it is always complete (INV-FETCH-01), because it,
+not the content, is what every trust gate reads.
+
+**Why:** The guard runs after gather, so an oversized Azure DevOps PR paid for
+every file before being refused: one `getItem` per added file and two per
+modified one, each downloading a whole file body. Measured live on a 501-file
+PR of additions: 501 requests and 5.1 s, then "PR is too large". Measured
+hermetically on 501 modified files: 1002 requests. Both are now 0. The same
+shape hit exclusions at any size: a `package-lock.json` was fetched and its
+patch discarded on the next line by `applyDiffExclusions`. Work that cannot
+reach a pass is work no PR should pay for.
+
+**A patch-less row is never silently reviewed.** A gather that omitted patches
+is marked, is never cached (a cached path-only list would come back as a whole
+diff under a wider exclusion set), and the guard reads that mark *before*
+exclusions — otherwise the byte-size gate sees 0 bytes and passes.
+
+**Enforced:** `src/providers/azuredevops.ts`, `src/commands/gather.ts`,
+`src/commands/review.ts`, `src/dispatch/diff-filter.ts`
+
+**Verified:** `tests/providers/azuredevops.test.ts`, `tests/gather-cache.test.ts`,
+`tests/zero-passes.test.ts`
+
+**Check:** tests-only
 
 ---
 

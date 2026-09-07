@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { classifyChange, lcsLineDiff, synthesizePatch } from '../src/providers/azuredevops.js';
+import { classifyChange, lcsLineDiff, synthesizePatch, toHunks } from '../src/providers/azuredevops.js';
 import { validLinesFromPatch } from '../src/dispatch/line-snap.js';
+import { countChangedLines } from '../src/util/diff-lines.js';
 
 test('lcsLineDiff — prefix/suffix trim stitches context back at correct offsets', () => {
   const base = ['a', 'b', 'c', 'd', 'e'];
@@ -75,4 +76,120 @@ test('lcsLineDiff — caps the DP matrix on huge inputs (coarse replace, no OOM,
   // NEW-side line numbers must remain fully addressable for line-snapping.
   const patch = synthesizePatch('big.tmdl', a.join('\n'), b.join('\n'), 'base', 'head');
   assert.equal(validLinesFromPatch(patch).size, 6000);
+});
+
+// ---------------------------------------------------------------------------
+// Hunks. Azure DevOps has no diff endpoint, so the patch is built here from two
+// whole file bodies — and it used to be EMITTED whole too, every unchanged line
+// carried as context. Every downstream size then scaled with the size of the
+// files instead of the size of the change.
+//
+// The danger in framing it properly is the line numbers: a wrong `@@` header is
+// silent, and it lands every finding in the file on the wrong line. So the
+// roundtrip below is checked by CONTENT, not by counting.
+
+const lines = (n: number, tag = 'l') => Array.from({ length: n }, (_, i) => `${tag}${i + 1}`);
+
+/** Every addressable NEW-side line, mapped to the text the patch places there. */
+function newSideText(patch: string): Map<number, string> {
+  const out = new Map<number, string>();
+  let newLine = 0;
+  for (const ln of patch.split('\n')) {
+    const header = /^@@ -\d+,\d+ \+(\d+),\d+ @@/.exec(ln);
+    if (header) {
+      newLine = parseInt(header[1]!, 10) - 1;
+      continue;
+    }
+    if (ln.startsWith('---') || ln.startsWith('+++')) continue;
+    if (ln.startsWith('-')) continue;
+    if (ln.startsWith('+') || ln.startsWith(' ')) out.set(++newLine, ln.slice(1));
+  }
+  return out;
+}
+
+test('toHunks — one change in a long file yields one small hunk, not the whole file', () => {
+  const base = lines(100);
+  const head = [...base];
+  head[49] = 'CHANGED';
+  const patch = synthesizePatch('f.ts', base.join('\n'), head.join('\n'), 'basesha', 'headsha');
+  const hunks = patch.split('\n').filter((l) => l.startsWith('@@'));
+  assert.equal(hunks.length, 1, 'one localized edit is one hunk');
+  assert.equal(hunks[0], '@@ -47,7 +47,7 @@', '3 lines of context either side, git\'s own default');
+  assert.ok(patch.split('\n').length < 15, `the patch is the change, not the file (got ${patch.split('\n').length} lines)`);
+  assert.deepEqual(
+    [...validLinesFromPatch(patch)].sort((a, b) => a - b),
+    [47, 48, 49, 50, 51, 52, 53],
+    'only lines inside the hunk are addressable — the same rule GitHub and GitLab post by',
+  );
+});
+
+test('toHunks — every addressable line still carries the text the HEAD file has there', () => {
+  // The assertion that would catch a wrong @@ offset. Counting lines cannot: a
+  // header off by one produces exactly as many valid lines as a correct one.
+  const base = lines(60);
+  const head = [...base];
+  head[9] = 'EDIT-A';
+  head.splice(30, 0, 'INSERTED-1', 'INSERTED-2');
+  head[54] = 'EDIT-B';
+  const patch = synthesizePatch('f.ts', base.join('\n'), head.join('\n'), 'basesha', 'headsha');
+  for (const [lineNumber, text] of newSideText(patch)) {
+    assert.equal(text, head[lineNumber - 1], `line ${lineNumber} of the patch must be line ${lineNumber} of the head file`);
+  }
+  assert.ok(newSideText(patch).size > 0);
+});
+
+test('toHunks — distant changes become separate hunks; touching ones are merged', () => {
+  const base = lines(60);
+  const far = [...base];
+  far[4] = 'A';
+  far[54] = 'B';
+  const farPatch = synthesizePatch('f.ts', base.join('\n'), far.join('\n'), 'b', 'h');
+  assert.equal(farPatch.split('\n').filter((l) => l.startsWith('@@')).length, 2);
+
+  const near = [...base];
+  near[29] = 'A';
+  near[32] = 'B'; // 3 apart: the context windows overlap
+  const nearPatch = synthesizePatch('f.ts', base.join('\n'), near.join('\n'), 'b', 'h');
+  assert.equal(
+    nearPatch.split('\n').filter((l) => l.startsWith('@@')).length,
+    1,
+    'overlapping context is one hunk — two would repeat the same lines on both sides',
+  );
+});
+
+test('toHunks — a created file is -0,0 and a deleted one is +0,0, the way git writes them', () => {
+  const added = synthesizePatch('f.ts', null, 'x\ny\nz', '', 'headsha');
+  assert.equal(added.split('\n')[2], '@@ -0,0 +1,3 @@');
+  assert.deepEqual([...validLinesFromPatch(added)], [1, 2, 3]);
+  const deleted = synthesizePatch('f.ts', 'x\ny\nz', null, 'basesha', 'headsha');
+  assert.equal(deleted.split('\n')[2], '@@ -1,3 +0,0 @@');
+  assert.equal(validLinesFromPatch(deleted).size, 0, 'a deleted file has no addressable NEW-side line');
+});
+
+test('toHunks — identical content is no patch at all, not a preamble with nothing under it', () => {
+  // ADO lists encoding- and mode-only changes as changed files. A truthy string
+  // with no hunks is what INV-FETCH-02 would count as "carries a patch".
+  assert.equal(synthesizePatch('f.ts', 'same\n', 'same\n', 'b', 'h'), '');
+  assert.equal(toHunks([' a', ' b']), '');
+});
+
+test('toHunks — additions and deletions are counted from the hunks, not from whole-file context', () => {
+  const base = lines(50);
+  const head = [...base];
+  head[24] = 'CHANGED';
+  const patch = synthesizePatch('f.ts', base.join('\n'), head.join('\n'), 'b', 'h');
+  assert.deepEqual(countChangedLines(patch), { additions: 1, deletions: 1 });
+});
+
+test('toHunks — the coarse MAX_LCS_CELLS fallback is framed too, and keeps its NEW-side numbering', () => {
+  // A rewritten core big enough to skip the DP matrix (a real OOM once came from
+  // a renamed PBIR file). It emits the whole core removed then added; the
+  // framing must not treat that as a reason to fall back to the whole file.
+  const base = [...lines(5, 'ctx'), ...lines(4000, 'old'), ...lines(5, 'tail')];
+  const head = [...lines(5, 'ctx'), ...lines(4000, 'new'), ...lines(5, 'tail')];
+  const patch = synthesizePatch('f.ts', base.join('\n'), head.join('\n'), 'b', 'h');
+  assert.ok(patch.includes('@@ -3,'), 'context before the rewritten core is trimmed to 3 lines');
+  for (const [lineNumber, text] of newSideText(patch)) {
+    assert.equal(text, head[lineNumber - 1], `line ${lineNumber} must match the head file`);
+  }
 });

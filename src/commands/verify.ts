@@ -6,7 +6,7 @@ import { ERROR_FILE } from '../util/tmp.js';
 import { readPostedMarker, type PostedMarker } from '../util/posted-marker.js';
 import { readAuthoritativeControl } from './status.js';
 import { readAuthoritativeFinalization, isPathInside, type DispatchPlan, type DeliveryState, type FinalizationRecord } from '../dispatch/delivery.js';
-import { commentKey, snapFindingsToDiff, windowStart, CLOCK_SLACK_MS } from './post.js';
+import { commentKey, postingShape, windowStart, CLOCK_SLACK_MS } from './post.js';
 import { readCapabilityUsage, type CapabilityUsage } from './review.js';
 import { resolvePr } from '../providers/index.js';
 import { withRetry } from '../util/retry.js';
@@ -905,16 +905,17 @@ export async function loadVerifyContext(opts: {
       ? (routesRaw as PassRouteLike[])
       : null;
 
-  // Re-anchoring is a property of the provider the run targeted, which the
+  // The posting shape is a property of the provider the run targeted, which the
   // gather already records — deriving it from a re-parsed URL would make an
-  // --offline audit depend on the URL still being resolvable.
-  const reanchor = gather.pr.provider === 'github' || gather.pr.provider === 'gitlab';
+  // --offline audit depend on the URL still being resolvable. It MUST be the
+  // same function `runPost` applied, or this audit grades a correct run against
+  // locations it never planned to write.
   const finalFindings = findings?.finalFindings ?? [];
-  const postingShape = snapFindingsToDiff(finalFindings, gather.changedFiles, reanchor).findings;
-  const expectedKeys = keyCounts(postingShape);
+  const planned = postingShape(finalFindings, gather.changedFiles, gather.pr.provider);
+  const expectedKeys = keyCounts(planned);
   const expectedTopLevel = new Map<string, number>();
   if (gather.pr.provider === 'azuredevops') {
-    for (const f of postingShape) {
+    for (const f of planned) {
       if (f.file && f.line) continue;
       const body = f.body.trim();
       expectedTopLevel.set(body, (expectedTopLevel.get(body) ?? 0) + 1);
@@ -1018,7 +1019,7 @@ export async function loadVerifyContext(opts: {
     capabilityUsage:
       Object.keys(capabilityFiles).length > 0 ? readCapabilityUsage(capabilityFiles) : { usage: [], warnings: [], claims: [] },
     home: opts.home,
-    postingShape,
+    postingShape: planned,
     expectedKeys,
     expectedTopLevel,
     liveWindow,

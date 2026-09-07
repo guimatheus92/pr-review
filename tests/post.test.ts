@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { commentKey, snapFindingsToDiff } from '../src/commands/post.js';
+import { commentKey, postingPolicy, postingShape, snapFindingsToDiff } from '../src/commands/post.js';
 import type { ChangedFile, Finding } from '../src/types.js';
 
 const PATCH = [
@@ -510,4 +510,49 @@ test('runPost — a transient error that never clears stops retrying and falls b
   assert.equal(fake.singles.length, 3, 'and the leftovers go per-comment');
   assert.equal(result.posted, 3);
   assertNoDuplicateComments(fake);
+});
+
+// ---------------------------------------------------------------------------
+// The posting shape, decided once per provider.
+//
+// `runPost` applies it, and `resumeReview` and `verify` both RECOMPUTE it to
+// recognize the run's own comments on the PR. Three copies of the rule used to
+// sit in three files; drift between them means a resume writes a comment twice
+// (INV-POST-05) or verify grades a correct run as posting where it never
+// planned to (INV-POST-06). One function now, asserted per provider.
+
+test('postingPolicy — GitHub and GitLab anchor to the diff; Azure DevOps posts where the reviewer pointed', () => {
+  assert.deepEqual(postingPolicy('github'), { snap: true, reanchor: true });
+  assert.deepEqual(postingPolicy('gitlab'), { snap: true, reanchor: true });
+  assert.deepEqual(postingPolicy('azuredevops'), { snap: false, reanchor: false });
+});
+
+test('postingShape — an Azure DevOps finding far from any hunk keeps its own line', () => {
+  // The regression this guards. ADO threads are not limited to diff lines, and
+  // the docs have always said findings post at the reported file:line — but that
+  // was true only because the synthesized patch carried the WHOLE file as
+  // context, so every line was "in the diff". Real hunks would have dragged this
+  // finding from line 900 to line 13, silently, on every ADO review.
+  const input = [finding('src/a.ts', 900)];
+  assert.deepEqual(postingShape(input, FILES, 'azuredevops').map((f) => f.line), [900]);
+  assert.deepEqual(postingShape(input, FILES, 'github').map((f) => f.line), [13], 'GitHub still snaps: a 422 otherwise');
+});
+
+test('postingShape — the three call sites agree, because there is only one rule', () => {
+  // runPost, resumeReview and verify all reach the shape through this function.
+  // If it is not deterministic for the same inputs, the reconciliation that
+  // keeps a resumed run from double-posting is comparing two different plans.
+  const input = [finding('src/a.ts', 900), finding('src/not-in-diff.ts', 5), finding()];
+  for (const provider of ['github', 'gitlab', 'azuredevops'] as const) {
+    const once = postingShape(input, FILES, provider);
+    const twice = postingShape(input, FILES, provider);
+    assert.deepEqual(once, twice, `${provider}: the shape must be a pure function of (findings, files, provider)`);
+  }
+});
+
+test('postingShape — Azure DevOps still never drops a finding: a location-less one passes through', () => {
+  // INV-POST-07. Without reanchoring, ADO posts it as a PR-level resolvable
+  // thread; what must never happen is it disappearing here.
+  const input = [finding(), finding('src/not-in-diff.ts', 5)];
+  assert.deepEqual(postingShape(input, FILES, 'azuredevops'), input);
 });

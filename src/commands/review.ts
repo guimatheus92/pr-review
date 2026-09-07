@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { runGather } from './gather.js';
-import { commentKey, runPost, snapFindingsToDiff } from './post.js';
+import { commentKey, postingShape, runPost } from './post.js';
 import { loadAll } from '../plugins/loader.js';
 import { changesRepoConfig, loadConfig, type ConfigOverrides } from '../config.js';
 import {
@@ -606,8 +606,7 @@ export async function finalizeReview(a: {
       // silently bury the matching security findings. The only comments this
       // refresh needs are the ones an interrupted run of THIS tool wrote, and
       // those are byte-identical to a finding it was about to post.
-      const reanchor = provider.name === 'github' || provider.name === 'gitlab';
-      resumePostingShape = snapFindingsToDiff(intraBatch.kept, a.gather.changedFiles, reanchor).findings;
+      resumePostingShape = postingShape(intraBatch.kept, a.gather.changedFiles, provider.name);
       const pendingKeys = new Set(
         resumePostingShape
           .filter((finding) => finding.file && finding.line)

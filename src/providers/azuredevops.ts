@@ -170,15 +170,84 @@ export function synthesizePatch(
 ): string {
   const baseLines = (base ?? '').split('\n');
   const headLines = (head ?? '').split('\n');
+  // Every branch produces the same flat marked list and hands it to toHunks, so
+  // the four shapes (add, delete, LCS, the coarse MAX_LCS_CELLS fallback) cannot
+  // drift apart in how they are framed.
   if (!base && head) {
-    return `--- /dev/null\n+++ b/${path} (${headSha.slice(0, 12)})\n${headLines.map((l) => `+${l}`).join('\n')}`;
+    const hunks = toHunks(headLines.map((l) => `+${l}`));
+    return hunks && `--- /dev/null\n+++ b/${path} (${headSha.slice(0, 12)})\n${hunks}`;
   }
   if (base && !head) {
-    return `--- a/${path} (${baseSha.slice(0, 12)})\n+++ /dev/null\n${baseLines.map((l) => `-${l}`).join('\n')}`;
+    const hunks = toHunks(baseLines.map((l) => `-${l}`));
+    return hunks && `--- a/${path} (${baseSha.slice(0, 12)})\n+++ /dev/null\n${hunks}`;
   }
-  const lcs = lcsLineDiff(baseLines, headLines);
+  const hunks = toHunks(lcsLineDiff(baseLines, headLines).split('\n'));
+  if (!hunks) return '';
   const header = `--- a/${path} (${baseSha.slice(0, 12)})\n+++ b/${path} (${headSha.slice(0, 12)})`;
-  return `${header}\n${lcs}`;
+  return `${header}\n${hunks}`;
+}
+
+/** Lines of context around each change, matching git's own `-U3` default. */
+const HUNK_CONTEXT = 3;
+
+/**
+ * Group a flat marked diff (` `/`+`/`-` per line, covering the WHOLE file) into
+ * real `@@` hunks.
+ *
+ * Azure DevOps has no diff endpoint, so the patch is synthesized here from the
+ * two full file bodies — and until now it was emitted as the whole file, every
+ * unchanged line included as context. That is a valid unified diff and the line
+ * numbers were right, but it made every downstream size scale with the size of
+ * the FILES rather than the size of the CHANGE: the gather cache, the `## Diff`
+ * block of `pr-context.md` that each pass reads, and the 2 MB patch budget.
+ *
+ * Returns `''` when nothing changed — a preamble with no hunks is not a patch,
+ * and a truthy-but-contentless string is what INV-FETCH-02 grades as content.
+ */
+export function toHunks(lines: string[], context = HUNK_CONTEXT): string {
+  const ranges: Array<[number, number]> = [];
+  for (let i = 0; i < lines.length; i++) {
+    const mark = lines[i]![0];
+    if (mark !== '+' && mark !== '-') continue;
+    const start = Math.max(0, i - context);
+    const end = Math.min(lines.length - 1, i + context);
+    const last = ranges[ranges.length - 1];
+    // `last[1] + 1` merges windows that merely touch: git emits one hunk there,
+    // and two abutting hunks would repeat a context line on both sides.
+    if (last && start <= last[1] + 1) last[1] = Math.max(last[1], end);
+    else ranges.push([start, end]);
+  }
+  if (ranges.length === 0) return '';
+
+  // How many lines each side has consumed BEFORE index i — walked once, so the
+  // hunk headers cost one pass rather than one per range.
+  const oldBefore: number[] = [];
+  const newBefore: number[] = [];
+  let oldSeen = 0;
+  let newSeen = 0;
+  for (const line of lines) {
+    oldBefore.push(oldSeen);
+    newBefore.push(newSeen);
+    if (line[0] !== '+') oldSeen++;
+    if (line[0] !== '-') newSeen++;
+  }
+
+  const out: string[] = [];
+  for (const [start, end] of ranges) {
+    let oldCount = 0;
+    let newCount = 0;
+    for (let i = start; i <= end; i++) {
+      if (lines[i]![0] !== '+') oldCount++;
+      if (lines[i]![0] !== '-') newCount++;
+    }
+    // A side with no lines points at the line BEFORE the hunk, which is how git
+    // writes a created file (`@@ -0,0 +1,N @@`) and a deleted one.
+    const oldStart = oldCount === 0 ? oldBefore[start]! : oldBefore[start]! + 1;
+    const newStart = newCount === 0 ? newBefore[start]! : newBefore[start]! + 1;
+    out.push(`@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`);
+    for (let i = start; i <= end; i++) out.push(lines[i]!);
+  }
+  return out.join('\n');
 }
 
 /** Exported for tests. */
@@ -436,7 +505,9 @@ export class AzureDevOpsProvider implements PrProvider {
                 ? this.fetchFileText(git, repoId, ref.project, basePath, baseSha)
                 : Promise.resolve(null),
             ]);
-            patch = synthesizePatch(path, baseContent, headContent, baseSha ?? '', headSha);
+            // '' means no hunks — an encoding- or mode-only change. Patch-less
+            // is the honest row; a preamble with nothing under it reads as content.
+            patch = synthesizePatch(path, baseContent, headContent, baseSha ?? '', headSha) || undefined;
           }
           const { additions, deletions } = countChangedLines(patch ?? '');
           // Keyed on basePath, not on the label: ADD|RENAME and DELETE|RENAME are

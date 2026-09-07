@@ -218,7 +218,11 @@ test('fetchChangedFiles — at the guard exactly, every in-scope file is still f
   const { provider, ref, items } = stubbedProvider(() => ({ changeEntries: entries, nextSkip: 0 }));
   const files = await provider.fetchChangedFiles(ref, { maxPatchedFiles: 500 });
   assert.equal(items.length, 1000, 'head + base for each of the 500');
-  assert.ok(files.every((f) => f.patch !== undefined));
+  // The stub serves the same bytes at both revisions, so these synthesize to no
+  // hunks and stay patch-less — that is the point of the assertion above: the
+  // work was DONE, which is what the guard decides. Patch content is covered by
+  // tests/ado-diff.test.ts.
+  assert.equal(files.length, 500);
 });
 
 test('fetchChangedFiles — an excluded path is listed but never fetched: its patch is discarded seconds later anyway', async () => {

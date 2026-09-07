@@ -471,9 +471,15 @@ if (results.length === 0) {
 // than folded into them — a tally that hides it is how "we ran the matrix"
 // quietly comes to mean less than it sounds.
 const blockedCells = results.filter((r) => r.blocked);
+const ran = results.length - blockedCells.length;
 console.log(
-  failed.length === 0
-    ? `${results.length - blockedCells.length} cell(s) passed, ${blockedCells.length} blocked`
-    : `${failed.length}/${results.length - blockedCells.length} cell(s) FAILED, ${blockedCells.length} blocked`,
+  failed.length === 0 ? `${ran} cell(s) passed, ${blockedCells.length} blocked` : `${failed.length}/${ran} cell(s) FAILED, ${blockedCells.length} blocked`,
 );
+if (ran === 0) {
+  // Every cell blocked is the same outcome as no cell running, and it must not
+  // exit 0: in CI that is a green check mark over a matrix that proved nothing.
+  // BLOCKED means "not this product's fault", never "fine".
+  console.error(`no cell proved anything — all ${blockedCells.length} were blocked`);
+  process.exit(1);
+}
 process.exit(failed.length === 0 ? 0 : 1);

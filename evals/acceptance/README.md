@@ -191,6 +191,11 @@ those words, and the actual cause was a quota counter. The probe is a courtesy â
 if it cannot answer (no `gh`, no network) the cell runs and the real assertions
 speak. `--runtime claude` is never blocked by it.
 
+BLOCKED is not FAIL, and it is also not fine: if **every** cell was blocked the
+runner exits 1, because zero cells run is zero cells proven whatever the reason,
+and exiting 0 there would put a green check mark on a matrix that never
+executed. This matters most in CI, which today runs only the copilot cells.
+
 ## Resetting
 
 Reset runs **before** each cell, never after â€” an after-reset is exactly the step

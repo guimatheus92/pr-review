@@ -134,6 +134,19 @@ export interface GatherOutput {
    * exclusion set would come back looking like a whole diff.
    */
   patchesOmitted?: true;
+  /**
+   * The exclusion globs this gather withheld file content for (INV-FETCH-04).
+   *
+   * The cache stores RAW rows and the hit path re-applies the CURRENT run's
+   * exclusions, so an entry is only reusable while every glob it withheld under
+   * is still excluded. Otherwise those rows come back in scope carrying no
+   * patch — reviewed blind, with nothing to signal it. The sets are compared
+   * literally: glob subsumption is undecidable, so a differing list refetches.
+   *
+   * Absent on entries written before 0.13, which withheld nothing — every
+   * provider fetched every patch — so their absence is not a reason to refetch.
+   */
+  contentExcludes?: string[];
 }
 
 export interface ReviewerDefinition {

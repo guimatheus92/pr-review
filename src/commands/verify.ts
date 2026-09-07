@@ -487,8 +487,26 @@ export const CHECKS: InvariantCheck[] = [
       const missing = (['title', 'author', 'headSha', 'state'] as const).filter((k) => !m[k]);
       if (missing.length > 0) return fail(`pr-review-gather.json is missing ${missing.join(', ')}`);
       if (ctx.gather.changedFiles.length === 0) return fail('pr-review-gather.json holds no changed files');
-      const withPatch = ctx.gather.changedFiles.filter((f) => !f.excluded && f.status !== 'deleted' && f.patch).length;
-      if (withPatch === 0) return fail('no in-scope changed file carries a patch — passes would review paths without content');
+      const inScope = ctx.gather.changedFiles.filter((f) => !f.excluded && f.status !== 'deleted');
+      const withPatch = inScope.filter((f) => f.patch).length;
+      if (withPatch === 0) {
+        // Two ways a run legitimately holds no patch, and both used to render as
+        // this FAIL — a red audit with no defect behind it, which is how an
+        // invariant gets switched off.
+        if (ctx.gather.patchesOmitted) {
+          // The run was refused as too large and fetched nothing on purpose
+          // (INV-FETCH-04). `pr-review-gather.json` is written before the gate
+          // refuses, so the artifact exists and is auditable.
+          return skip('the run fetched no file content because it was already past the file guard (INV-FETCH-04)');
+        }
+        // A PR of pure renames, mode changes or binaries has no lines to carry.
+        // Azure DevOps is where this shows up: its synthesized patch used to be
+        // the whole file, so even a rename produced a truthy patch.
+        if (!inScope.some((f) => (f.additions ?? 0) + (f.deletions ?? 0) > 0)) {
+          return pass(`${inScope.length} in-scope file(s), none adding or removing a line — renames, mode changes or binaries carry no patch anywhere`);
+        }
+        return fail('no in-scope changed file carries a patch — passes would review paths without content');
+      }
       if (!Array.isArray(ctx.gather.existingComments)) return fail('pr-review-gather.json holds no existing-comment list');
       // Deliberately NOT checked here: "a comment older than the gather that
       // the gather missed". The live read is scoped with `since` so the

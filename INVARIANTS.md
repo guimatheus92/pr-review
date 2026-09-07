@@ -254,12 +254,14 @@ any file: the list is completed with path-only rows and the run is refused. The
 **path** list is unaffected — it is always complete (INV-FETCH-01), because it,
 not the content, is what every trust gate reads.
 
-**Why:** The guard runs after gather, so a 3000-file Azure DevOps PR paid ~6000
-`getItem` calls — each downloading a whole file at both revisions — and was then
-refused for being too large. The same shape hit exclusions at any size: a
-`package-lock.json` was fetched twice and its patch discarded on the next line
-by `applyDiffExclusions`. Work that cannot reach a pass is work no PR should pay
-for.
+**Why:** The guard runs after gather, so an oversized Azure DevOps PR paid for
+every file before being refused: one `getItem` per added file and two per
+modified one, each downloading a whole file body. Measured live on a 501-file
+PR of additions: 501 requests and 5.1 s, then "PR is too large". Measured
+hermetically on 501 modified files: 1002 requests. Both are now 0. The same
+shape hit exclusions at any size: a `package-lock.json` was fetched and its
+patch discarded on the next line by `applyDiffExclusions`. Work that cannot
+reach a pass is work no PR should pay for.
 
 **A patch-less row is never silently reviewed.** A gather that omitted patches
 is marked, is never cached (a cached path-only list would come back as a whole

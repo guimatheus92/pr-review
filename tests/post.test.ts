@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { commentKey, postingPolicy, postingShape, snapFindingsToDiff } from '../src/commands/post.js';
 import type { ChangedFile, Finding } from '../src/types.js';
@@ -46,7 +47,10 @@ test('snapFindingsToDiff — reanchor moves findings outside the diff to a valid
   assert.equal(findings[1].body, 'the body');
 });
 
-test('snapFindingsToDiff — without reanchor (ADO), unanchorable findings pass through untouched', () => {
+// Not "(ADO)" any more: Azure DevOps now turns snapping off too, so its shape is
+// the early return in snapFindingsToDiff, asserted through postingShape below.
+// This still pins the reanchor flag on its own, which is what it always tested.
+test('snapFindingsToDiff — without reanchor, unanchorable findings pass through untouched', () => {
   const input = [finding('src/not-in-diff.ts', 5), finding()];
   const { findings, reanchored } = snapFindingsToDiff(input, FILES, false);
   assert.equal(reanchored, 0);
@@ -538,15 +542,22 @@ test('postingShape — an Azure DevOps finding far from any hunk keeps its own l
   assert.deepEqual(postingShape(input, FILES, 'github').map((f) => f.line), [13], 'GitHub still snaps: a 422 otherwise');
 });
 
-test('postingShape — the three call sites agree, because there is only one rule', () => {
-  // runPost, resumeReview and verify all reach the shape through this function.
-  // If it is not deterministic for the same inputs, the reconciliation that
-  // keeps a resumed run from double-posting is comparing two different plans.
-  const input = [finding('src/a.ts', 900), finding('src/not-in-diff.ts', 5), finding()];
-  for (const provider of ['github', 'gitlab', 'azuredevops'] as const) {
-    const once = postingShape(input, FILES, provider);
-    const twice = postingShape(input, FILES, provider);
-    assert.deepEqual(once, twice, `${provider}: the shape must be a pure function of (findings, files, provider)`);
+test('postingShape — no call site keeps its own copy of the rule', () => {
+  // This asserted `postingShape(x) deepEqual postingShape(x)` — a tautology for
+  // any pure function, which still passed if runPost, resumeReview or verify
+  // re-inlined its own reanchor rule. That drift is the whole risk (INV-POST-05
+  // double-post, INV-POST-06 false audit), so read the source instead: the three
+  // modules must reach the shape through the shared helper, not rebuild it.
+  const root = fileURLToPath(new URL('../src/commands/', import.meta.url));
+  for (const file of ['post.ts', 'review.ts', 'verify.ts']) {
+    const source = readFileSync(join(root, file), 'utf8');
+    const inlined = source.match(/===\s*'github'\s*\|\|[^\n]*'gitlab'/g) ?? [];
+    assert.deepEqual(
+      inlined,
+      [],
+      `${file} rebuilds the provider posting rule inline; call postingPolicy/postingShape instead`,
+    );
+    assert.match(source, /posting(Policy|Shape)\(/, `${file} must reach the posting shape through the shared helper`);
   }
 });
 

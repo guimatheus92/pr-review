@@ -195,3 +195,12 @@ jobs:
       - name: Report
         if: always()
         run: cat "$RUNNER_TEMP/acc/acceptance-report.md" >> "$GITHUB_STEP_SUMMARY" || true
+      # The one artifact that says WHICH of the 501 rows carried a patch is
+      # nofetch-gather.json, and a failing cell is exactly when it is needed.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: acceptance-nofetch
+          path: ${{ runner.temp }}/acc
+          retention-days: 14
+          if-no-files-found: warn

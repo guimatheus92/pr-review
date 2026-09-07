@@ -79,7 +79,9 @@ interface GatherCmdOptions {
    * fetched, exactly as every PR did before #27, before being refused on the
    * real count moments later. Closing that needs the authorship answer one
    * round-trip earlier than the interface can give it; revisit if a real PR
-   * ever does it.
+   * ever does it. The sharper edge of the same input — a branch-authored glob
+   * reaching the matcher, where `**a**a**…**b` cost 3.7 s per path — is closed
+   * in `src/util/globs.ts` rather than here, because every caller wants it.
    */
   repoExcludes?: string[];
   useCache?: boolean;
@@ -301,6 +303,17 @@ export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
     provider.fetchExistingComments(ref),
   ]);
 
+  // INV-FETCH-04: content is fetched only for files that can still reach a pass.
+  // The provider decides per file from this; gather re-derives the same answer
+  // below from the list it got back, so nothing has to be reported across the
+  // interface — same inputs, same policy, one definition. Built before the cache
+  // is consulted because a hit has to be checked against these same globs.
+  const patchOpts: ChangedFilesOptions = {
+    excludes: [...DEFAULT_EXCLUDES, ...(opts.extraExcludes ?? [])],
+    countOnlyExcludes: opts.repoExcludes ?? [],
+    maxPatchedFiles: MAX_FILES_GUARD,
+  };
+
   const cacheAllowed = useCache && (ref.provider !== 'azuredevops' || ref.project !== undefined);
   if (useCache && !cacheAllowed) {
     process.stderr.write('[gather] ADO project could not be resolved — bypassing gather cache to avoid cross-project reuse\n');
@@ -311,9 +324,17 @@ export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
     const hit = readCache(ref, metadata.headSha, lastCommentId);
     if (hit) {
       const legacyFiltered = hit.data.changedFiles.some((file) => file.excluded || file.excludedReason);
-      // An entry without the marker predates the completeness gate (0.6–0.10 cached
+      // The entry withheld content for these globs; this run excludes those. The
+      // key is headSha + last comment id and carries no exclusion set, so a run
+      // with a NARROWER one (`pr-review gather` passes none at all) would pull
+      // those rows back into scope carrying no patch — reviewed blind, with
+      // nothing to signal it. Compared literally: glob subsumption is
+      // undecidable, so anything but a superset refetches.
+      const current = new Set(patchOpts.excludes);
+      const contentStale = (hit.data.contentExcludes ?? []).some((glob) => !current.has(glob));
+      // An entry without the completeness marker predates that gate (0.6–0.10 cached
       // ADO lists cut at 100 files raw) under a key the upgrade does not rotate.
-      if (!legacyFiltered && hit.data.changedFilesComplete === true) {
+      if (!legacyFiltered && !contentStale && hit.data.changedFilesComplete === true) {
         const cachedRaw = refreshCachedGatherIdentity(hit.data, ref);
         const cached = { ...cachedRaw, changedFiles: applyDiffExclusions(cachedRaw.changedFiles, opts.extraExcludes) };
         process.stderr.write(
@@ -328,20 +349,13 @@ export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
       process.stderr.write(
         legacyFiltered
           ? '[gather] filtered legacy cache entry ignored — refetching raw changed files\n'
-          : '[gather] cache entry predates the file-list completeness check — refetching changed files\n',
+          : contentStale
+            ? '[gather] cache entry withheld content for globs this run does not exclude — refetching changed files\n'
+            : '[gather] cache entry predates the file-list completeness check — refetching changed files\n',
       );
     }
   }
 
-  // INV-FETCH-04: content is fetched only for files that can still reach a pass.
-  // The provider decides per file from this; gather re-derives the same answer
-  // below from the list it got back, so nothing has to be reported across the
-  // interface — same inputs, same policy, one definition.
-  const patchOpts: ChangedFilesOptions = {
-    excludes: [...DEFAULT_EXCLUDES, ...(opts.extraExcludes ?? [])],
-    countOnlyExcludes: opts.repoExcludes ?? [],
-    maxPatchedFiles: MAX_FILES_GUARD,
-  };
   const changedFilesProvider = await provider.fetchChangedFiles(ref, patchOpts);
   // Incomplete (see listIsIncomplete): completed from the checkout or refused — never reviewed as-is, never cached.
   const changedFilesRaw = listIsIncomplete(changedFilesProvider, metadata)
@@ -370,6 +384,12 @@ export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
   // that ships patches inside its listing response withheld nothing, so it is
   // refused by the plain file-count clause, with an accurate message.
   const patchesOmitted = policy.omitted && !changedFilesRaw.some((file) => file.patch !== undefined);
+  // Did an excluded path actually come back without its content? That is what
+  // makes the cache entry conditional on the exclusion set — see contentExcludes.
+  // A deleted file never has a patch anywhere, so it proves nothing here.
+  const contentWithheld = changedFilesRaw.some(
+    (file) => file.status !== 'deleted' && file.patch === undefined && !policy.wants(file.path),
+  );
   const changedFiles = applyDiffExclusions(changedFilesRaw, opts.extraExcludes);
   const exc = summarizeExclusions(changedFiles);
   process.stderr.write(
@@ -384,6 +404,11 @@ export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
     gatheredAt: new Date().toISOString(),
     changedFilesComplete: true,
     ...(patchesOmitted ? { patchesOmitted: true as const } : {}),
+    // Recorded only when content really was withheld for an excluded path.
+    // Recording it unconditionally would invalidate every GitHub and GitLab
+    // entry on any change to the exclude set, for rows that carry their patch
+    // regardless — the saving does not exist there, so neither should the cost.
+    ...(contentWithheld ? { contentExcludes: patchOpts.excludes ?? [] } : {}),
   };
 
   // Same discipline as changedFilesComplete: a list that could not be assembled

@@ -53,11 +53,6 @@ export interface SkillPack {
   baseline: string[];
 }
 
-/**
- * The batteries-included pack list. Pointers, not content: sync refreshes the
- * content, and a renamed upstream file surfaces as a visible missing-baseline
- * warning. Override or disable entirely with `skill_packs:` in yaml.
- */
 export const REPO_CONFIG_FILE = '.pr-review.yaml';
 
 /**
@@ -78,6 +73,11 @@ export function changesRepoConfig(files: { path: string; previousPath?: string }
   return files.some((file) => isRepoConfig(file.path) || isRepoConfig(file.previousPath));
 }
 
+/**
+ * The batteries-included pack list. Pointers, not content: sync refreshes the
+ * content, and a renamed upstream file surfaces as a visible missing-baseline
+ * warning. Override or disable entirely with `skill_packs:` in yaml.
+ */
 export const DEFAULT_PACKS: SkillPack[] = [
   {
     name: 'awesome-copilot',

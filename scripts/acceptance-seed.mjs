@@ -31,7 +31,7 @@ const PROVIDERS = ['github', 'azuredevops', 'gitlab'];
 const WIDE_FILES = 101;
 // One past MAX_FILES_GUARD (500), so the PR is refused and INV-FETCH-04 says
 // nothing may be fetched for it. Azure DevOps only: it is the provider that
-// pays two whole-file getItem calls per changed file, so it is the only one
+// pays a whole-file getItem per added file and two per modified one, so it is
 // where "did we fetch?" is worth thousands of requests. On GitHub or GitLab the
 // same branch would prove nothing — their patches arrive inside the listing.
 const HUGE_FILES = 501;

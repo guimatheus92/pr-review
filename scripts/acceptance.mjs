@@ -630,8 +630,14 @@ async function runNoFetchCell() {
   const elapsedMs = Date.now() - started;
 
   // The other half: the run really is refused, and refused for this reason.
+  //
+  // `--runtime copilot` is not a request to run copilot — nothing is dispatched
+  // here. `resolveRuntime` returns an explicit choice without probing PATH, and
+  // it is called BEFORE `earlyExitGate`; on a CI runner with neither CLI
+  // installed the run would otherwise die on "No agent runtime found" and this
+  // cell would report a failure that has nothing to do with the guard.
   try {
-    run(process.execPath, [CLI, 'review', prUrl, '--dry-run', '--no-codex', '--no-companions'], {
+    run(process.execPath, [CLI, 'review', prUrl, '--dry-run', '--no-codex', '--no-companions', '--runtime', 'copilot'], {
       cwd: checkoutFor('azuredevops'),
       stdio: ['ignore', 'pipe', 'pipe'],
     });

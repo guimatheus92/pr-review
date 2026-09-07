@@ -764,3 +764,50 @@ test('runGather — an UNCHANGED repo config still gets its excludes counted', a
   );
   assert.equal(writes, 1, 'the repo excludes bring it under the guard, so the run proceeds and the entry is good');
 });
+
+test('runGather — an entry that withheld content is refetched when the next run excludes less', async () => {
+  // The hole INV-FETCH-04 opened: under the guard, a paying provider still
+  // withholds patches for EXCLUDED paths, and that entry is cached. The key is
+  // headSha + last comment id and carries no exclusion set, so `pr-review
+  // gather` (which passes none) would hit it, pull those rows back into scope
+  // with no patch, and hand the passes a file to review blind.
+  const paths = ['src/a.ts', 'legacy/old.ts'];
+  const { provider } = fakePaying({ ...META, changedFileCount: 2 }, paths);
+  let cached: GatherOutput | undefined;
+  await withNoRepoDir(async (cwd) =>
+    runGather({ ...gatherOpts(provider), cwd, extraExcludes: ['**/legacy/**'], writeGatherCacheFn: (v) => (cached = v, 'x') }),
+  );
+  assert.ok(cached, 'the entry is written — the run itself was fine');
+  assert.equal(cached!.changedFiles.find((f) => f.path === 'legacy/old.ts')?.patch, undefined, 'its content was withheld');
+  assert.ok(cached!.contentExcludes?.includes('**/legacy/**'), 'and the entry records the globs that made it conditional');
+
+  // Same head SHA, narrower exclusions: the entry must not be served.
+  const { provider: second, seen } = fakePaying({ ...META, changedFileCount: 2 }, paths);
+  const result = await withNoRepoDir(async (cwd) =>
+    runGather({
+      ...gatherOpts(second),
+      cwd,
+      readGatherCacheFn: () => ({ data: cached!, path: 'hit.json', ageMs: 1 }),
+      writeGatherCacheFn: () => 'x',
+    }),
+  );
+  assert.ok(seen(), 'the provider was asked again rather than the stale entry served');
+  assert.ok(result.changedFiles.find((f) => f.path === 'legacy/old.ts')?.patch, 'and the row now carries its content');
+});
+
+test('runGather — an entry that withheld nothing is still served when the exclusions change', async () => {
+  // The control. GitHub and GitLab carry the patch inside the listing response,
+  // so nothing is conditional and invalidating their entries on every config
+  // edit would be a cost with no saving behind it.
+  const { provider } = fakeGithub({ ...META, changedFileCount: 2 }, [file('src/a.ts'), file('legacy/old.ts')]);
+  let cached: GatherOutput | undefined;
+  await withNoRepoDir(async (cwd) =>
+    runGather({ ...gatherOpts(provider), cwd, extraExcludes: ['**/legacy/**'], writeGatherCacheFn: (v) => (cached = v, 'x') }),
+  );
+  assert.equal(cached!.contentExcludes, undefined, 'nothing was withheld, so nothing is conditional');
+  const { provider: second, fetches } = fakeGithub({ ...META, changedFileCount: 2 }, []);
+  await withNoRepoDir(async (cwd) =>
+    runGather({ ...gatherOpts(second), cwd, readGatherCacheFn: () => ({ data: cached!, path: 'hit.json', ageMs: 1 }), writeGatherCacheFn: () => 'x' }),
+  );
+  assert.equal(fetches(), 0, 'served from cache, as before');
+});

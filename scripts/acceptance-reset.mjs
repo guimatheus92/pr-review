@@ -189,11 +189,22 @@ export function parsePrUrl(url) {
 async function api(url, token, init = {}) {
   // node's network errors are the bare string "fetch failed", which tells a cell
   // report nothing about which provider call died. Name it.
+  // One retry on a connect-level failure. The read-back runs after a review
+  // that took minutes, and losing a whole cell to a single flaky socket reports
+  // a provider defect that did not happen.
   let res;
-  try {
-    res = await apiFetch(url, token, init);
-  } catch (cause) {
-    throw new Error(`${init.method ?? 'GET'} ${url} failed to connect: ${cause?.message ?? cause}`, { cause });
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      res = await apiFetch(url, token, init);
+      break;
+    } catch (cause) {
+      lastError = cause;
+      if (attempt === 0) await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+  if (!res) {
+    throw new Error(`${init.method ?? 'GET'} ${url} failed to connect twice: ${lastError?.message ?? lastError}`, { cause: lastError });
   }
   if (!res.ok) {
     const body = await res.text().catch(() => '');

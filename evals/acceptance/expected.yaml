@@ -23,7 +23,14 @@ must_not_find:
   # The control handler is correct on both counts. Flagging it is a false
   # positive, and without this line a fixture broken enough to flag everything
   # would still pass.
-  - "greetHandler"
+  #
+  # Anchored to the TITLE, deliberately. matchExpectedFindings tests
+  # "title<newline>body", so a bare "greetHandler" substring also matched a
+  # CORRECT finding about the broken handler next door that mentioned the good
+  # one while contrasting the two — observed on the first live claude cell. A
+  # finding *about* greetHandler names it in the title; one that discusses it in
+  # passing does not, and that distinction is the whole assertion.
+  - "^[^\\n]*greetHandler"
 
 stack:
   include:

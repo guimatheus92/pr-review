@@ -102,7 +102,7 @@ export interface VerifyContext {
   capabilities: CapabilitiesArtifact | null;
   companions: CompanionsArtifact | null;
   errorTxt: string | null;
-  capabilityUsage: { usage: CapabilityUsage[]; warnings: string[] } | null;
+  capabilityUsage: { usage: CapabilityUsage[]; warnings: string[]; claims: string[] } | null;
   home?: string;
 
   /** Findings in the shape the poster would have written them (snapped/re-anchored). */
@@ -605,11 +605,16 @@ export const CHECKS: InvariantCheck[] = [
         }
       }
       const usage = ctx.capabilityUsage?.usage ?? [];
-      const reached = usage.filter((u) => (u.attempted?.length ?? 0) > 0 || (u.used?.length ?? 0) > 0);
-      if (reached.length > 0) {
+      // `claims` is readCapabilityUsage's own verdict on a sidecar reporting a
+      // reachable or called MCP server. Deferring to it rather than re-scanning
+      // the arrays keeps one policy: the review run treats a claim as a warning
+      // (Node cannot tell a real denial leak from a fabricated call), while the
+      // audit stops the reader on it — which is what an audit is for.
+      const claims = ctx.capabilityUsage?.claims ?? [];
+      if (claims.length > 0) {
         return fail(
-          `${reached.length} pass(es) reported reaching MCP despite process-level denial: ` +
-            sample(reached.map((u) => u.reviewer)),
+          `${claims.length} pass(es) claimed MCP under process-level denial — either the denial leaked or the pass ` +
+            `fabricated the call, and neither is something to archive silently: ${sample(claims)}`,
         );
       }
       const evidenceWarnings = ctx.capabilityUsage?.warnings ?? [];
@@ -1005,7 +1010,8 @@ export async function loadVerifyContext(opts: {
     capabilities,
     companions: readJson<CompanionsArtifact>(join(runDir, 'companions.json'), corrupt),
     errorTxt: readFileSafe(join(runDir, ERROR_FILE)),
-    capabilityUsage: Object.keys(capabilityFiles).length > 0 ? readCapabilityUsage(capabilityFiles) : { usage: [], warnings: [] },
+    capabilityUsage:
+      Object.keys(capabilityFiles).length > 0 ? readCapabilityUsage(capabilityFiles) : { usage: [], warnings: [], claims: [] },
     home: opts.home,
     postingShape,
     expectedKeys,

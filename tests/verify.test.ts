@@ -510,7 +510,7 @@ test('verify — a pass reporting MCP usage fails INV-CTX-05 despite process-lev
     const rows = await rowsFor(f);
     const ctx5 = row(rows, 'INV-CTX-05');
     assert.equal(ctx5.status, 'fail');
-    assert.match(ctx5.evidence, /reaching MCP/);
+    assert.match(ctx5.evidence, /claimed MCP under process-level denial/);
   } finally {
     f.cleanup();
   }

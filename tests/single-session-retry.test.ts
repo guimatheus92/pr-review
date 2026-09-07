@@ -203,6 +203,60 @@ test('runSingleSession — clears stale raw reviewer sidecars before dispatch', 
   assert.equal(existsSync(ctx.reviewerFiles.quality!), false);
 });
 
+test('spawnPlannedBatch — a re-dispatched pass does not inherit the previous attempt capability sidecar', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-review-capability-stale-'));
+  try {
+    const gather = {
+      pr: { provider: 'github' as const, url: 'https://github.com/o/r/pull/1', owner: 'o', repo: 'r', number: 1 },
+      metadata: {
+        title: 'Test PR', description: 'A complete description.', author: 'tester',
+        headSha: 'abcdef1234567890', baseSha: '1234567890abcdef', baseBranch: 'main', headBranch: 'feature',
+        labels: [], linkedItems: [], createdAt: '', updatedAt: '', isDraft: false, state: 'open' as const,
+      },
+      changedFiles: [{ path: 'src/app.ts', status: 'modified' as const, additions: 1, deletions: 0, patch: '@@ -1 +1 @@\n-old\n+new' }],
+      existingComments: [], gatheredAt: '',
+    };
+    const opts = {
+      prUrl: gather.pr.url,
+      gather,
+      passes: [{
+        name: 'model-tools/model-review', source: '/model-review.md', body: 'Review carefully.',
+        matchedBy: 'plugin' as const, matchedOn: [], origin: 'plugin' as const,
+        plugin: 'model-tools', mcpServers: ['model-inspector'],
+      }],
+      indexEntries: [], stackTags: ['typescript'], installedCompanions: [], skipReviewers: [],
+      outDir: dir, invokeCompanions: false, runtime: 'copilot' as const,
+    };
+    const ctx = prepareSessionContext(opts);
+    const plan = ctx.dispatchPlan!;
+    const sidecar = ctx.capabilityFiles['model-tools/model-review']!;
+    let sawStaleSidecarOnRecovery: boolean | null = null;
+    let calls = 0;
+
+    await runSingleSession(opts, ctx, async () => {
+      calls++;
+      if (calls === 1) {
+        // Attempt 1 writes the sidecar but no Finding[] — the reviewer stays unresolved,
+        // so Node re-dispatches it, and the sidecar must not survive into that attempt.
+        writeFileSync(sidecar, JSON.stringify({
+          reviewer: 'model-tools/model-review',
+          available: ['model-inspector'], attempted: ['model-inspector'], used: ['model-inspector'],
+          notes: 'attempt 1',
+        }), 'utf8');
+        return { stdout: 'DONE', stderr: '', exitCode: 0 };
+      }
+      sawStaleSidecarOnRecovery = existsSync(sidecar);
+      for (const reviewer of plan.reviewers) writeFileSync(attemptOutputPath(reviewer, 2), '[]');
+      return { stdout: 'DONE', stderr: '', exitCode: 0 };
+    }, [1]);
+
+    assert.equal(calls, 2, 'the unresolved pass must have been re-dispatched');
+    assert.equal(sawStaleSidecarOnRecovery, false, 'attempt 2 starts with no attempt-1 capability evidence');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('runSingleSession — exit 0 with 18/22 sidecars selectively recovers four, preserves valid outputs, then verifies HIGH', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pr-review-planned-recovery-'));
   try {

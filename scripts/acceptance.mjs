@@ -201,9 +201,26 @@ async function runtimeBlockedReason(runtime) {
  * that. The range is read from the fixture source so editing the fixture cannot
  * silently retarget the assertion.
  */
+/**
+ * The two planted defects, identified by their RULE IDS rather than by topic.
+ *
+ * This is the whole causality test stated exactly: `must_find` requires
+ * ACC-LOG-002 to be cited, and a reviewer flagging everything indiscriminately
+ * would cite it against the control too. So "ACC-LOG-002 lands on the broken
+ * handler and not on the correct one" IS the property, and the rule id is a
+ * string no reviewer invents by accident.
+ *
+ * Topic words were tried and are wrong: matching `audit.log` flagged correct
+ * findings about the call being too verbose or unawaited, and `parameteri[sz]`
+ * flagged a correct finding whose body praised the control's parameterised
+ * query. Both are findings ABOUT the control that have nothing to do with the
+ * planted defects, which the control is allowed to attract. `sql injection`
+ * stays because the control has none and no correct finding about it would say
+ * otherwise.
+ */
 const PLANTED_DEFECTS = [
-  ['SQL injection', /sql injection|parameteri[sz]|string concatenation|ACC-SQL-001/i],
-  ['the missing audit call', /ACC-LOG-002|audit[ .\-]log|missing audit/i],
+  ['SQL injection', /sql injection|ACC-SQL-001/i],
+  ['the missing audit call', /ACC-LOG-002/i],
 ];
 
 function controlFalsePositives(findings) {

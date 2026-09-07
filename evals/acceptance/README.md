@@ -67,9 +67,20 @@ Which function a finding *mentions* says nothing about which one it is *about*.
 Where it is anchored says exactly that. `controlFalsePositives` in
 `scripts/acceptance.mjs` reads `greetHandler`'s line range out of the fixture
 source — so editing the fixture cannot silently retarget the check — and fails
-the cell on any finding anchored inside that range citing SQLi or the audit
-rule. A missing control handler fails too, rather than passing an assertion that
-has quietly stopped existing.
+the cell on any finding anchored inside that range that cites a planted defect.
+A missing control handler fails too, rather than passing an assertion that has
+quietly stopped existing.
+
+**And "cites a planted defect" means the rule id**, `ACC-LOG-002` /
+`ACC-SQL-001`, not the topic. Matching `audit.log` flagged correct findings
+about the call being too verbose or unawaited; matching `parameteri[sz]` flagged
+a correct finding whose body *praised* the control's parameterised query. Those
+are findings about the control that have nothing to do with the planted defects,
+and the control is allowed to attract them. The rule id is the right anchor
+because it states the property exactly: `must_find` requires ACC-LOG-002 to be
+cited, a reviewer flagging everything would cite it against the control too, so
+"ACC-LOG-002 lands on the broken handler and not the correct one" *is* the
+causality this pair exists to prove.
 
 ## One-time setup
 

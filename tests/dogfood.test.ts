@@ -179,6 +179,29 @@ test('sensitiveTrackedPatch — a values-free template is reviewable, the same n
   }
 });
 
+test('sensitiveTrackedPatch — a multi-line literal opener is not a value, its contents still are', () => {
+  // Regression: `const CREDENTIAL_FILES = [` matched the sensitive-key heuristic
+  // on its NAME and then counted the bare `[` as a material value, refusing the
+  // whole branch diff. The declaration continues on the next line; the opener
+  // carries nothing.
+  const patch = (lines: string[]) =>
+    ['diff --git a/scripts/x.mjs b/scripts/x.mjs', '--- a/scripts/x.mjs', '+++ b/scripts/x.mjs', `@@ -0,0 +1,${lines.length} @@`, ...lines.map((l) => `+${l}`)].join('\n');
+
+  assert.equal(sensitiveTrackedPatch(patch(['const CREDENTIAL_FILES = [', "  join(root, '.env'),", '];'])), null);
+  assert.equal(sensitiveTrackedPatch(patch(['const apiKey = {', '  from: process.env.KEY,', '};'])), null);
+
+  // A real token on a continuation line is still caught.
+  assert.deepEqual(sensitiveTrackedPatch(patch(['const CREDENTIAL_FILES = [', `  'ghp_${'B'.repeat(36)}',`, '];'])), {
+    path: 'scripts/x.mjs',
+    reason: 'GitHub token',
+  });
+  // And a real value on the declaration line itself is unaffected.
+  assert.deepEqual(sensitiveTrackedPatch(patch(['const clientSecret = "s3cr3t-value-not-a-placeholder";'])), {
+    path: 'scripts/x.mjs',
+    reason: 'sensitive setting clientSecret',
+  });
+});
+
 test('sensitiveTrackedPatch — checks both sides of a rename before bundle exclusion', () => {
   const renamePatch = (previousPath: string, path: string, quoted = false) => {
     const header = quoted

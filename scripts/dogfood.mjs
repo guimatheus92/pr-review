@@ -49,6 +49,12 @@ function hasMaterialSecret(value) {
   if (typeof value !== 'string') return value !== null && value !== undefined && value !== false;
   const normalized = value.trim().replace(/^['"]|['"]$/g, '').trim();
   if (!normalized) return false;
+  // An opening bracket is a declaration that continues on the next line, not a
+  // value: `const CREDENTIAL_FILES = [` matched the sensitive-key heuristic on
+  // its name and then counted `[` as material, refusing the whole branch diff.
+  // Nothing is lost by skipping it — every following line is scanned on its own,
+  // so a real token inside the literal is still caught.
+  if (/^[[{(]$|^(?:\[]|\{}|\(\))$/.test(normalized)) return false;
   return !/^(?:null|none|redacted|placeholder|changeme|change-me|example|sample|dummy|test|todo|\*+|x+|your[ _-].*|<[^>]+>|\$\{[^}]+\}|%[^%]+%|process\.env\..*|@Microsoft\.KeyVault\(.*\))$/i.test(normalized);
 }
 

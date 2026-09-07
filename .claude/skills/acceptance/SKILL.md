@@ -39,13 +39,28 @@ Run these in order. Do not skip a step because the previous one looked fine.
    proven otherwise. `--offline` skips the live PR read on purpose (every row
    that needs it reports SKIP, and the exit stays 0); `--json` for machine use.
 
-4. **The matrix, only when asked for cross-provider or cross-runtime coverage.**
+4. **The matrix — all three providers, every time.**
    ```bash
-   npm run acceptance                                       # all six cells
-   npm run acceptance -- --provider gitlab --runtime copilot
+   npm run acceptance                    # 3 providers x 2 runtimes + the file-list gate
    ```
+   GitHub alone is not a result. Azure DevOps and GitLab have full providers and
+   **zero** non-stubbed coverage anywhere else in this repo, so a matrix narrowed
+   to `--provider github` proves the one path that was already proven. Narrow it
+   only to re-run a single failing cell while fixing it, and re-run the whole
+   thing before you call the work done.
+
+   ```bash
+   npm run acceptance -- --provider gitlab --runtime claude   # iterating on one cell
+   ```
+
+   Credentials resolve per provider as env var → `.env` → that provider's own CLI
+   login (`gh auth token`, `az account get-access-token`, `glab config get
+   token`), so the same command works on a laptop and in CI. A missing one throws
+   naming exactly what to set or which CLI to log into — that is a setup error to
+   fix, never a provider to drop from the run.
+
    See `evals/acceptance/README.md` — it posts to real fixture PRs and needs the
-   estate seeded first.
+   estate seeded first (`npm run acceptance:seed`).
 
 5. **Report.** Give the `verify` table **verbatim**. Every FAIL with its
    evidence, every SKIP with its reason. Never summarise the table into a
@@ -62,6 +77,12 @@ Run these in order. Do not skip a step because the previous one looked fine.
 
 A run with many SKIPs is not a clean run. If `INV-POST-*` are all SKIP, nothing
 was posted and nothing about posting was proven.
+
+The matrix report adds two more, and neither is a pass: `⏭️ skip` means the cell
+was not requested, `🚧 blocked` means it could not run (today: Copilot with its
+premium requests spent). Both are counted apart from the passes. Read
+`3 cell(s) passed, 3 blocked` as three providers proven on one runtime — never
+as a green matrix.
 
 ## Gotchas
 

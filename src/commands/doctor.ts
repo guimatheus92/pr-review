@@ -64,11 +64,33 @@ export async function runDoctor(): Promise<number> {
   const ghEnv = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? process.env.COPILOT_GITHUB_TOKEN;
   const gh = Boolean(ghEnv) || ghAuthOk();
   (gh ? ok : bad)('GitHub', gh ? (ghEnv ? 'token env var' : 'gh auth token') : 'set GITHUB_TOKEN or run `gh auth login`');
+  // GitHub Enterprise Server never falls back to the cloud vars (see
+  // resolveToken in providers/github.ts), so a cloud-only setup must not read
+  // as "GHES ready" — report it as its own line or not at all.
+  const ghes = process.env.GH_ENTERPRISE_TOKEN ?? process.env.GITHUB_ENTERPRISE_TOKEN;
+  if (ghes) ok('GitHub Enterprise Server', 'token env var');
+
   const adoPat = process.env.AZURE_DEVOPS_PAT ?? process.env.SYSTEM_ACCESSTOKEN ?? process.env.AZURE_DEVOPS_EXT_PAT;
+  const adoBearer = process.env.AZURE_DEVOPS_BEARER;
   const az = binaryOnPath('az');
-  (adoPat || az ? ok : bad)(
+  (adoPat || adoBearer || az ? ok : bad)(
     'Azure DevOps',
-    adoPat ? 'PAT env var' : az ? 'az CLI available for bearer token' : 'set AZURE_DEVOPS_PAT or install az (only needed for ADO PRs)',
+    adoPat
+      ? 'PAT env var'
+      : adoBearer
+        ? 'bearer token env var'
+        : az
+          ? 'az CLI available for bearer token'
+          : 'set AZURE_DEVOPS_PAT or install az (only needed for ADO PRs)',
+  );
+
+  // GitLab is a first-class provider; leaving it unchecked meant a GitLab-only
+  // user got a green doctor and a credential error on their first review.
+  const glEnv = process.env.GITLAB_TOKEN ?? process.env.GITLAB_ACCESS_TOKEN;
+  const glab = binaryOnPath('glab');
+  (glEnv || glab ? ok : bad)(
+    'GitLab',
+    glEnv ? 'token env var' : glab ? 'glab CLI available for a stored token' : 'set GITLAB_TOKEN or run `glab auth login` (only needed for GitLab MRs)',
   );
 
   process.stdout.write('Skill packs\n');

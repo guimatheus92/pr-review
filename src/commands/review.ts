@@ -803,6 +803,44 @@ export async function finalizeReview(a: {
 }
 
 /**
+ * Companion delivery failures recorded by the interrupted run, re-read from its
+ * `companions.json`.
+ *
+ * A resume never re-detects or re-dispatches companions, so without this the
+ * accounting the fresh path does at the end of `runReview` simply does not
+ * happen on the resume paths: a run that lost a companion agent could be
+ * resumed into `exitCode 0` and a summary claiming a clean pipeline, which is
+ * the exact "a parseable review is not a completed review" failure the fresh
+ * path exits 2 for. Pass delivery needs no equivalent — `findingsUnavailable`
+ * already carries `deliveryState.kind !== 'complete'` into the exit code.
+ *
+ * Unreadable or absent is not a failure: runs predating the artifact resume
+ * fine, and inventing a failure from a missing file would block recovery.
+ */
+export function resumedCompanionFailures(outDir: string): string[] {
+  const path = join(outDir, 'companions.json');
+  if (!existsSync(path)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as {
+      missingReviewers?: unknown;
+      duplicateReviewers?: unknown;
+    };
+    const names = (value: unknown): string[] =>
+      Array.isArray(value) ? value.filter((name): name is string => typeof name === 'string') : [];
+    return [
+      ...names(parsed.missingReviewers).map((name) => `planned companion '${name}' produced no output`),
+      ...names(parsed.duplicateReviewers).map((name) => `companion '${name}' produced duplicate outputs`),
+    ];
+  } catch (error) {
+    // An unreadable artifact is unknown, never "no failures". Swallowing it
+    // here would reinstate exactly the bug this function exists to fix: a
+    // resumed run reporting a clean pipeline over delivery it cannot account
+    // for. An ABSENT file is different — see above — and stays benign.
+    return [`companions.json is unreadable (${(error as Error).message}) — companion delivery cannot be accounted for`];
+  }
+}
+
+/**
  * Resume a prior run from `~/.pr-review/runs/<id>/`: reuse its gather + reviewer
  * outputs already on disk and jump straight to dedupe/post. Turns a run killed
  * after the (expensive) reviewer phase into a ~1-minute finish.
@@ -946,6 +984,7 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
       failOn: plan.execution.failOn,
       findingsUnavailable: session.findingsUnavailable,
       deliveryState: session.deliveryState,
+      operationalFailures: resumedCompanionFailures(outDir),
       forcePost: opts.forcePost,
       overallStart,
       provider,
@@ -1038,6 +1077,7 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     dryRun: opts.dryRun,
     failOn: opts.failOn,
     findingsUnavailable: false,
+    operationalFailures: resumedCompanionFailures(outDir),
     forcePost: opts.forcePost,
     overallStart,
     provider,
@@ -1271,6 +1311,12 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   });
   const capabilitiesPath = join(outDir, 'capabilities.json');
   const capabilityBase = {
+      // The resolved runtime, recorded rather than only logged: `--runtime auto`
+      // means no caller can tell from its own argv which CLI actually hosted the
+      // session, so without this nothing on disk can prove a copilot run was
+      // copilot — `verify` and the acceptance matrix would both be asserting
+      // against their own input.
+      runtime,
       installedPlugins: loaded.installedPlugins.map((plugin) => ({
         id: plugin.id,
         version: plugin.version,

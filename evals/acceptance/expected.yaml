@@ -1,0 +1,72 @@
+# Shared by every acceptance cell — all three providers, both runtimes.
+#
+# One expectation file on purpose: the three fixture repos hold byte-identical
+# content, so a cell that fails here while its siblings pass is a provider or
+# runtime defect, never a fixture difference.
+#
+# Schema is the eval harness's (scripts/eval-assertions.mjs).
+
+must_find:
+  # The repo skill reached the session. A missing audit call is not a defect any
+  # generic reviewer invents, and the rule id cannot be guessed — so this string
+  # appearing in a finding is proof that .claude/skills/team-rules.md was loaded
+  # as project context. This is the load-bearing assertion of the whole matrix.
+  - "ACC-LOG-002"
+  # Generic security knowledge, from the packs rather than the repo.
+  - "sql injection|parameteri[sz]|prepared statement|string concatenation into"
+  - "shell=True|command injection|shell metachar|shell injection"
+
+# One generic "this file has problems" finding must not satisfy all three.
+distinct_findings: true
+
+# NOTE: the control-handler assertion does NOT live here.
+#
+# It was tried four times as a regex over finding text and failed four times,
+# each time on a CORRECT review: a title anchor caught "getUserHandler does not
+# audit-log, but greetHandler does"; requiring both names caught SQL-injection
+# findings whose body cited greetHandler as the positive contrast without
+# naming the broken function at all. Prose is the wrong instrument for "is this
+# finding ABOUT the control" — the answer is where the finding is anchored, not
+# which words it uses.
+#
+# `controlFalsePositives` in scripts/acceptance.mjs asserts it on file:line,
+# computing greetHandler's range from the fixture source so it cannot drift.
+
+must_not_find:
+  # The control handler must not be flagged for EITHER planted defect: it
+  # parameterises its query and it calls audit.log. That is what makes the
+  # must_find entries above causal rather than vacuous — a fixture broken enough
+  # that everything gets flagged cannot satisfy both halves.
+  #
+  # Scoped to the two defect classes, and NOT written as a bare "no finding may
+  # name greetHandler". Three live cells taught that lesson in order: a correct
+  # finding about the broken handler that named the good one while contrasting
+  # them; a genuine doc-comment/code mismatch in the control; and a genuine type
+  # over-claim (`q<User>` on a query selecting only `email`). Every one of those
+  # was the reviewer being right. With 17 reviewers and ~88 raw findings on a
+  # six-file PR, *something* will be said about any function, so "the reviewer
+  # is silent about this code" asserts that the reviewer is not thorough — the
+  # opposite of the property worth testing. What must hold is narrower and
+  # actually meaningful: the SQLi and audit findings track the defect, not the
+  # file.
+  #
+  # Nothing text-matched here today. The control assertion moved to
+  # `controlFalsePositives` (see the note above); this list stays because it is
+  # the right home for any expectation that genuinely is about wording.
+  []
+
+stack:
+  include:
+    - typescript
+    - python
+    - sql
+
+dependencies:
+  include:
+    # express and pg come from the checkout's package.json — they only appear if
+    # the cell ran inside a clone whose origin matches the PR (cwdIsPrRepo).
+    - express
+    - pg
+    # django is added by the PR's own requirements.txt diff, which is a separate
+    # code path from the checkout scan.
+    - django

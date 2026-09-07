@@ -83,6 +83,16 @@ function runCase(name, extra) {
     console.error(`  review process failed: ${executionFailure}`);
   }
 
+  // Which runtime actually hosted the session. `--runtime auto` means the argv
+  // above cannot answer that, so read it back from the artifact the run wrote —
+  // otherwise a claude-vs-copilot comparison has nothing to key results on.
+  try {
+    const { runtime } = JSON.parse(readFileSync(join(runDir, 'capabilities.json'), 'utf8'));
+    if (runtime) console.log(`  runtime: ${runtime}`);
+  } catch {
+    // A run that failed before writing capabilities.json reports below anyway.
+  }
+
   const missingArtifacts = requiredEvalArtifacts(expected).filter((artifact) => !existsSync(join(runDir, artifact)));
   if (missingArtifacts.length > 0) {
     console.error(

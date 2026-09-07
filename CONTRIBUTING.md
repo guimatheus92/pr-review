@@ -71,9 +71,24 @@ Consume via `--plugin-dir ./my-shared-pack` or in `.pr-review.yaml`. Each matche
 npm run test
 ```
 
-Tests in `tests/` mirror `src/` structure (`tests/**/*.test.ts`). Pure-logic tests (parsers, globs, dedupe, diff filter, line-snap, session-context, loader) are unit tests. Provider tests require real auth env vars and a real PR.
+Tests in `tests/` mirror `src/` structure (`tests/**/*.test.ts`). Every one of them is hermetic — provider tests inject a stub client or `fetch`, and none needs a credential or the network. That is also their limit: nothing in `npm run test` proves a real Azure DevOps or GitLab API call works.
 
 CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs build, tests, and a bundle-freshness check on ubuntu and windows.
+
+### Auditing a run
+
+`pr-review verify [run-id]` (or `--pr <url>`) grades a finished run against every guarantee in [INVARIANTS.md](INVARIANTS.md): one PASS/FAIL/SKIP row per invariant, read-only, exit 2 on any FAIL. If you change posting, gather, stack detection, skill discovery or delivery accounting, run it against a real review before opening the PR.
+
+`tests/invariants-doc.test.ts` keeps `INVARIANTS.md` and the check registry in `src/commands/verify.ts` in lockstep. Adding an invariant means adding both: a documented block and either a check or a `TEST_ONLY` entry naming its guard. IDs are append-only — retire one, never rename or reuse it.
+
+### The acceptance matrix
+
+```bash
+npm run acceptance                 # 3 providers x 2 runtimes, real PRs, real posting
+npm run acceptance -- --dry-run    # same routing, no posting
+```
+
+This is the only thing that exercises Azure DevOps and GitLab for real, and the only thing that runs the Copilot runtime end to end. It needs the fixture estate seeded once — see [evals/acceptance/README.md](evals/acceptance/README.md) — plus `npm run build` and `pr-review packs sync`. Run it before a release; `gh workflow run acceptance.yml` runs the copilot cells in CI.
 
 ## Release
 

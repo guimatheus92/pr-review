@@ -296,6 +296,34 @@ program
   });
 
 program
+  .command('verify [run-id]')
+  .description(
+    'Audit a finished run against INVARIANTS.md: one PASS/FAIL/SKIP row per invariant, from the run artifacts plus a live read of the PR. Read-only. Exit: 0 clean, 1 audit incomplete, 2 any FAIL.',
+  )
+  .option('--pr <url>', 'Audit the most recent run for this PR instead of naming a run-id')
+  .option('--offline', 'Skip the live PR read-back; every invariant that needs it reports SKIP', false)
+  .option('--json', 'Emit the rows as JSON for CI', false)
+  .option('--home <path>', 'Internal: treat this directory as HOME when locating runs and control state')
+  .action(async (runId: string | undefined, opts: { pr?: string; offline: boolean; json: boolean; home?: string }) => {
+    try {
+      const { runVerify } = await import('./commands/verify.js');
+      const exitCode = await runVerify({
+        runId,
+        prUrl: opts.pr,
+        offline: opts.offline,
+        json: opts.json,
+        home: opts.home,
+      });
+      if (exitCode !== 0) process.exitCode = exitCode;
+    } catch (err) {
+      console.error((err as Error).message);
+      // Reads a live provider like `review` and `post` do, so it inherits the
+      // Windows keep-alive-handle trap that a bare process.exit() falls into.
+      fatalExit(1);
+    }
+  });
+
+program
   .command('init')
   .description('Scaffold a starter review skill (.claude/skills/team-rules.md) in the current repo')
   .option('--force', 'Overwrite existing files', false)

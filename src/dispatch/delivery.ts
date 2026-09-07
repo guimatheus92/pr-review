@@ -168,7 +168,7 @@ const EMPTY_SEVERITY_COUNTS = (): Record<Severity, number> => ({
   NIT: 0,
 });
 
-function isPathInside(root: string, path: string): boolean {
+export function isPathInside(root: string, path: string): boolean {
   const rel = relative(resolve(root), resolve(path));
   return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
 }

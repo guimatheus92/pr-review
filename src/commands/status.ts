@@ -88,8 +88,19 @@ function readDeliveryStatus(outDir: string): DeliveryState | null {
   }
 }
 
-function readAuthoritativeControl(outDir: string): { plan: DispatchPlan; state: DeliveryState } | null {
-  const controlDir = controlDirForRun(outDir);
+/**
+ * The authenticated plan + delivery state for a run, or null when either is
+ * absent or fails authentication.
+ *
+ * Exported because `verify` audits the same run from the same source of truth:
+ * a second reader that reached for the run-dir mirrors instead would grade a
+ * run against artifacts the runtime itself can write.
+ */
+export function readAuthoritativeControl(
+  outDir: string,
+  home?: string,
+): { plan: DispatchPlan; state: DeliveryState } | null {
+  const controlDir = controlDirForRun(outDir, home);
   const planPath = join(controlDir, 'dispatch-plan.json');
   const statePath = join(controlDir, 'delivery-state.json');
   try {

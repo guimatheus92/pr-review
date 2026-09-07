@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { spawnCli } from '../util/spawn.js';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -132,23 +132,71 @@ export interface CompanionState {
   detectionError?: string;
 }
 
+/**
+ * Runs the Copilot CLI through `spawnCli`, the same helper the review dispatch
+ * uses — not `execFile`.
+ *
+ * `execFile` does no PATHEXT resolution, and on Windows the Copilot CLI is an
+ * npm shim named `copilot.cmd`. So `execFile('copilot', …)` answered
+ * `spawn copilot ENOENT` in 0.0s on every Windows run, every companion
+ * detection reported `unknown`, and the acceptance report carried
+ * "`copilot plugin list` failed (exit -1)" while the very same command worked
+ * from a shell. `spawnCli` exists for exactly this ("win32 still needs a shell
+ * for the .cmd shims") and the dispatch path had it; this second spawn path was
+ * simply missed.
+ *
+ * Detection failure stays `unknown` rather than "not installed" — that part was
+ * always right, which is why this degraded quietly for so long.
+ */
 function runCopilot(args: string[], copilotBinary = 'copilot', timeoutMs = 30_000): Promise<{ stdout: string; stderr: string; code: number | null }> {
   return new Promise((resolve) => {
-    execFile(
-      copilotBinary,
-      args,
-      { timeout: timeoutMs, windowsHide: true, encoding: 'utf8' },
-      (err, stdout, stderr) => {
-        if (err && typeof err === 'object' && 'code' in err && typeof err.code === 'number') {
-          resolve({ stdout: String(stdout), stderr: String(stderr), code: err.code as number });
-        } else if (err) {
-          resolve({ stdout: '', stderr: err.message, code: -1 });
-        } else {
-          resolve({ stdout: String(stdout), stderr: String(stderr), code: 0 });
-        }
-      },
-    );
+    let child;
+    try {
+      child = spawnCli(copilotBinary, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (e) {
+      // assertSafeArg rejects a binary path with shell metacharacters.
+      resolve({ stdout: '', stderr: (e as Error).message, code: -1 });
+      return;
+    }
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const finish = (result: { stdout: string; stderr: string; code: number | null }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish({ stdout, stderr, code: -1 });
+    }, timeoutMs);
+    child.stdin.end();
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (d: string) => (stdout += d));
+    child.stderr.on('data', (d: string) => (stderr += d));
+    child.on('error', (e: Error) => finish({ stdout: '', stderr: e.message, code: -1 }));
+    child.on('close', (code: number | null) => finish({ stdout, stderr, code: code ?? -1 }));
   });
+}
+
+/**
+ * Output that states "zero plugins" rather than failing to be understood.
+ *
+ * A machine with nothing installed gets `No plugins installed.` — a clear,
+ * parseable answer. Only the `Installed plugins:` header was recognised, so
+ * that answer counted as an unrecognised format: every clean machine carried a
+ * permanent degraded warning, `missing` was suppressed (so pr-review never
+ * suggested the companions it knows about), and — the part that matters — a
+ * REAL format change became indistinguishable from the ordinary empty case.
+ * A warning that fires on the normal path is a warning nobody reads.
+ *
+ * Exported for tests: this and `parsePluginListOutput` are the entire contract
+ * with an output format that is not machine-readable.
+ */
+export function declaresEmptyPluginList(stdout: string): boolean {
+  return /Installed plugins:/i.test(stdout) || /\bno plugins?\b[^.\n]{0,20}\b(installed|found)\b/i.test(stdout);
 }
 
 /** Exported for tests — the `copilot plugin list` output format is not machine-readable and this regex is the only contract. */
@@ -215,7 +263,7 @@ export async function detectCompanions(binary = 'copilot', runtime: 'copilot' | 
       process.stderr.write(`[companions] warning: ${detectionError}; installation state unknown\n`);
     } else {
       installed = parsePluginListOutput(text.stdout);
-      if (installed.length === 0 && !/Installed plugins:/i.test(text.stdout)) {
+      if (installed.length === 0 && !declaresEmptyPluginList(text.stdout)) {
         detectionError = '`copilot plugin list` returned an unrecognized output format';
         process.stderr.write(`[companions] warning: ${detectionError}; installation state unknown\n`);
       }

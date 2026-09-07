@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { DEFAULT_MODEL } from '../dispatch/runtime.js';
 import { parse as parseYaml } from 'yaml';
 import type { ReviewerDefinition, SkillDefinition } from '../types.js';
 import { printable } from '../util/text.js';
@@ -103,7 +104,7 @@ export function loadReviewerFile(filePath: string, isBuiltIn = false): ReviewerD
     source: filePath,
     promptBody: body,
     appliesTo: parseGlobList(meta.applies_to ?? meta.appliesTo),
-    model: meta.model ?? 'claude-opus-4.8',
+    model: meta.model ?? DEFAULT_MODEL,
     outputFormat: meta.output_format ?? meta.outputFormat ?? 'json',
     skipWhenNoMatch: meta.skip_when_no_match ?? meta.skipWhenNoMatch ?? false,
     isBuiltIn,

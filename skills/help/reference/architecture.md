@@ -36,7 +36,12 @@ Node CLI (deterministic plumbing)
  16. exit code                  → 0 complete, 1 findings ≥ --fail-on, 2 incomplete/operational failure
 ```
 
-The sections below define its delivery, trust, and recovery guarantees.
+The sections below describe how delivery, trust and recovery are *built*. What
+they guarantee — the rules that may not change without changing the document
+first — is stated once in [INVARIANTS.md](../../../INVARIANTS.md), one block per
+ID: posting is `INV-POST-*`, context completeness `INV-FETCH-*`, stack and
+capability discovery `INV-CTX-*`, untrusted input `INV-TRUST-*`, delivery
+accounting `INV-DEL-*`. `pr-review verify` grades a finished run against them.
 
 A single agent session (Copilot CLI or Claude Code, selected by `--runtime` / `runtime:` / `PR_REVIEW_RUNTIME`, default `auto`) dispatches every Phase 1 pass and companion through `task` / `Task`. Every call has a deterministic `description` and an attempt-scoped output path. The orchestrator is dispatch-only: it cannot create Phase 1, decide the verifier, or write consolidated findings. Node validates exact `Finding[]`, promotes write-once canonical sidecars, preserves valid work, and dispatches only the unresolved delta in one automatic recovery session. A schema-v1 `--resume` gets the bounded final targeted attempt under one per-run lease that remains held through finalization.
 

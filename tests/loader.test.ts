@@ -10,6 +10,7 @@ import {
   companionReviewerNames,
   detectClaudePlugins,
   parseInstalledPluginsState,
+  declaresEmptyPluginList,
   parsePluginListOutput,
   recognizedCompanions,
 } from '../src/plugins/companions.js';
@@ -392,4 +393,25 @@ test('parseInstalledPluginsState — malformed or shapeless registries are unkno
   assert.ok(parseInstalledPluginsState('not json').detectionError);
   assert.ok(parseInstalledPluginsState('{"version":2}').detectionError);
   assert.deepEqual(parseInstalledPluginsState('{"plugins":{}}'), { installed: [] });
+});
+
+test('declaresEmptyPluginList — a stated zero is an answer, an unknown shape is not', () => {
+  // The real Copilot CLI output on a machine with nothing installed. Only the
+  // "Installed plugins:" header was recognised, so this counted as an
+  // unrecognised format: every clean machine carried a permanent degraded
+  // warning, `missing` was suppressed, and a genuine format change became
+  // indistinguishable from the ordinary empty case. Observed live via
+  // `pr-review doctor`.
+  assert.equal(
+    declaresEmptyPluginList("No plugins installed.\n\nUse 'copilot plugin install <source>' to install a plugin.\n"),
+    true,
+  );
+  assert.equal(declaresEmptyPluginList('No plugins found'), true);
+  assert.equal(declaresEmptyPluginList('Installed plugins:\n  • pr-review-toolkit@x'), true);
+
+  // Anything that neither lists plugins nor states there are none stays
+  // "unknown" — the fail-safe that must not be widened away.
+  assert.equal(declaresEmptyPluginList(''), false);
+  assert.equal(declaresEmptyPluginList('Error: not logged in'), false);
+  assert.equal(declaresEmptyPluginList('{"plugins":[]}'), false);
 });

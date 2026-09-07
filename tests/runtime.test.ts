@@ -1,12 +1,32 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { MCP_PROCESS_DENIAL, normalizeModel, resolveRuntime, RUNTIMES, runtimeSpawnArgs, sanitizeTaskDescription, taskCall } from '../src/dispatch/runtime.js';
+import { DEFAULT_MODEL, MCP_PROCESS_DENIAL, normalizeModel, resolveRuntime, RUNTIMES, runtimeSpawnArgs, sanitizeTaskDescription, taskCall } from '../src/dispatch/runtime.js';
 
-test('normalizeModel — only the copilot-style default maps to opus under claude', () => {
-  assert.equal(normalizeModel('claude', 'claude-opus-4.8'), 'opus');
-  assert.equal(normalizeModel('claude', 'sonnet'), 'sonnet');
-  assert.equal(normalizeModel('claude', 'claude-sonnet-5'), 'claude-sonnet-5');
-  assert.equal(normalizeModel('copilot', 'claude-opus-4.8'), 'claude-opus-4.8');
+test('normalizeModel — the shipped default becomes each runtime\'s own stable alias', () => {
+  // The previous version of this test asserted the default reached copilot
+  // verbatim, which is what shipped and what broke: Copilot CLI 1.0.83 answers
+  // `Model "claude-opus-4.8" ... is not available` and exits 1 before
+  // dispatching anything, so every reviewer reads as failed to deliver.
+  assert.equal(normalizeModel('claude', DEFAULT_MODEL), 'opus');
+  assert.equal(normalizeModel('copilot', DEFAULT_MODEL), 'auto');
+});
+
+test('normalizeModel — an explicit model is passed through untouched, on both runtimes', () => {
+  // Only the default is translated. Mapping a user's explicit choice would
+  // silently review with a model they did not ask for.
+  for (const runtime of RUNTIMES) {
+    assert.equal(normalizeModel(runtime, 'sonnet'), 'sonnet');
+    assert.equal(normalizeModel(runtime, 'claude-sonnet-5'), 'claude-sonnet-5');
+    assert.equal(normalizeModel(runtime, 'gpt-5.6'), 'gpt-5.6');
+  }
+});
+
+test('normalizeModel — the default is never a literal model id at the spawn boundary', () => {
+  // The regression guard: a concrete id is the thing a vendor retires. If this
+  // ever fails, the default is being handed to a CLI verbatim again.
+  for (const runtime of RUNTIMES) {
+    assert.notEqual(normalizeModel(runtime, DEFAULT_MODEL), DEFAULT_MODEL);
+  }
 });
 
 test('resolveRuntime — explicit runtime wins over a binary override', () => {
@@ -17,6 +37,41 @@ test('resolveRuntime — explicit runtime wins over a binary override', () => {
 test('resolveRuntime — a --copilot binary override implies the copilot runtime', () => {
   assert.equal(resolveRuntime('auto', '/custom/copilot.cmd'), 'copilot');
   assert.equal(resolveRuntime(undefined, 'copilot'), 'copilot');
+});
+
+/** A probe that "finds" only the named binaries — `where`/`which` exit non-zero otherwise. */
+function pathWith(...found: string[]) {
+  const probed: string[] = [];
+  const exec = (_file: string, args: string[]) => {
+    const name = args[0]!;
+    probed.push(name);
+    if (!found.includes(name)) throw new Error(`not found: ${name}`);
+  };
+  return { exec, probed };
+}
+
+test('resolveRuntime — probe order is copilot first, then claude', () => {
+  const both = pathWith('copilot', 'claude');
+  assert.equal(resolveRuntime('auto', undefined, both.exec), 'copilot');
+  assert.deepEqual(both.probed, ['copilot'], 'claude must not even be probed once copilot answers');
+
+  const claudeOnly = pathWith('claude');
+  assert.equal(resolveRuntime('auto', undefined, claudeOnly.exec), 'claude');
+  assert.deepEqual(claudeOnly.probed, ['copilot', 'claude']);
+});
+
+test('resolveRuntime — neither on PATH throws, naming both and the escape hatches', () => {
+  const neither = pathWith();
+  assert.throws(
+    () => resolveRuntime('auto', undefined, neither.exec),
+    /neither `copilot` nor `claude` is on PATH.*--runtime\/--copilot/s,
+  );
+});
+
+test('resolveRuntime — an explicit runtime never probes PATH at all', () => {
+  const none = pathWith();
+  assert.equal(resolveRuntime('claude', undefined, none.exec), 'claude');
+  assert.deepEqual(none.probed, [], 'an explicit choice must not depend on what happens to be installed');
 });
 
 test('runtimeSpawnArgs — per-runtime argv shape', () => {

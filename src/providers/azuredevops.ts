@@ -4,7 +4,7 @@ import pLimit from 'p-limit';
 import type { GitPullRequest, GitPullRequestChange, GitPullRequestCommentThread, Comment } from 'azure-devops-node-api/interfaces/GitInterfaces.js';
 import type { ChangedFile, ExistingComment, Finding, PrMetadata, PrRef } from '../types.js';
 import type { PrProvider } from './types.js';
-import { withRetry } from '../util/retry.js';
+import { isNetworkError, withRetry } from '../util/retry.js';
 import { execErrorDetail } from '../util/exec-error.js';
 import { parseHttpUrl, safeDecode } from '../util/url.js';
 import { countChangedLines } from '../util/diff-lines.js';
@@ -147,6 +147,7 @@ export function hydrateAdoProject(ref: PrRef, project?: { name?: string | null; 
 
 /** Exported for tests. azure-devops-node-api surfaces HTTP codes as `statusCode`; check `status` too so a library change cannot silently kill retries. */
 export function isTransientAdoError(err: Error): boolean {
+  if (isNetworkError(err)) return true;
   const e = err as { statusCode?: number; status?: number };
   const status = e.statusCode ?? e.status;
   return status === 429 || (status !== undefined && status >= 500);
@@ -487,6 +488,18 @@ export class AzureDevOpsProvider implements PrProvider {
       const file = t.threadContext?.filePath?.replace(/^\//, '');
       const line = t.threadContext?.rightFileStart?.line;
       for (const c of t.comments ?? []) {
+        // Azure DevOps does not remove a deleted comment, it tombstones it:
+        // the entry stays in the thread with `isDeleted: true` and empty
+        // content. Those are not existing comments, and counting them is not
+        // harmless — a fixture PR reviewed a few times carried 183 tombstones
+        // against 2 live comments, and `pr-review verify` read them as 63
+        // inline comments matching no planned finding (INV-POST-06: "a
+        // dispatched agent wrote to the PR") plus 14 duplicated locations
+        // (INV-POST-05). Both were false, and both are the kind of alarm that
+        // gets an invariant switched off. They also reached every review pass
+        // as prior PR discussion, and `dedupeAgainstExisting` compared real
+        // findings against them.
+        if (c.isDeleted) continue;
         const author = c.author?.displayName ?? '<unknown>';
         out.push({
           id: `${t.id}-${c.id}`,

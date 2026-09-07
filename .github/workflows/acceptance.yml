@@ -1,0 +1,171 @@
+name: Acceptance (live PRs)
+
+# Runs pr-review against REAL pull requests on GitHub, Azure DevOps and GitLab,
+# posting for real, and grades each run against INVARIANTS.md.
+#
+# There is deliberately NO `pull_request` or `pull_request_target` trigger.
+# `pull_request` from a fork never receives secrets; `pull_request_target` DOES
+# (it runs against the base repo), which is exactly why neither appears here —
+# absence of the trigger is the guarantee, not the fork rule. An `if:` guard
+# would not be one. Manual dispatch only: each run spends Copilot premium
+# requests, and what the matrix proves (live provider APIs and agent-CLI
+# releases) drifts over weeks, not hours. Run it before a release; add a
+# `schedule:` here if that ever stops being enough.
+#
+# Only the copilot cells run here: there is no Anthropic credential in CI by
+# choice, so the claude cells run on a maintainer's machine
+# (`npm run acceptance -- --runtime claude`). The report names them as skipped
+# rather than omitting them.
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: Which provider(s) to exercise
+        type: choice
+        default: all
+        options: [all, github, azuredevops, gitlab]
+      publish:
+        description: Post findings to the fixture PRs (uncheck for a dry run)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  # Lets the Copilot CLI authenticate with the built-in GITHUB_TOKEN instead of
+  # a PAT (github/copilot-cli, since 2026-07-02).
+  copilot-requests: write
+
+concurrency:
+  # Queue, never cancel: killing a run mid-post is exactly the state the posting
+  # reconciliation exists to avoid, and it would leave a fixture PR half-written.
+  group: pr-review-acceptance
+  cancel-in-progress: false
+
+env:
+  # One place to bump if the CLI is ever renamed on npm.
+  COPILOT_CLI_PACKAGE: '@github/copilot'
+
+jobs:
+  matrix:
+    name: ${{ matrix.provider }} / copilot
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Environment, not repository, secrets: gives a branch policy, optional
+    # required-reviewer approval before a real-publish run, and a per-run audit
+    # trail. Repository secrets are readable by any workflow on any branch a
+    # collaborator can push.
+    environment: acceptance
+    strategy:
+      # One cell failing must never hide the verdict for the others.
+      fail-fast: false
+      matrix:
+        # Filtered here rather than in a job-level `if:` — the matrix context is
+        # not available there, and a step-level guard would still spin up a
+        # runner per provider.
+        provider: >-
+          ${{ inputs.provider == 'all'
+              && fromJSON('["github","azuredevops","gitlab"]')
+              || fromJSON(format('["{0}"]', inputs.provider)) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+
+      - name: Install the Copilot CLI
+        run: npm install -g "$COPILOT_CLI_PACKAGE"
+
+      - name: Sync skill packs
+        run: node dist/cli.cjs packs sync
+
+      - name: Environment preflight
+        run: node dist/cli.cjs doctor
+        env:
+          GITHUB_TOKEN: ${{ secrets.ACC_GITHUB_TOKEN }}
+          AZURE_DEVOPS_PAT: ${{ secrets.ACC_AZURE_DEVOPS_PAT }}
+          GITLAB_TOKEN: ${{ secrets.ACC_GITLAB_TOKEN }}
+
+      - name: Run the acceptance cell
+        run: |
+          # The dry-run flag is written `inputs.publish == false && ... || ''`
+          # and not the natural-looking `inputs.publish && '' || '--dry-run'`,
+          # which always yields '--dry-run': Actions treats '' as falsy, so the
+          # true branch falls through to the false one and publish=true would
+          # silently never post.
+          node scripts/acceptance.mjs \
+            --provider "${{ matrix.provider }}" \
+            --runtime copilot \
+            --case defects \
+            --out "$RUNNER_TEMP/acc" \
+            --checkout "$RUNNER_TEMP/fixture" \
+            ${{ inputs.publish == false && '--dry-run' || '' }}
+        env:
+          # pr-review's own provider auth. Its precedence is
+          # GITHUB_TOKEN ?? GH_TOKEN ?? COPILOT_GITHUB_TOKEN, and the Copilot
+          # CLI's is COPILOT_GITHUB_TOKEN -> GH_TOKEN -> GITHUB_TOKEN. Setting
+          # these two and NEVER GH_TOKEN is what keeps them from crossing over.
+          GITHUB_TOKEN: ${{ secrets.ACC_GITHUB_TOKEN }}
+          AZURE_DEVOPS_PAT: ${{ secrets.ACC_AZURE_DEVOPS_PAT }}
+          GITLAB_TOKEN: ${{ secrets.ACC_GITLAB_TOKEN }}
+          # The Copilot CLI's own credential: the run's built-in token, which
+          # carries copilot-requests from the permissions block above.
+          COPILOT_GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Report
+        if: always()
+        run: cat "$RUNNER_TEMP/acc/acceptance-report.md" >> "$GITHUB_STEP_SUMMARY" || true
+
+      # Collected by a step rather than named as an upload path: upload-artifact
+      # does not expand `~`, and `github.workspace/..` is not HOME either. On a
+      # publish run the run dirs ARE the evidence, so uploading nothing because
+      # a path guess was wrong is the one outcome worth ruling out.
+      - name: Collect run directories
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/acc/runs"
+          # Distinguish "nothing to collect" from "the copy failed": swallowing
+          # both behind one message is how an empty evidence artifact looks fine.
+          if [ -d "$HOME/.pr-review/runs" ]; then
+            cp -r "$HOME/.pr-review/runs/." "$RUNNER_TEMP/acc/runs/"
+          else
+            echo 'no run directories were produced'
+          fi
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-${{ matrix.provider }}-copilot
+          path: ${{ runner.temp }}/acc
+          retention-days: 14
+          if-no-files-found: warn
+
+  filelist:
+    name: gitlab / file-list gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: acceptance
+    if: ${{ inputs.provider == 'all' || inputs.provider == 'gitlab' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      # No agent CLI and no posting: the truncated-file-list gate lives entirely
+      # in `gather`, so this cell is seconds rather than minutes.
+      - name: Run the file-list gate
+        run: node scripts/acceptance.mjs --provider gitlab --case filelist --out "$RUNNER_TEMP/acc" --checkout "$RUNNER_TEMP/fixture"
+        env:
+          GITLAB_TOKEN: ${{ secrets.ACC_GITLAB_TOKEN }}
+      - name: Report
+        if: always()
+        run: cat "$RUNNER_TEMP/acc/acceptance-report.md" >> "$GITHUB_STEP_SUMMARY" || true

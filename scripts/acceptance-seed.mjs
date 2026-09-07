@@ -129,7 +129,10 @@ async function ensurePr(provider, cfg, token, branch, title) {
   if (provider === 'github') {
     const [, owner, repo] = new URL(cfg.web).pathname.split('/');
     const base = `https://api.github.com/repos/${owner}/${repo}`;
-    const open = await api(`${base}/pulls?head=${owner}:${branch}&state=open`, token);
+    // encodeURIComponent on the branch: a ref with a slash (acc/defects-claude)
+    // silently fails the head filter unencoded, and an unmatched filter reads as
+    // 'no open PR' — which opens a duplicate.
+    const open = await api(`${base}/pulls?head=${encodeURIComponent(`${owner}:${branch}`)}&state=open`, token);
     if (open.length > 0) return open[0].html_url;
     const created = await api(`${base}/pulls`, token, {
       method: 'POST',
@@ -196,16 +199,35 @@ async function seedProvider(provider, matrix) {
   const work = mkdtempSync(join(tmpdir(), `acc-seed-${provider}-`));
 
   try {
-    git(['init', '-q', '-b', 'main'], work, secrets);
+    // Reuse the remote's history when the repo already has some.
+    //
+    // `git init` + force-push looks idempotent and is not: it rewrites `main`
+    // with unrelated history, and every provider closes an open pull request
+    // whose BASE was rewritten out from under it. Observed on the second run
+    // against the real GitHub estate — PRs #1 and #2 closed and #3 and #4
+    // appeared in their place. Cloning keeps `main` stable, so re-seeding
+    // updates the existing pull requests instead of replacing them.
+    let reused = false;
+    if (!dryRun) {
+      try {
+        git(['clone', '-q', remote, '.'], work, secrets);
+        git(['checkout', '-q', '-B', 'main'], work, secrets);
+        reused = true;
+      } catch {
+        // An empty repository has nothing to clone — start one.
+      }
+    }
+    if (!reused) git(['init', '-q', '-b', 'main'], work, secrets);
     // The credentialed URL is passed to each push, never stored as a remote:
     // `git remote add` writes it into .git/config, so the PAT would sit in
     // plaintext on disk for the life of the working copy.
     const push = (...refs) => git(['push', '--force', remote, ...refs], work, secrets);
 
-    // main: the base tree.
+    // main: the base tree. An unchanged tree commits nothing and pushes a
+    // no-op, which is what a second run should cost.
     copyTree(join(ACCEPTANCE, 'repo'), work);
-    commitTree(work, 'chore: acceptance fixture base', secrets);
-    if (!dryRun) push('main');
+    const baseChanged = commitTree(work, 'chore: acceptance fixture base', secrets);
+    if (!dryRun && (baseChanged || !reused)) push('main');
 
     const urls = {};
     for (const [runtime, branch] of Object.entries(matrix.branches)) {

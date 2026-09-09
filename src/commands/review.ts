@@ -809,34 +809,49 @@ export async function finalizeReview(a: {
 }
 
 /**
- * Companion delivery failures recorded by the interrupted run, re-read from its
- * `companions.json`.
+ * Companion delivery accounting for a resumed run: what the interrupted run
+ * PLANNED, reconciled against what this resume actually holds.
  *
- * A resume never re-detects or re-dispatches companions, so without this the
- * accounting the fresh path does at the end of `runReview` simply does not
- * happen on the resume paths: a run that lost a companion agent could be
- * resumed into `exitCode 0` and a summary claiming a clean pipeline, which is
- * the exact "a parseable review is not a completed review" failure the fresh
- * path exits 2 for. Pass delivery needs no equivalent — `findingsUnavailable`
- * already carries `deliveryState.kind !== 'complete'` into the exit code.
+ * The fresh path reconciles planned against delivered at the end of
+ * `runReview`; the resume paths never did, so a run that lost a companion could
+ * be resumed into `exitCode 0` over incomplete delivery — the "a parseable
+ * review is not a completed review" failure the fresh path exits 2 for. Pass
+ * delivery needs no equivalent: `findingsUnavailable` already carries
+ * `deliveryState.kind !== 'complete'` into the exit code.
+ *
+ * Reading the RECORDED verdict was the first fix and it was half of one. A
+ * resume does re-dispatch unresolved reviewers, companions included, but
+ * `writeCompanionArtifact` lives in `runReview` and is never reached from here
+ * — so `companions.json` still carried the interrupted attempt's
+ * `completedDispatches: 0` while the recovered outputs sat in the same run dir.
+ * Observed on two runs (PrecoPratico-Backend#715, PrecoPratico-Frontend#1173):
+ * seven `raw-companion_*.json` written by the resume, seven companion rows in
+ * the summary with their findings, and the run still exited 2 naming all seven
+ * as having produced no output. That is the same guarantee failing in the
+ * mirror direction, and a worse one to ship: INV-DEL-03 refuses to post when
+ * delivery is incomplete, so a COMPLETE review would go unposted.
+ *
+ * The reconciliation is ONE-WAY, the same rule `runPost` lives by (INV-POST-04:
+ * an error may be promoted to posted, never the reverse). The recorded verdict
+ * is the floor; a name is cleared only when THIS resume holds its output. It is
+ * never demoted, and a companion absent from the record is never invented into
+ * one: the record was computed by the fresh path from the same plan, and
+ * deriving new failures from a roster the resume does not own is how a correct
+ * delivery gets refused. Cleared names are written back, because a stale
+ * artifact goes on lying — to the next `--resume`, and to `pr-review verify`,
+ * which grades INV-DEL-01 from these very fields.
  *
  * Unreadable or absent is not a failure: runs predating the artifact resume
  * fine, and inventing a failure from a missing file would block recovery.
  */
-export function resumedCompanionFailures(outDir: string): string[] {
+export function resumedCompanionFailures(outDir: string, outputs: readonly ReviewerOutput[] = []): string[] {
   const path = join(outDir, 'companions.json');
   if (!existsSync(path)) return [];
+  const names = (value: unknown): string[] =>
+    Array.isArray(value) ? value.filter((name): name is string => typeof name === 'string') : [];
+  let parsed: Record<string, unknown>;
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as {
-      missingReviewers?: unknown;
-      duplicateReviewers?: unknown;
-    };
-    const names = (value: unknown): string[] =>
-      Array.isArray(value) ? value.filter((name): name is string => typeof name === 'string') : [];
-    return [
-      ...names(parsed.missingReviewers).map((name) => `planned companion '${name}' produced no output`),
-      ...names(parsed.duplicateReviewers).map((name) => `companion '${name}' produced duplicate outputs`),
-    ];
+    parsed = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
   } catch (error) {
     // An unreadable artifact is unknown, never "no failures". Swallowing it
     // here would reinstate exactly the bug this function exists to fix: a
@@ -844,6 +859,46 @@ export function resumedCompanionFailures(outDir: string): string[] {
     // for. An ABSENT file is different — see above — and stays benign.
     return [`companions.json is unreadable (${(error as Error).message}) — companion delivery cannot be accounted for`];
   }
+
+  const delivered = new Map<string, number>();
+  for (const output of outputs) {
+    if (!output.reviewerName.startsWith('companion:')) continue;
+    delivered.set(output.reviewerName, (delivered.get(output.reviewerName) ?? 0) + 1);
+  }
+  // A name recorded missing that this resume delivered EXACTLY once is resolved.
+  // Twice is the duplicate failure, so it stays — clearing on `has` alone would
+  // launder one failure into the other's blind spot.
+  const recordedMissing = names(parsed.missingReviewers);
+  const missingReviewers = recordedMissing.filter((name) => delivered.get(name) !== 1);
+  const duplicateReviewers = names(parsed.duplicateReviewers).filter(
+    (name) => !delivered.has(name) || delivered.get(name)! > 1,
+  );
+  const resolved = recordedMissing.filter((name) => !missingReviewers.includes(name));
+
+  if (resolved.length > 0 || duplicateReviewers.length !== names(parsed.duplicateReviewers).length) {
+    const completedReviewers = [...names(parsed.completedReviewers), ...resolved];
+    try {
+      writeFileSync(
+        path,
+        JSON.stringify(
+          { ...parsed, completedDispatches: completedReviewers.length, completedReviewers, missingReviewers, duplicateReviewers },
+          null,
+          2,
+        ),
+        'utf8',
+      );
+    } catch (error) {
+      // Best-effort: the verdict below is already computed and governs the exit
+      // code. A run dir that cannot be written is reported, never swallowed —
+      // the next resume would read the stale numbers again.
+      process.stderr.write(`[companions] warning: could not update companions.json (${(error as Error).message})\n`);
+    }
+  }
+
+  return [
+    ...missingReviewers.map((name) => `planned companion '${name}' produced no output`),
+    ...duplicateReviewers.map((name) => `companion '${name}' produced duplicate outputs`),
+  ];
 }
 
 /**
@@ -990,7 +1045,7 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
       failOn: plan.execution.failOn,
       findingsUnavailable: session.findingsUnavailable,
       deliveryState: session.deliveryState,
-      operationalFailures: resumedCompanionFailures(outDir),
+      operationalFailures: resumedCompanionFailures(outDir, session.outputs),
       forcePost: opts.forcePost,
       overallStart,
       provider,
@@ -1083,7 +1138,7 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     dryRun: opts.dryRun,
     failOn: opts.failOn,
     findingsUnavailable: false,
-    operationalFailures: resumedCompanionFailures(outDir),
+    operationalFailures: resumedCompanionFailures(outDir, outputs),
     forcePost: opts.forcePost,
     overallStart,
     provider,
@@ -1198,7 +1253,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
         installedCompanions = state.recognized;
         if (state.detectionError) companionDetectionWarning = `companion detection failed: ${state.detectionError}`;
         if (state.missing.length > 0 && config.companionWarn && !opts.noCompanionWarning) {
-          const warn = formatWarning(state.missing);
+          const warn = formatWarning(state.missing, runtime);
           if (warn) process.stderr.write(warn + '\n');
         }
       } catch (err) {

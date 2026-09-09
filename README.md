@@ -93,7 +93,16 @@ Every run reports which skills it used — a progress brief at dispatch (`N pass
 
 ### 1. Install
 
-Inside a `copilot` session or a `claude` (Claude Code) session — the same two commands in both:
+Same marketplace and plugin id in both hosts; the command differs, because the Copilot CLI has no `/plugin`.
+
+Copilot CLI — in your shell:
+
+```bash
+copilot plugin marketplace add guimatheus92/pr-review
+copilot plugin install pr-review@pr-review
+```
+
+Claude Code — slash commands inside a `claude` session:
 
 ```text
 /plugin marketplace add guimatheus92/pr-review

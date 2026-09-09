@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resumedCompanionFailures } from '../src/commands/review.js';
@@ -73,6 +73,168 @@ test('resumedCompanionFailures — a non-array field is ignored rather than cras
   const dir = runDir(JSON.stringify({ missingReviewers: 'oops', duplicateReviewers: [7, 'b'] }));
   try {
     assert.deepEqual(resumedCompanionFailures(dir), ["companion 'b' produced duplicate outputs"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The re-read above was half the fix. A resume DOES re-dispatch unresolved
+ * reviewers, companions included, but `writeCompanionArtifact` lives in
+ * `runReview` and is unreachable from the resume paths — so `companions.json`
+ * kept the interrupted attempt's verdict while the recovered outputs sat in the
+ * same run dir. Observed on PrecoPratico-Backend#715 and Frontend#1173: seven
+ * `raw-companion_*.json` written by the resume, seven companion rows in the
+ * summary with their findings, and the run still exited 2 naming all seven as
+ * having produced no output. Worse than the bug it mirrors: INV-DEL-03 refuses
+ * to post an incomplete delivery, so a COMPLETE review goes unposted.
+ *
+ * The reconciliation is one-way, INV-POST-04's rule applied here: a recorded
+ * failure may be cleared by evidence, never created from its absence.
+ */
+function output(reviewerName: string) {
+  return { reviewerName, model: 'm', findings: [], rawOutput: '[]', durationMs: 1, exitCode: 0 };
+}
+
+const PLANNED = ['companion:pr-review-toolkit/code-reviewer', 'companion:code-review'];
+
+test('resumedCompanionFailures — a companion the RESUME delivered is not a failure', () => {
+  const dir = runDir(JSON.stringify({
+    plannedReviewers: PLANNED,
+    completedDispatches: 0,
+    completedReviewers: [],
+    missingReviewers: PLANNED,
+    duplicateReviewers: [],
+  }));
+  try {
+    assert.deepEqual(resumedCompanionFailures(dir, PLANNED.map(output)), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resumedCompanionFailures — the stale verdict is written back, so the artifact stops lying', () => {
+  const dir = runDir(JSON.stringify({
+    runtime: 'claude',
+    plannedDispatches: 2,
+    plannedReviewers: PLANNED,
+    completedDispatches: 0,
+    completedReviewers: [],
+    missingReviewers: PLANNED,
+    duplicateReviewers: [],
+  }));
+  try {
+    resumedCompanionFailures(dir, PLANNED.map(output));
+    const written = JSON.parse(readFileSync(join(dir, 'companions.json'), 'utf8'));
+    assert.equal(written.completedDispatches, 2);
+    assert.deepEqual(written.completedReviewers, PLANNED);
+    assert.deepEqual(written.missingReviewers, []);
+    assert.deepEqual(written.duplicateReviewers, []);
+    // `pr-review verify` grades INV-DEL-01 from these very fields, so a stale
+    // artifact fails the audit of a run that behaved correctly.
+    assert.equal(written.runtime, 'claude', 'unrelated fields must survive the rewrite');
+    assert.equal(written.plannedDispatches, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resumedCompanionFailures — a companion the resume did NOT deliver stays a failure', () => {
+  const dir = runDir(JSON.stringify({ plannedReviewers: PLANNED, missingReviewers: PLANNED, duplicateReviewers: [] }));
+  try {
+    // Only the one this resume holds is cleared. Clearing the whole record on
+    // any delivery is how a partial recovery starts reporting a clean pipeline.
+    assert.deepEqual(resumedCompanionFailures(dir, [output(PLANNED[0]!)]), [
+      "planned companion 'companion:code-review' produced no output",
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resumedCompanionFailures — reconciliation is ONE-WAY: it never invents a failure the record lacks', () => {
+  // INV-POST-04's rule, applied here: an error may be promoted to delivered,
+  // never the reverse. The record was computed by the fresh path from the same
+  // plan; deriving NEW failures from a roster this resume does not own is how a
+  // correct delivery gets refused and, under INV-DEL-03, goes unposted.
+  const dir = runDir(JSON.stringify({ plannedReviewers: PLANNED, missingReviewers: [], duplicateReviewers: [] }));
+  try {
+    assert.deepEqual(resumedCompanionFailures(dir, []), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resumedCompanionFailures — a recorded-missing name delivered TWICE is not resolved', () => {
+  // Clearing on "has an output" alone would launder the missing failure into
+  // the duplicate one's blind spot and report a clean run over both.
+  const dir = runDir(JSON.stringify({
+    plannedReviewers: [PLANNED[0]],
+    missingReviewers: [PLANNED[0]],
+    duplicateReviewers: [],
+  }));
+  try {
+    assert.deepEqual(resumedCompanionFailures(dir, [output(PLANNED[0]!), output(PLANNED[0]!)]), [
+      "planned companion 'companion:pr-review-toolkit/code-reviewer' produced no output",
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resumedCompanionFailures — a recorded duplicate clears only when the resume delivered it once', () => {
+  const dir = runDir(JSON.stringify({ plannedReviewers: [PLANNED[0]], missingReviewers: [], duplicateReviewers: [PLANNED[0]] }));
+  try {
+    assert.deepEqual(resumedCompanionFailures(dir, [output(PLANNED[0]!)]), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resumedCompanionFailures — a recorded duplicate still delivered twice stays a failure', () => {
+  const dir = runDir(JSON.stringify({ plannedReviewers: [PLANNED[0]], missingReviewers: [], duplicateReviewers: [PLANNED[0]] }));
+  try {
+    assert.deepEqual(resumedCompanionFailures(dir, [output(PLANNED[0]!), output(PLANNED[0]!)]), [
+      "companion 'companion:pr-review-toolkit/code-reviewer' produced duplicate outputs",
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resumedCompanionFailures — called with no outputs, every recorded failure survives', () => {
+  // The old signature's behaviour, preserved: a caller that passes nothing must
+  // not have its failures silently cleared.
+  const dir = runDir(JSON.stringify({ plannedReviewers: PLANNED, missingReviewers: PLANNED, duplicateReviewers: [] }));
+  try {
+    assert.deepEqual(resumedCompanionFailures(dir), [
+      "planned companion 'companion:pr-review-toolkit/code-reviewer' produced no output",
+      "planned companion 'companion:code-review' produced no output",
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resumedCompanionFailures — pass outputs never satisfy a planned companion', () => {
+  const dir = runDir(JSON.stringify({ plannedReviewers: [PLANNED[1]], missingReviewers: [PLANNED[1]], duplicateReviewers: [] }));
+  try {
+    assert.deepEqual(resumedCompanionFailures(dir, [output('owasp/logging'), output('verifier')]), [
+      "planned companion 'companion:code-review' produced no output",
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resumedCompanionFailures — an artifact with no plannedReviewers reconciles the same way', () => {
+  // `plannedReviewers` is not what the reconciliation reads; the recorded
+  // missing/duplicate lists are. So an artifact written before this change is
+  // recovered too, which is the whole point — the two runs that exposed the bug
+  // are already on disk.
+  const dir = runDir(JSON.stringify({ missingReviewers: ['companion:code-review'], duplicateReviewers: [] }));
+  try {
+    assert.deepEqual(resumedCompanionFailures(dir, [output('companion:code-review')]), []);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

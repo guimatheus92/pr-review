@@ -11,8 +11,12 @@ type CompanionDispatch =
 export interface CompanionInfo {
   id: string;
   marketplace: string;
+  /** Claude Code: slash commands, typed inside a session. */
   installSlash: string;
   marketplaceSlash: string;
+  /** Copilot CLI: shell commands — it has no `/plugin`. See `formatWarning`. */
+  marketplaceCommand: string;
+  installCommand: string;
   description: string;
   entryCommand: string;
   invocable: boolean;
@@ -26,6 +30,8 @@ export const KNOWN_COMPANIONS: CompanionInfo[] = [
     marketplace: 'claude-code-plugins',
     marketplaceSlash: '/plugin marketplace add anthropics/claude-code',
     installSlash: '/plugin install pr-review-toolkit@claude-code-plugins',
+    marketplaceCommand: 'copilot plugin marketplace add anthropics/claude-code',
+    installCommand: 'copilot plugin install pr-review-toolkit@claude-code-plugins',
     description: 'Comprehensive PR review using six specialized review subagents (comment-analyzer, pr-test-analyzer, silent-failure-hunter, type-design-analyzer, code-reviewer, code-simplifier).',
     entryCommand: '/pr-review-toolkit:review-pr',
     invocable: true,
@@ -46,6 +52,8 @@ export const KNOWN_COMPANIONS: CompanionInfo[] = [
     marketplace: 'claude-code-plugins',
     marketplaceSlash: '/plugin marketplace add anthropics/claude-code',
     installSlash: '/plugin install code-review@claude-code-plugins',
+    marketplaceCommand: 'copilot plugin marketplace add anthropics/claude-code',
+    installCommand: 'copilot plugin install code-review@claude-code-plugins',
     description: 'Anthropic\'s code review with 0-100 confidence scoring; only ≥80 are surfaced.',
     entryCommand: '/code-review:code-review',
     invocable: true,
@@ -274,19 +282,45 @@ export async function detectCompanions(binary = 'copilot', runtime: 'copilot' | 
   return { installed, recognized, missing, detectionError };
 }
 
-export function formatWarning(missing: CompanionInfo[]): string {
+/**
+ * The install hint is per RUNTIME, because the two CLIs do not share a command
+ * surface. Claude Code takes slash commands inside a session; the Copilot CLI
+ * has no `/plugin`, it has `copilot plugin …` in the shell. Printing the slash
+ * form under copilot — which is what this did for every runtime, under the
+ * heading "Inside a `copilot` session" — was advice that cannot be followed:
+ * the plugins stay uninstalled, `recognized` stays empty, and the review
+ * silently runs with 7 fewer reviewers.
+ *
+ * The marketplace and plugin ids are the same on both (`anthropics/claude-code`
+ * → `claude-code-plugins`); only the verb changes. Verified end to end on
+ * win32: `copilot plugin marketplace add anthropics/claude-code`, then
+ * `copilot plugin install pr-review-toolkit@claude-code-plugins`, then
+ * `pr-review doctor` reporting 6 + 1 dispatches under copilot.
+ *
+ * `anthropics/claude-plugins-official` carries the same two plugins and is what
+ * Claude Code installs from here, but the Copilot CLI REFUSES it: it validates
+ * `marketplace.json` against its own schema and rejects ~90 of that catalog's
+ * 292 entries ("plugins.N.source: Invalid input"). So the hint names the small
+ * marketplace, which both runtimes accept. Direct repo installs
+ * (`owner/repo:path`) also work but Copilot prints a deprecation warning, so
+ * they are deliberately not what we teach.
+ */
+export function formatWarning(missing: CompanionInfo[], runtime: 'copilot' | 'claude' = 'copilot'): string {
   if (missing.length === 0) return '';
   const lines = [
     '⚠ Companion plugins not installed. Once installed, their agents run automatically alongside selected skill passes.',
-    '  Inside a `copilot` session, run these slash commands:',
+    runtime === 'claude'
+      ? '  Inside a `claude` session, run these slash commands:'
+      : '  Run these commands in your shell:',
   ];
   const seenMarketplace = new Set<string>();
   for (const c of missing) {
-    if (!seenMarketplace.has(c.marketplaceSlash)) {
-      lines.push(`    ${c.marketplaceSlash}`);
-      seenMarketplace.add(c.marketplaceSlash);
+    const marketplace = runtime === 'claude' ? c.marketplaceSlash : c.marketplaceCommand;
+    if (!seenMarketplace.has(marketplace)) {
+      lines.push(`    ${marketplace}`);
+      seenMarketplace.add(marketplace);
     }
-    lines.push(`    ${c.installSlash}`);
+    lines.push(`    ${runtime === 'claude' ? c.installSlash : c.installCommand}`);
   }
   lines.push(`  Opt out for one run with --no-companions, or set companion_warn: false in ~/.pr-review/config.yaml.`);
   return lines.join('\n');

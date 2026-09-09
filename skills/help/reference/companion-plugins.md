@@ -13,9 +13,11 @@ description: "pr-review companion plugins: pr-review-toolkit and code-review ins
 | [`pr-review-toolkit`](https://claude.com/plugins/pr-review-toolkit) | `/pr-review-toolkit:review-pr <pr-url>` | Dispatches six specialized review agents internally: `code-reviewer`, `code-simplifier`, `comment-analyzer`, `pr-test-analyzer`, `silent-failure-hunter`, `type-design-analyzer`. Returns a consolidated finding set. |
 | [`code-review`](https://claude.com/plugins/code-review) | `/code-review:code-review <pr-url>` | Five-agent parallel fan-out with 0–100 confidence scoring; only ≥80 are surfaced. |
 
-## Install (slash commands inside `copilot` or `claude`)
+## Install — the command differs per runtime
 
-`/plugin marketplace add` and `/plugin install` are **slash commands inside an interactive session** (`copilot` or `claude`) — not `copilot plugin ...` bash subcommands. Start the session, then type at the prompt:
+The two CLIs do not share a command surface, and **each runtime has its own plugin registry**: installing under Claude Code does not install under Copilot. The marketplace and the plugin ids are the same; only the verb changes.
+
+**Claude Code** — slash commands, typed inside an interactive session:
 
 ```
 /plugin marketplace add anthropics/claude-code
@@ -23,7 +25,17 @@ description: "pr-review companion plugins: pr-review-toolkit and code-review ins
 /plugin install code-review@claude-code-plugins
 ```
 
-Verify with `/plugin list` inside the session, or `copilot plugin list` from the shell. A directory under `~/.copilot/installed-plugins/<marketplace>/` can be marketplace cache only; it is not proof of installation unless the plugin appears in the registry/list output.
+**Copilot CLI** — shell commands. It has no `/plugin`:
+
+```bash
+copilot plugin marketplace add anthropics/claude-code
+copilot plugin install pr-review-toolkit@claude-code-plugins
+copilot plugin install code-review@claude-code-plugins
+```
+
+Use `anthropics/claude-code`, not `anthropics/claude-plugins-official`. Both carry these two plugins and Claude Code accepts either, but the Copilot CLI validates `marketplace.json` against its own schema and rejects ~90 of that larger catalog's 292 entries (`plugins.N.source: Invalid input`). Direct repo installs (`copilot plugin install anthropics/claude-plugins-official:plugins/pr-review-toolkit`) do work, but Copilot prints a deprecation warning and says only `plugin@marketplace` will be supported later — so prefer the marketplace form.
+
+Verify with `/plugin list` inside a claude session, or `copilot plugin list` from the shell; `pr-review doctor` is the end-to-end check and prints `6 dispatch(es)` + `1 dispatch(es)` once both resolve. A directory under `~/.copilot/installed-plugins/<marketplace>/` can be marketplace cache only; it is not proof of installation unless the plugin appears in the registry/list output. If an entry lingers in `copilot plugin list` after an uninstall fails, `~/.copilot/config.json` still holds it — an entry whose `cache_path` no longer exists is stale.
 
 ## How auto-invocation works
 

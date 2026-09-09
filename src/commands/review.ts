@@ -843,8 +843,13 @@ export async function finalizeReview(a: {
  *
  * Unreadable or absent is not a failure: runs predating the artifact resume
  * fine, and inventing a failure from a missing file would block recovery.
+ *
+ * `outputs` is REQUIRED. Defaulted to `[]` it compiled at a call site that
+ * forgot it and silently restored the pre-fix behaviour — every recorded
+ * failure surviving with nothing to clear it — under a green suite. Required,
+ * dropping it fails the build.
  */
-export function resumedCompanionFailures(outDir: string, outputs: readonly ReviewerOutput[] = []): string[] {
+export function resumedCompanionFailures(outDir: string, outputs: readonly ReviewerOutput[]): string[] {
   const path = join(outDir, 'companions.json');
   if (!existsSync(path)) return [];
   const names = (value: unknown): string[] =>

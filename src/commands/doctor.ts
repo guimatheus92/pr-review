@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { binaryOnPath, normalizeModel, resolveRuntime, type Runtime } from '../dispatch/runtime.js';
 import { detectCodex } from '../dispatch/codex.js';
-import { companionDispatchCount, detectCompanions, KNOWN_COMPANIONS } from '../plugins/companions.js';
+import { companionDispatchCount, detectCompanions, KNOWN_COMPANIONS, installCommandFor } from '../plugins/companions.js';
 import { loadConfig } from '../config.js';
 
 function ok(label: string, detail = ''): void {
@@ -54,7 +54,10 @@ export async function runDoctor(): Promise<number> {
         const installed = companions.installed.includes(c.id);
         (installed ? ok : bad)(
           `companion ${c.id}`,
-          installed ? `${companionDispatchCount([c.id])} dispatch(es)` : c.installSlash,
+          // The remediation must be runnable in the runtime this doctor just
+          // resolved. `installSlash` for both was the same defect `formatWarning`
+          // carried, in the command a user with missing companions actually runs.
+          installed ? `${companionDispatchCount([c.id])} dispatch(es)` : installCommandFor(c, runtime),
         );
       }
     }

@@ -22,7 +22,7 @@ function runDir(companions?: string): string {
 test('resumedCompanionFailures — a missing companion is an operational failure on resume too', () => {
   const dir = runDir(JSON.stringify({ missingReviewers: ['companion:code-review'], duplicateReviewers: [] }));
   try {
-    assert.deepEqual(resumedCompanionFailures(dir), ["planned companion 'companion:code-review' produced no output"]);
+    assert.deepEqual(resumedCompanionFailures(dir, []), ["planned companion 'companion:code-review' produced no output"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -31,7 +31,7 @@ test('resumedCompanionFailures — a missing companion is an operational failure
 test('resumedCompanionFailures — duplicates count too, and both kinds are reported together', () => {
   const dir = runDir(JSON.stringify({ missingReviewers: ['a'], duplicateReviewers: ['b'] }));
   try {
-    assert.deepEqual(resumedCompanionFailures(dir), [
+    assert.deepEqual(resumedCompanionFailures(dir, []), [
       "planned companion 'a' produced no output",
       "companion 'b' produced duplicate outputs",
     ]);
@@ -43,7 +43,7 @@ test('resumedCompanionFailures — duplicates count too, and both kinds are repo
 test('resumedCompanionFailures — a clean artifact reports nothing', () => {
   const dir = runDir(JSON.stringify({ missingReviewers: [], duplicateReviewers: [] }));
   try {
-    assert.deepEqual(resumedCompanionFailures(dir), []);
+    assert.deepEqual(resumedCompanionFailures(dir, []), []);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -52,7 +52,7 @@ test('resumedCompanionFailures — a clean artifact reports nothing', () => {
 test('resumedCompanionFailures — an ABSENT artifact is benign (runs predating it must still resume)', () => {
   const dir = runDir();
   try {
-    assert.deepEqual(resumedCompanionFailures(dir), []);
+    assert.deepEqual(resumedCompanionFailures(dir, []), []);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -61,7 +61,7 @@ test('resumedCompanionFailures — an ABSENT artifact is benign (runs predating 
 test('resumedCompanionFailures — an UNREADABLE artifact is unknown, never "no failures"', () => {
   const dir = runDir('{ this is not json');
   try {
-    const failures = resumedCompanionFailures(dir);
+    const failures = resumedCompanionFailures(dir, []);
     assert.equal(failures.length, 1, 'swallowing the parse error reinstates the exact bug this exists to fix');
     assert.match(failures[0]!, /companions\.json is unreadable/);
   } finally {
@@ -72,7 +72,7 @@ test('resumedCompanionFailures — an UNREADABLE artifact is unknown, never "no 
 test('resumedCompanionFailures — a non-array field is ignored rather than crashing the resume', () => {
   const dir = runDir(JSON.stringify({ missingReviewers: 'oops', duplicateReviewers: [7, 'b'] }));
   try {
-    assert.deepEqual(resumedCompanionFailures(dir), ["companion 'b' produced duplicate outputs"]);
+    assert.deepEqual(resumedCompanionFailures(dir, []), ["companion 'b' produced duplicate outputs"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -207,7 +207,7 @@ test('resumedCompanionFailures — called with no outputs, every recorded failur
   // not have its failures silently cleared.
   const dir = runDir(JSON.stringify({ plannedReviewers: PLANNED, missingReviewers: PLANNED, duplicateReviewers: [] }));
   try {
-    assert.deepEqual(resumedCompanionFailures(dir), [
+    assert.deepEqual(resumedCompanionFailures(dir, []), [
       "planned companion 'companion:pr-review-toolkit/code-reviewer' produced no output",
       "planned companion 'companion:code-review' produced no output",
     ]);

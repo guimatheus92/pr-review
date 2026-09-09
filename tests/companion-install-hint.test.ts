@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { formatWarning, KNOWN_COMPANIONS } from '../src/plugins/companions.js';
+import { formatWarning, installCommandFor, KNOWN_COMPANIONS } from '../src/plugins/companions.js';
 
 /**
  * The hint told every runtime to type Claude Code slash commands "Inside a
@@ -76,5 +76,38 @@ test('KNOWN_COMPANIONS — the marketplace named is the one the Copilot CLI acce
   for (const companion of KNOWN_COMPANIONS) {
     assert.ok(companion.marketplaceCommand.endsWith('anthropics/claude-code'), companion.id);
     assert.ok(companion.installCommand.endsWith('@claude-code-plugins'), companion.id);
+  }
+});
+
+/**
+ * `formatWarning` was never the only surface handing a user an install command.
+ * `doctor` renders one per missing companion, and the first fix left it on
+ * `installSlash` for both runtimes -- in the very command someone with missing
+ * companions runs to find out. Both now route through `installCommandFor`, so
+ * the mapping exists once.
+ */
+test('installCommandFor — selects the command the runtime can actually run', () => {
+  for (const companion of KNOWN_COMPANIONS) {
+    assert.equal(installCommandFor(companion, 'copilot'), companion.installCommand);
+    assert.equal(installCommandFor(companion, 'claude'), companion.installSlash);
+    assert.ok(installCommandFor(companion, 'copilot').startsWith('copilot plugin install '), companion.id);
+    assert.ok(installCommandFor(companion, 'claude').startsWith('/plugin install '), companion.id);
+  }
+});
+
+test('installCommandFor — the two runtimes never receive the same string', () => {
+  // The defect was one string served to both. Distinctness is the property that
+  // makes "we fixed it for every consumer" checkable rather than asserted.
+  for (const companion of KNOWN_COMPANIONS) {
+    assert.notEqual(installCommandFor(companion, 'copilot'), installCommandFor(companion, 'claude'), companion.id);
+  }
+});
+
+test('formatWarning — routes through installCommandFor, so no consumer drifts', () => {
+  for (const runtime of ['copilot', 'claude'] as const) {
+    const warn = formatWarning(KNOWN_COMPANIONS, runtime);
+    for (const companion of KNOWN_COMPANIONS) {
+      assert.ok(warn.includes(installCommandFor(companion, runtime)), `${runtime}/${companion.id}`);
+    }
   }
 });

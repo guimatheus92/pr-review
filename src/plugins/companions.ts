@@ -305,7 +305,24 @@ export async function detectCompanions(binary = 'copilot', runtime: 'copilot' | 
  * (`owner/repo:path`) also work but Copilot prints a deprecation warning, so
  * they are deliberately not what we teach.
  */
-export function formatWarning(missing: CompanionInfo[], runtime: 'copilot' | 'claude' = 'copilot'): string {
+/**
+ * The one place that maps a companion to the command that installs it in a
+ * given runtime. `formatWarning` is not the only surface that hands a user an
+ * install command — `doctor` renders one per missing companion — and when the
+ * mapping lived inline at each site, fixing one left the other printing advice
+ * that cannot be typed. Route every hint through this.
+ */
+export function installCommandFor(companion: CompanionInfo, runtime: 'copilot' | 'claude'): string {
+  return runtime === 'claude' ? companion.installSlash : companion.installCommand;
+}
+
+/**
+ * `runtime` is REQUIRED on purpose. As an optional parameter defaulting to one
+ * runtime it compiled at every call site that forgot it and went on emitting
+ * the other runtime's syntax — the silent half of the bug this fixes. Required,
+ * a new consumer fails to build until it decides.
+ */
+export function formatWarning(missing: CompanionInfo[], runtime: 'copilot' | 'claude'): string {
   if (missing.length === 0) return '';
   const lines = [
     '⚠ Companion plugins not installed. Once installed, their agents run automatically alongside selected skill passes.',
@@ -320,7 +337,7 @@ export function formatWarning(missing: CompanionInfo[], runtime: 'copilot' | 'cl
       lines.push(`    ${marketplace}`);
       seenMarketplace.add(marketplace);
     }
-    lines.push(`    ${runtime === 'claude' ? c.installSlash : c.installCommand}`);
+    lines.push(`    ${installCommandFor(c, runtime)}`);
   }
   lines.push(`  Opt out for one run with --no-companions, or set companion_warn: false in ~/.pr-review/config.yaml.`);
   return lines.join('\n');

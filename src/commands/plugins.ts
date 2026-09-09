@@ -37,6 +37,9 @@ export async function pluginsDoctor(copilotBinary = 'copilot'): Promise<void> {
   }
   if (state.missing.length > 0) {
     console.log('\nTo install missing companions:');
-    console.log(formatWarning(state.missing));
+    // `pluginsDoctor` probes `copilot plugin list`; the hint it prints belongs to
+    // that runtime. Explicit, not defaulted — the default is what let the other
+    // call sites print the wrong runtime's syntax.
+    console.log(formatWarning(state.missing, 'copilot'));
   }
 }

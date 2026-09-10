@@ -1,10 +1,12 @@
 ---
 description: Review a GitHub, Azure DevOps, or GitLab pull request using parallel review passes in a single agent session (Copilot CLI or Claude Code) with auto-discovered local skills.
-argument-hint: "<pr-url> [--dry-run | --context-only] [--resume <run-id>] [--skip <pass,...>] [--fail-on <severity>] [--lang <code>] [--runtime <copilot|claude>] [--no-companions] [--no-codex] [--skill <file>] [--force-skill <file|dir>] [--skills-dir <path>]"
+argument-hint: "<pr-url> [--dry-run | --context-only] [--resume <run-id>] [--skip <pass,...>] [--fail-on <severity>] [--lang <code>] [--runtime <copilot|claude|auto>] [--default-model <model>] [--no-companions] [--no-codex] [--skill <file>] [--force-skill <file|dir>] [--skills-dir <path>]"
 allowed-tools: ["Bash"]
 ---
 
 You are running the `pr-review` CLI. You are NOT reviewing the PR yourself — the CLI gathers, dispatches, de-duplicates, and posts. A full review takes ~6–10 minutes, so it runs in the **background** and you poll it; never block one long-running call on it.
+
+Write every assistant-authored plumbing message in English, regardless of the user's language. This includes progress updates, checkout/warning explanations, and failure guidance. CLI output, status snapshots, and the final review summary are artifacts: print them verbatim without translating, paraphrasing, or rewriting them.
 
 ## Step 1 — start the review (background)
 

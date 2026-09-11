@@ -30,7 +30,9 @@ import {
   companionReviewerNames,
   detectCompanions,
   formatWarning,
+  materializeCompanionBriefs,
   type CompanionState,
+  type MaterializedCompanionBrief,
 } from '../plugins/companions.js';
 import type { PrProvider } from '../providers/types.js';
 import type { Finding, GatherOutput, PrRef, ReviewerOutput, Severity } from '../types.js';
@@ -1260,9 +1262,37 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   }
 }
 
+/**
+ * Name every fatal failure on disk, not just a detached run's.
+ *
+ * `error.txt` was written only by the `--run-dir` branch in `cli.ts`, so a throw in
+ * the foreground left a run dir with no record of why it stopped: a companion whose
+ * brief could not be materialized killed the run before `passes.json` existed, and
+ * `verify` then reported the missing artifact instead of the cause. INV-OUT-01
+ * grades exactly this ("exit 2 without error.txt — the failure is unnamed"), and
+ * AGENTS.md promises the file on any failure.
+ *
+ * `preserveRunState` is honoured: those errors mean the run is recoverable and its
+ * state must not be overwritten with a fatal record.
+ */
 export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   if (opts.resumeRunId) return resumeReview(opts);
+  const where: { outDir?: string } = {};
+  try {
+    return await reviewPipeline(opts, where);
+  } catch (err) {
+    if (where.outDir && !(err as { preserveRunState?: boolean }).preserveRunState) {
+      try {
+        writeFileSync(join(where.outDir, ERROR_FILE), ((err as Error).stack ?? String(err)) + '\n', 'utf8');
+      } catch {
+        // best-effort: the caller still prints and exits 2
+      }
+    }
+    throw err;
+  }
+}
 
+async function reviewPipeline(opts: ReviewCmdOptions, where: { outDir?: string }): Promise<ReviewResult> {
   const overallStart = Date.now();
   const invocationCwd = process.cwd();
   const cwd = gitTopLevel(invocationCwd) ?? invocationCwd;
@@ -1281,6 +1311,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   }).config;
   const { provider, ref } = resolvePr(opts.prUrl, trustedConfig.hosts, opts.provider);
   const outDir = opts.runDir ?? ensureRunDir(ref);
+  where.outDir = outDir;
   if (opts.runDir) mkdirSync(opts.runDir, { recursive: true });
   process.stderr.write(`[review] run artifacts → ${outDir}\n`);
   // Liveness beacon: `status` checks this pid to tell a slow-but-healthy run
@@ -1347,6 +1378,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   let installedCompanions: string[] = [];
   let companionState: CompanionState | undefined;
   let companionDetectionWarning: string | undefined;
+  const companionDegraded: string[] = [];
   let companionPromise: Promise<void> = Promise.resolve();
   if (config.invokeCompanions || config.companionWarn) {
     companionPromise = (async () => {
@@ -1420,7 +1452,6 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     process.stderr.write(`[packs] cloned ${name} (first use) — refresh later with \`pr-review packs sync\`\n`);
   }
   for (const w of packsResult.warnings) process.stderr.write(w + '\n');
-  const plannedCompanionReviewers = config.invokeCompanions ? companionReviewerNames(installedCompanions) : [];
   const runtimePluginRoots = runtimeInstalledPluginRoots(
     runtime,
     opts.homeOverride,
@@ -1430,6 +1461,23 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     id,
     roots: runtimePluginRoots.filter((plugin) => plugin.id === id).map((plugin) => plugin.root),
   }));
+  // Resolve the briefs BEFORE the roster is fixed. A companion that cannot be
+  // materialized is dropped from `installedCompanions`, so it is never planned —
+  // planning it and failing to dispatch it is what INV-DEL-01 reads as a missing
+  // output, which would turn degraded coverage back into an exit 2.
+  const companionBriefs: MaterializedCompanionBrief[] = [];
+  if (config.invokeCompanions) {
+    const materialized = materializeCompanionBriefs({ installed: installedCompanions, sources: companionSources });
+    companionBriefs.push(...materialized.briefs);
+    for (const failure of materialized.failures) {
+      const note = `companion ${failure.id} not dispatched — ${failure.reason}`;
+      companionDegraded.push(note);
+      process.stderr.write(`[companions] warning: ${note}\n`);
+    }
+    const lost = new Set(materialized.failures.map((failure) => failure.id));
+    installedCompanions = installedCompanions.filter((id) => !lost.has(id));
+  }
+  const plannedCompanionReviewers = config.invokeCompanions ? companionReviewerNames(installedCompanions) : [];
   writeCompanionArtifact([]);
   const includeCodex = wantCodex && codexAvailable;
   if (wantCodex && !codexAvailable) {
@@ -1543,6 +1591,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
         )
       : []),
     ...(companionDetectionWarning ? [companionDetectionWarning] : []),
+    ...companionDegraded,
     ...mcpCapabilities.warnings,
     ...(repoConfigChanged ? ['.pr-review.yaml changed by this PR — checkout-local configuration ignored as untrusted'] : []),
     ...untrustedProjectRules.map(
@@ -1560,6 +1609,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     stackTags: selection.stackTags,
     installedCompanions,
     companionSources,
+    companionBriefs,
     skipReviewers: effectiveSkip,
     outDir,
     copilotBinary: opts.copilotBinary,

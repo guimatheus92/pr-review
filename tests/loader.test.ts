@@ -196,6 +196,55 @@ test('parseClaudePluginListJson — only effective enabled companion identities 
   }]);
 });
 
+// Shape copied verbatim from `claude plugin list --json` on a machine where the
+// acceptance matrix failed all three claude cells: one user-scope install plus two
+// project-scope installs of the SAME id for an unrelated project, differing only by
+// drive-letter case. The list is not cwd-filtered, so reading it as if it were turned
+// another project's installs into a conflict and dropped all 7 companion dispatches.
+const REAL_PLUGIN_LIST = [
+  {
+    id: 'code-review@claude-plugins-official', version: '3deb821cb71c', scope: 'user',
+    enabled: true, installPath: join(tmpdir(), 'cache', 'code-review', '3deb821cb71c'),
+  },
+  {
+    id: 'code-review@claude-plugins-official', version: '3ea32df27be7', scope: 'project',
+    enabled: true, installPath: join(tmpdir(), 'cache', 'code-review', '3ea32df27be7'),
+    projectPath: 'C:\\Users\\guilh\\repos\\PrecoPratico',
+  },
+  {
+    id: 'code-review@claude-plugins-official', version: '3b600518a637', scope: 'project',
+    enabled: true, installPath: join(tmpdir(), 'cache', 'code-review', '3b600518a637'),
+    projectPath: 'c:\\Users\\guilh\\repos\\PrecoPratico',
+  },
+];
+
+test('parseClaudePluginListJson — another project\'s installs never become a conflict', () => {
+  const parsed = parseClaudePluginListJson(
+    JSON.stringify(REAL_PLUGIN_LIST),
+    'C:\\Users\\guilh\\repos\\pr-review',
+  );
+
+  assert.equal(parsed.detectionError, undefined);
+  assert.deepEqual(parsed.activeClaudePlugins, [{
+    key: 'code-review@claude-plugins-official',
+    version: '3deb821cb71c',
+    root: join(tmpdir(), 'cache', 'code-review', '3deb821cb71c'),
+  }]);
+});
+
+test('parseClaudePluginListJson — a project-scoped install governs subdirectories of its project', () => {
+  // Inside that project the two entries genuinely are ambiguous: same id, same
+  // project, different versions. Failing closed there is the point of the check,
+  // and case-folding is what makes `c:` and `C:` one project rather than two.
+  for (const cwd of [
+    'C:\\Users\\guilh\\repos\\PrecoPratico',
+    'C:\\Users\\guilh\\repos\\PrecoPratico\\apps\\backend',
+  ]) {
+    const parsed = parseClaudePluginListJson(JSON.stringify(REAL_PLUGIN_LIST), cwd);
+    assert.match(parsed.detectionError ?? '', /conflicting active installations/, `cwd=${cwd}`);
+  }
+});
+
 test('parseClaudePluginListJson — plugin-derived detection errors are single-line and bounded', () => {
   const parsed = parseClaudePluginListJson(JSON.stringify([
     {

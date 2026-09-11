@@ -25,6 +25,7 @@ import {
   companionReviewerNames,
   materializeCompanionBriefs,
   type CompanionPluginSource,
+  type MaterializedCompanionBrief,
 } from '../plugins/companions.js';
 import type { McpCapability } from '../plugins/installed.js';
 import {
@@ -79,6 +80,8 @@ export interface SingleSessionOptions {
   installedCompanions: string[];
   /** Active runtime registry roots used only to snapshot known companion review criteria. */
   companionSources?: CompanionPluginSource[];
+  /** Briefs resolved by the caller, which also dropped any companion that failed. */
+  companionBriefs?: MaterializedCompanionBrief[];
   /** Pass names to skip (full `pack/skill` or bare suffix), plus `verifier` / `codex`. */
   skipReviewers: string[];
   outDir: string;
@@ -681,10 +684,13 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
 
   const companionBriefFiles: Record<string, string> = {};
   if (opts.invokeCompanions) {
-    const briefs = materializeCompanionBriefs({
-      installed: opts.installedCompanions,
-      sources: opts.companionSources ?? [],
-    });
+    // Resolved by the caller so a failing companion could be dropped from the
+    // planned roster; falling back keeps the direct-call test paths working.
+    const briefs = opts.companionBriefs
+      ?? materializeCompanionBriefs({
+        installed: opts.installedCompanions,
+        sources: opts.companionSources ?? [],
+      }).briefs;
     for (const brief of briefs) {
       const path = resolve(opts.outDir, `companion-brief-${sanitizeForFilename(brief.reviewerName)}.md`);
       writeFileSync(path, brief.body, 'utf8');

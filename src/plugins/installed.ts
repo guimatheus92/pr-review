@@ -170,17 +170,29 @@ export function installedPluginRoots(home: string): string[] {
   return [...pluginRoots(join(home, '.copilot', 'installed-plugins')), ...claudePluginRoots(home)];
 }
 
+/**
+ * Validate one runtime-reported install root.
+ *
+ * Integrity here is `name` plus the path: the runtime named the exact `installPath`,
+ * and the manifest sitting at it must declare the plugin we were promised. The
+ * manifest VERSION proves nothing and cannot be required — a runtime's install
+ * version and a manifest's `version` are different namespaces. Claude reports the
+ * marketplace commit (`3deb821cb71c`) for `anthropics/claude-plugins-official`,
+ * whose `plugin.json` carries no `version` field at all, while it reports a semver
+ * (`1.0.6`) for others. Demanding equality therefore passed or failed on how a
+ * marketplace happens to version its plugins, not on integrity: it rejected every
+ * correctly installed official companion, `materializeCompanionBriefs` threw on the
+ * empty root list, and the review died before writing `passes.json`.
+ */
 function runtimePluginRoot(
   id: string,
   path: unknown,
   version: unknown,
-  requireManifestVersion = false,
 ): RuntimeInstalledPluginRoot | undefined {
   if (typeof path !== 'string' || !path.trim()) return undefined;
   const root = resolve(path);
   const manifest = readJsonQuiet(join(root, '.claude-plugin', 'plugin.json'));
   if (manifest?.name !== id) return undefined;
-  if (requireManifestVersion && (typeof manifest.version !== 'string' || manifest.version !== version)) return undefined;
   return {
     id,
     root,
@@ -213,8 +225,8 @@ export function runtimeInstalledPluginRoots(
     const roots = new Map<string, RuntimeInstalledPluginRoot>();
     for (const plugin of activeClaudePlugins) {
       const id = plugin.key.split('@')[0]!;
-      const root = runtimePluginRoot(id, plugin.root, plugin.version, true);
-      if (root?.version === plugin.version) roots.set(root.root, root);
+      const root = runtimePluginRoot(id, plugin.root, plugin.version);
+      if (root) roots.set(root.root, root);
     }
     return [...roots.values()];
   }

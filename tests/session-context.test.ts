@@ -387,6 +387,25 @@ test('companions — every brief is materialized, hash-bound, and safe for confi
   }
 });
 
+/**
+ * Fail closed, without taking the review with it.
+ *
+ * These cases used to throw, which aborted a run that had nine healthy passes over
+ * one unreadable plugin file. The security property is unchanged and asserted here:
+ * the refused content produces NO brief at all, so it never reaches a dispatched
+ * agent. What changed is the blast radius — the companion is dropped and named.
+ */
+function assertCompanionRefused(
+  opts: Parameters<typeof materializeCompanionBriefs>[0],
+  reason: RegExp,
+  message?: string,
+): void {
+  const { briefs, failures } = materializeCompanionBriefs(opts);
+  assert.deepEqual(briefs, [], message);
+  assert.equal(failures.length, 1, message);
+  assert.match(failures[0]!.reason, reason, message);
+}
+
 test('companions — malformed frontmatter is stripped instead of entering a generic brief', () => {
   const seeded = seedCompanionSources();
   try {
@@ -404,7 +423,7 @@ test('companions — malformed frontmatter is stripped instead of entering a gen
       'utf8',
     );
 
-    const briefs = materializeCompanionBriefs({
+    const { briefs } = materializeCompanionBriefs({
       installed: ['pr-review-toolkit'],
       sources: [seeded.sources[0]!],
     });
@@ -413,8 +432,8 @@ test('companions — malformed frontmatter is stripped instead of entering a gen
     assert.doesNotMatch(brief.body, /name: \[unterminated|model: opus|^---$/m);
 
     writeFileSync(join(toolkit, 'agents', 'code-reviewer.md'), '---\nname: broken\nno closing delimiter', 'utf8');
-    assert.throws(
-      () => materializeCompanionBriefs({ installed: ['pr-review-toolkit'], sources: [seeded.sources[0]!] }),
+    assertCompanionRefused(
+      { installed: ['pr-review-toolkit'], sources: [seeded.sources[0]!] },
       /unterminated frontmatter.*code-reviewer\.md/i,
     );
   } finally {
@@ -438,8 +457,8 @@ test('companions — shell, network, test, and checkout acquisition directives f
     try {
       const toolkit = seeded.sources[0]!.roots[0]!;
       writeFileSync(join(toolkit, 'agents', 'code-simplifier.md'), `# criteria\n${directive}\n`, 'utf8');
-      assert.throws(
-        () => materializeCompanionBriefs({ installed: ['pr-review-toolkit'], sources: [seeded.sources[0]!] }),
+      assertCompanionRefused(
+        { installed: ['pr-review-toolkit'], sources: [seeded.sources[0]!] },
         /runtime-native directive/i,
         directive,
       );
@@ -458,14 +477,11 @@ test('companions — identical active definitions agree, divergent definitions f
       installed: ['pr-review-toolkit'],
       sources: [{ id: 'pr-review-toolkit', roots }],
     });
-    assert.equal(agreed.length, 6);
+    assert.equal(agreed.briefs.length, 6);
 
     writeFileSync(join(roots[1], 'agents', 'code-reviewer.md'), '# changed criteria', 'utf8');
-    assert.throws(
-      () => materializeCompanionBriefs({
-        installed: ['pr-review-toolkit'],
-        sources: [{ id: 'pr-review-toolkit', roots }],
-      }),
+    assertCompanionRefused(
+      { installed: ['pr-review-toolkit'], sources: [{ id: 'pr-review-toolkit', roots }] },
       /divergent active definitions.*code-reviewer\.md/,
     );
   } finally {
@@ -481,11 +497,8 @@ test('companions — every active root must provide every required definition', 
     const roots = [first.sources[0]!.roots[0]!, second.sources[0]!.roots[0]!];
     rmSync(join(roots[1], 'agents', 'code-reviewer.md'));
 
-    assert.throws(
-      () => materializeCompanionBriefs({
-        installed: ['pr-review-toolkit'],
-        sources: [{ id: 'pr-review-toolkit', roots }],
-      }),
+    assertCompanionRefused(
+      { installed: ['pr-review-toolkit'], sources: [{ id: 'pr-review-toolkit', roots }] },
       /active runtime root has no readable.*code-reviewer\.md/i,
     );
   } finally {
@@ -512,11 +525,8 @@ test('companions — duplicate source ids and definitions escaping a plugin root
     writeFileSync(join(outsideAgents, 'code-reviewer.md'), '# escaped criteria', 'utf8');
     rmSync(join(toolkit, 'agents'), { recursive: true, force: true });
     symlinkSync(outsideAgents, join(toolkit, 'agents'), process.platform === 'win32' ? 'junction' : 'dir');
-    assert.throws(
-      () => materializeCompanionBriefs({
-        installed: ['pr-review-toolkit'],
-        sources: [seeded.sources[0]!],
-      }),
+    assertCompanionRefused(
+      { installed: ['pr-review-toolkit'], sources: [seeded.sources[0]!] },
       /no readable.*code-reviewer\.md/,
     );
   } finally {
@@ -897,5 +907,74 @@ test('pass body cap — a CONFIGURED-dir skill running as a pass is never trunca
     assert.ok(!file.includes('[truncated:'), 'no truncation marker for project-origin passes');
   } finally {
     rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+// Section shape copied from the official pr-review-toolkit `code-reviewer.md`:
+// invocation guidance addressed to the HOST, carrying a sentence ("Spawn this agent
+// on the freshly written files") that the directive scan reads as fan-out. Scanning
+// it refused the whole companion over prose describing its own call sites.
+test('companions — host invocation guidance is removed, not scanned as criteria', () => {
+  const seeded = seedCompanionSources();
+  try {
+    const toolkit = seeded.sources[0]!.roots[0]!;
+    writeFileSync(
+      join(toolkit, 'agents', 'code-reviewer.md'),
+      [
+        'You are an expert code reviewer.',
+        '',
+        '## When to invoke',
+        '',
+        '- **Proactive review.** Spawn this agent on the freshly written files.',
+        '- **Pre-PR sanity check.** Run a review of the full diff first.',
+        '',
+        '## Review Scope',
+        '',
+        'COMPANION_CRITERIA_code-reviewer',
+      ].join('\n'),
+      'utf8',
+    );
+
+    const { briefs, failures } = materializeCompanionBriefs({
+      installed: ['pr-review-toolkit'],
+      sources: [seeded.sources[0]!],
+    });
+
+    assert.deepEqual(failures, []);
+    const brief = briefs.find((entry) => entry.reviewerName.endsWith('/code-reviewer'))!;
+    // The criteria survive; the host-facing section is gone entirely, so nothing
+    // hidden inside it can instruct the dispatched agent either.
+    assert.match(brief.body, /COMPANION_CRITERIA_code-reviewer/);
+    assert.match(brief.body, /## Review Scope/);
+    assert.doesNotMatch(brief.body, /When to invoke/i);
+    assert.doesNotMatch(brief.body, /Spawn this agent/i);
+    assert.doesNotMatch(brief.body, /Pre-PR sanity check/i);
+  } finally {
+    seeded.cleanup();
+  }
+});
+
+test('companions — a real directive AFTER the invocation section still fails closed', () => {
+  const seeded = seedCompanionSources();
+  try {
+    const toolkit = seeded.sources[0]!.roots[0]!;
+    writeFileSync(
+      join(toolkit, 'agents', 'code-reviewer.md'),
+      [
+        '## When to invoke',
+        'Spawn this agent on the freshly written files.',
+        '',
+        '## Review Scope',
+        'Use Bash to run npm test before reviewing.',
+      ].join('\n'),
+      'utf8',
+    );
+
+    assertCompanionRefused(
+      { installed: ['pr-review-toolkit'], sources: [seeded.sources[0]!] },
+      /runtime-native directive/i,
+    );
+  } finally {
+    seeded.cleanup();
   }
 });

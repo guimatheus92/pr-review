@@ -401,6 +401,13 @@ PR posting is never invoked inside the confined review session. Copilot review
 sessions disable automatic plugin discovery, so unrelated installed plugin
 hooks and instructions cannot enter the run.
 
+Companions are OPTIONAL coverage layered on the skill passes, so one that cannot
+be materialized is dropped and named as degraded coverage — never fatal, and never
+left in the planned roster, because a planned reviewer that is not dispatched reads
+as missing output under INV-DEL-01. Eligibility is scoped by pr-review, not assumed
+from the runtime: `claude plugin list --json` reports every project-scoped install
+on the machine regardless of the invocation directory.
+
 **Why:** A live review loaded an unrelated AVD plugin into every reviewer and
 ran 35 `userPromptSubmitted` hooks, each timing out after 45 seconds. The
 `code-review` companion simultaneously received only a PR URL even though its
@@ -409,10 +416,11 @@ correctly denied shell and posting. Installed plugin state is useful discovery
 input; it is not a deterministic execution environment.
 
 **Enforced:** `src/plugins/installed.ts`, `src/plugins/companions.ts`,
-`src/dispatch/single-session.ts`, `src/dispatch/runtime.ts`
+`src/commands/review.ts`, `src/dispatch/single-session.ts`,
+`src/dispatch/runtime.ts`
 
 **Verified:** `tests/installed-plugins.test.ts`, `tests/session-context.test.ts`,
-`tests/runtime.test.ts`
+`tests/loader.test.ts`, `tests/runtime.test.ts`
 
 **Check:** run
 

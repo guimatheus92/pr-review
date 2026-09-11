@@ -148,7 +148,7 @@ test('runtimeInstalledPluginRoots — Claude uses authoritative installPath entr
   }
 });
 
-test('runtimeInstalledPluginRoots — Claude intersects registry roots with the effective qualified id and version', () => {
+test('runtimeInstalledPluginRoots — Claude intersects registry roots with the effective qualified id', () => {
   const home = mkdtempSync(join(tmpdir(), 'pr-review-claude-effective-'));
   try {
     const active = seedClaudePlugin(home, 'market-a', 'pr-review-toolkit', '2.0.0');
@@ -172,12 +172,16 @@ test('runtimeInstalledPluginRoots — Claude intersects registry roots with the 
       }]),
       [{ id: 'pr-review-toolkit', root: active, version: '2.0.0' }],
     );
+    // A runtime version that disagrees with the manifest is NOT evidence of
+    // tampering: the two are different namespaces — Claude reports the marketplace
+    // commit for the official plugins and a semver for others. The runtime's value
+    // is recorded, not adjudicated; identity and the runtime-supplied path are the
+    // gates that actually prove something.
     assert.deepEqual(
       runtimeInstalledPluginRoots('claude', home, [{
         key: 'pr-review-toolkit@market-a', version: '999.0.0', root: active,
       }]),
-      [],
-      'the effective selector version must agree with the plugin manifest',
+      [{ id: 'pr-review-toolkit', root: active, version: '999.0.0' }],
     );
     writeFileSync(
       join(active, '.claude-plugin', 'plugin.json'),
@@ -187,8 +191,8 @@ test('runtimeInstalledPluginRoots — Claude intersects registry roots with the 
       runtimeInstalledPluginRoots('claude', home, [{
         key: 'pr-review-toolkit@market-a', version: '2.0.0', root: active,
       }]),
-      [],
-      'strict effective-root validation requires a manifest version',
+      [{ id: 'pr-review-toolkit', root: active, version: '2.0.0' }],
+      'a versionless manifest is the official shape, not a refusal',
     );
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -480,5 +484,54 @@ test('readCapabilityUsage — a leak reported only in available still warns', ()
     assert.doesNotMatch(result.warnings[0] ?? '', /used:/);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// The official Anthropic plugins ship a `.claude-plugin/plugin.json` with no
+// `version` field at all, while `claude plugin list --json` reports the marketplace
+// COMMIT (`3deb821cb71c`) as their version — and a semver (`1.0.6`) for others.
+// Requiring manifest.version === that value rejected every correctly installed
+// official companion, which made materializeCompanionBriefs throw and killed the
+// review before passes.json. Shape copied from a real install.
+test('runtimeInstalledPluginRoots — a versionless official manifest still resolves its root', () => {
+  const home = mkdtempSync(join(tmpdir(), 'claude-versionless-'));
+  try {
+    const root = join(home, '.claude', 'plugins', 'cache', 'claude-plugins-official', 'pr-review-toolkit', '3deb821cb71c');
+    mkdirSync(join(root, '.claude-plugin'), { recursive: true });
+    writeFileSync(
+      join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'pr-review-toolkit', description: 'Comprehensive PR review agents', author: { name: 'Anthropic' } }),
+      'utf8',
+    );
+
+    const roots = runtimeInstalledPluginRoots('claude', home, [
+      { key: 'pr-review-toolkit@claude-plugins-official', version: '3deb821cb71c', root },
+    ]);
+
+    assert.deepEqual(roots, [{ id: 'pr-review-toolkit', root, version: '3deb821cb71c' }]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('runtimeInstalledPluginRoots — identity is still enforced: a manifest naming another plugin is refused', () => {
+  const home = mkdtempSync(join(tmpdir(), 'claude-identity-'));
+  try {
+    const root = join(home, '.claude', 'plugins', 'cache', 'm', 'pr-review-toolkit', 'v1');
+    mkdirSync(join(root, '.claude-plugin'), { recursive: true });
+    writeFileSync(
+      join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'something-else' }),
+      'utf8',
+    );
+
+    assert.deepEqual(
+      runtimeInstalledPluginRoots('claude', home, [
+        { key: 'pr-review-toolkit@claude-plugins-official', version: 'v1', root },
+      ]),
+      [],
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
   }
 });

@@ -2,7 +2,7 @@ import { spawnCli } from '../util/spawn.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
-import { realpathCanonical } from '../util/realpath.js';
+import { foldPath, realpathCanonical } from '../util/realpath.js';
 import type { RuntimePluginSelector } from './installed.js';
 import { safeRuntimeDiagnostic } from '../util/text.js';
 
@@ -131,7 +131,28 @@ function parsedCompanionBody(raw: string, path: string): string {
   return normalized.slice(bodyStart).replace(/^\r?\n/, '').trim();
 }
 
-function safeCompanionCriteria(body: string, source: string): string {
+/**
+ * Drop the section that tells a HOST when to dispatch this agent.
+ *
+ * `## When to invoke` is addressed to whoever calls the agent, not to the agent —
+ * the official `code-reviewer.md` says "Spawn this agent on the freshly written
+ * files" there. It is invocation metadata, exactly like the frontmatter stripped
+ * above it, and it is not review criteria: pr-review has already decided to dispatch
+ * by the time the brief is built. Scanning it as criteria refused the whole
+ * companion over a sentence describing its own call sites.
+ *
+ * Removed, not exempted — the text never reaches the dispatched agent, so nothing
+ * hidden in it can instruct the review either.
+ */
+function withoutInvocationGuidance(body: string): string {
+  // Consume the heading and every following line that does not open a new section.
+  // A lookahead ending in `\s*$` would not do: under /m that matches at the first
+  // line break, so the heading alone was removed and its body stayed behind.
+  return body.replace(/^##+[ \t]*when to (?:invoke|use)[^\n]*(?:\n(?!#)[^\n]*)*\n?/gim, '');
+}
+
+function safeCompanionCriteria(rawBody: string, source: string): string {
+  const body = withoutInvocationGuidance(rawBody);
   const sanitized = body.replace(
     /^By default, review unstaged changes from `git diff`\. The user may specify different files or scope to review\.\s*$/gim,
     'Review only the materialized PR context and diff.',
@@ -195,41 +216,66 @@ function codeReviewCriteria(body: string): string {
   ].join('\n');
 }
 
-/** Resolve every required companion definition without invoking runtime-native agents or commands. */
+/**
+ * Resolve every companion definition without invoking runtime-native agents or commands.
+ *
+ * A companion that cannot be resolved is DEGRADED COVERAGE, never a fatal error. It
+ * is optional extra coverage layered on top of the skill passes, so one unreadable
+ * plugin file must not take the review with it: a single `.md` shipped by a
+ * marketplace once aborted a run that had nine healthy passes and five other working
+ * companions, exiting 2 with nothing posted. Failures are returned so the caller can
+ * drop the companion from the PLANNED roster — dropping it from dispatch alone would
+ * leave INV-DEL-01 counting a reviewer that was never planned as missing output.
+ *
+ * Granularity is the companion, not the file: `companionReviewerNames()` derives every
+ * planned name from the id, so a partial id would desynchronize the roster.
+ */
 export function materializeCompanionBriefs(opts: {
   installed: string[];
   sources: CompanionPluginSource[];
-}): MaterializedCompanionBrief[] {
+}): { briefs: MaterializedCompanionBrief[]; failures: { id: string; reason: string }[] } {
   const sourcesById = new Map(opts.sources.map((source) => [source.id, source]));
   if (sourcesById.size !== opts.sources.length) throw new Error('duplicate companion source id');
   const briefs: MaterializedCompanionBrief[] = [];
+  const failures: { id: string; reason: string }[] = [];
   for (const companion of KNOWN_COMPANIONS) {
     if (!opts.installed.includes(companion.id)) continue;
-    const source = sourcesById.get(companion.id);
-    if (!source || source.roots.length === 0) {
-      throw new Error(`companion plugin '${companion.id}' was detected but has no active runtime source root`);
+    try {
+      briefs.push(...companionBriefs(companion, sourcesById.get(companion.id)));
+    } catch (err) {
+      failures.push({
+        id: companion.id,
+        reason: safeRuntimeDiagnostic((err as Error).message) ?? 'unknown error',
+      });
     }
-    if (companion.criteria.kind === 'agent-files') {
-      for (const agent of companion.criteria.agents) {
-        const shortAgent = agent.replace(/^[^:]+:/, '');
-        const relativePath = join('agents', `${shortAgent}.md`);
-        const body = safeCompanionCriteria(agreedDefinition(source, relativePath), relativePath);
-        briefs.push({
-          reviewerName: `companion:${companion.id}/${shortAgent}`,
-          companionId: companion.id,
-          body,
-        });
-      }
-      continue;
-    }
-    const definition = agreedDefinition(source, join('commands', 'code-review.md'));
-    briefs.push({
-      reviewerName: `companion:${companion.id}`,
-      companionId: companion.id,
-      body: safeCompanionCriteria(codeReviewCriteria(definition), join('commands', 'code-review.md')),
+  }
+  return { briefs, failures };
+}
+
+function companionBriefs(
+  companion: CompanionInfo,
+  source: CompanionPluginSource | undefined,
+): MaterializedCompanionBrief[] {
+  if (!source || source.roots.length === 0) {
+    throw new Error(`companion plugin '${companion.id}' was detected but has no active runtime source root`);
+  }
+  if (companion.criteria.kind === 'agent-files') {
+    return companion.criteria.agents.map((agent) => {
+      const shortAgent = agent.replace(/^[^:]+:/, '');
+      const relativePath = join('agents', `${shortAgent}.md`);
+      return {
+        reviewerName: `companion:${companion.id}/${shortAgent}`,
+        companionId: companion.id,
+        body: safeCompanionCriteria(agreedDefinition(source, relativePath), relativePath),
+      };
     });
   }
-  return briefs;
+  const definition = agreedDefinition(source, join('commands', 'code-review.md'));
+  return [{
+    reviewerName: `companion:${companion.id}`,
+    companionId: companion.id,
+    body: safeCompanionCriteria(codeReviewCriteria(definition), join('commands', 'code-review.md')),
+  }];
 }
 
 export interface CompanionState {
@@ -363,6 +409,27 @@ function stringField(record: Record<string, unknown>, names: readonly string[]):
   return undefined;
 }
 
+/**
+ * Does a project-scoped plugin entry govern the directory this review runs in?
+ *
+ * `claude plugin list --json` is NOT scoped to the invocation directory: run from
+ * one checkout it still reports every project-scoped install on the machine, each
+ * carrying the `projectPath` it belongs to. Reading the list as if it were already
+ * cwd-filtered turns another project's installs into "conflicting active
+ * installations" and drops every companion dispatch — observed on a machine with
+ * `code-review` installed once at user scope and twice for an unrelated project.
+ *
+ * Containment, not equality: pr-review may run from a subdirectory of the checkout
+ * while Claude keys project scope on its root. `foldPath` because the same two
+ * entries differed only by drive-letter case (`C:` vs `c:`) — the comparison that
+ * INV-TRUST-01 already folds on every platform.
+ */
+function governsCwd(projectPath: string, cwd: string): boolean {
+  const project = foldPath(resolve(projectPath)).replace(/\/+$/, '');
+  const here = foldPath(resolve(cwd));
+  return here === project || here.startsWith(`${project}/`);
+}
+
 function enabledField(record: Record<string, unknown>): boolean | undefined {
   if (typeof record.enabled === 'boolean') return record.enabled;
   for (const value of [record.enabled, record.status, record.state]) {
@@ -373,8 +440,11 @@ function enabledField(record: Record<string, unknown>): boolean | undefined {
   return undefined;
 }
 
-/** Parse Claude's cwd-aware, effective plugin inventory. Unknown shapes fail closed. */
-export function parseClaudePluginListJson(raw: string): {
+/**
+ * Parse Claude's plugin inventory and reduce it to what governs `cwd`.
+ * Unknown shapes fail closed; another project's installs are skipped, not conflicts.
+ */
+export function parseClaudePluginListJson(raw: string, cwd = process.cwd()): {
   installed: string[];
   activeClaudePlugins: RuntimePluginSelector[];
   detectionError?: string;
@@ -402,6 +472,10 @@ export function parseClaudePluginListJson(raw: string): {
       const id = rawIdentity.split('@')[0]!;
       installed.add(id);
       if (!KNOWN_COMPANIONS.some((companion) => companion.id === id)) continue;
+      // Another project's install is not this review's plugin state — skip it before
+      // the enable and conflict gates, which would otherwise fail closed on it.
+      const projectPath = stringField(entry, ['projectPath', 'project_path']);
+      if (projectPath && !governsCwd(projectPath, cwd)) continue;
       const enabled = enabledField(entry);
       if (enabled === undefined) {
         return { installed: [], activeClaudePlugins: [], detectionError: safeDetectionError(`Claude plugin '${id}' has no effective enable status`) };

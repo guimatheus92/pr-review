@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { RUNS_ROOT } from '../util/tmp.js';
 import { ERROR_FILE } from '../util/tmp.js';
 import { readPostedMarker, type PostedMarker } from '../util/posted-marker.js';
@@ -13,6 +13,8 @@ import { withRetry } from '../util/retry.js';
 import { linguistCachePath } from '../stack/linguist.js';
 import type { PrProvider } from '../providers/types.js';
 import type { ExistingComment, Finding, GatherOutput, PrMetadata, PrRef } from '../types.js';
+import { sha256File } from '../util/atomic-json.js';
+import { companionRuntimeDirective } from '../plugins/companions.js';
 
 /**
  * Post-hoc audit of a finished run against INVARIANTS.md.
@@ -56,6 +58,7 @@ interface PassRouteLike {
 
 interface CapabilitiesArtifact {
   runtime?: string;
+  model?: string;
   installedPlugins?: unknown;
   selectedPluginSkills?: unknown;
   mcpServers?: { name: string; source: string }[];
@@ -567,6 +570,35 @@ export const CHECKS: InvariantCheck[] = [
       if (!shaped) return fail('capabilities.json is malformed (installedPlugins/selectedPluginSkills/mcpServers/warnings must all be arrays)');
       if (!ctx.routes) return fail('passes.json is missing or malformed — the run has no record of how skills were routed');
       if (ctx.routes.length === 0) return fail('passes.json is empty — no skill was even considered');
+      if (ctx.plan) {
+        if (typeof c.model !== 'string' || !c.model) return fail('capabilities.json records no requested model');
+        if (c.model !== ctx.plan.model) {
+          return fail(`capabilities.json requested model ${JSON.stringify(c.model)} disagrees with plan model ${JSON.stringify(ctx.plan.model)}`);
+        }
+        const missingAttemptModel = ctx.state?.runtimeAttempts.filter((attempt) => !attempt.requestedModel) ?? [];
+        if (missingAttemptModel.length > 0) {
+          return fail(`${missingAttemptModel.length} authenticated runtime attempt(s) record no requested model`);
+        }
+        const initial = ctx.state?.runtimeAttempts.find((attempt) => attempt.kind === 'initial');
+        if (ctx.plan.runtime === 'copilot' && ctx.plan.model === 'auto' && !initial?.resolvedModel) {
+          return fail(
+            initial
+              ? 'Copilot Auto initial attempt records no top-level resolved model'
+              : 'Copilot Auto delivery state records no initial runtime attempt',
+          );
+        }
+        if (ctx.plan.runtime === 'copilot' && ctx.plan.model === 'auto' && initial?.resolvedModel) {
+          const mismatchedRecoveries = ctx.state?.runtimeAttempts.filter((attempt) =>
+            (attempt.kind === 'automatic-recovery' || attempt.kind === 'manual-recovery') &&
+            attempt.requestedModel !== initial.resolvedModel) ?? [];
+          if (mismatchedRecoveries.length > 0) {
+            return fail(
+              `${mismatchedRecoveries.length} reviewer recovery attempt(s) did not request initial root route ` +
+              `${JSON.stringify(initial.resolvedModel)}`,
+            );
+          }
+        }
+      }
       const by = (kind: string) => ctx.routes!.filter((r) => r.matchedBy === kind).length;
       const dispatched = ctx.routes.filter((r) => !['context', 'index', 'skipped'].includes(r.matchedBy)).length;
       const runtimeNote = c.runtime ? `runtime ${c.runtime}` : 'runtime not recorded (run predates 0.12.0)';
@@ -646,6 +678,53 @@ export const CHECKS: InvariantCheck[] = [
       }
       const covered = ctx.plan.runtime === 'copilot' ? `${inventory.length} inventoried server(s) denied by name` : 'denied categorically (--strict-mcp-config)';
       return pass(`${ctx.plan.runtime}: ${covered}; no MCP reached in ${usage.length} pass sidecar(s)`);
+    },
+  },
+  {
+    id: 'INV-CTX-06',
+    needs: 'run',
+    run(ctx) {
+      if (!ctx.plan) return skip('no authenticated dispatch plan — companion execution cannot be checked');
+      if (ctx.plan.runtime === 'copilot' && ctx.plan.ambientPluginsDisabled !== true) {
+        return fail('Copilot run did not record ambient plugin discovery as disabled');
+      }
+      const companions = ctx.plan.reviewers.filter((reviewer) => reviewer.name.startsWith('companion:'));
+      if (companions.length === 0) return skip('Copilot isolation is recorded; no companion dispatch was planned');
+      const briefs = ctx.plan.artifacts.filter((artifact) => /^companion-brief-.*\.md$/i.test(basename(artifact.path)));
+      const context = ctx.plan.artifacts.find((artifact) => basename(artifact.path) === 'pr-context.md');
+      const projectRules = ctx.plan.artifacts.find((artifact) => basename(artifact.path) === 'skills-project.md');
+      if (!context) return fail('companion dispatch has no hash-bound pr-context.md artifact');
+      const failures: string[] = [];
+      const usedBriefs = new Set<string>();
+      for (const reviewer of companions) {
+        if (reviewer.kind !== 'companion-agent' || reviewer.agentType !== 'general-purpose') {
+          failures.push(`${reviewer.name} uses runtime-native ${reviewer.kind}/${reviewer.agentType}`);
+        }
+        const matched = briefs.filter((artifact) => reviewer.promptTemplate.includes(artifact.path));
+        if (matched.length !== 1) {
+          failures.push(`${reviewer.name} references ${matched.length} hash-bound companion briefs`);
+          continue;
+        }
+        const brief = matched[0]!;
+        if (usedBriefs.has(brief.path)) failures.push(`${reviewer.name} reuses another companion's brief`);
+        usedBriefs.add(brief.path);
+        if (!existsSync(brief.path) || sha256File(brief.path) !== brief.sha256) {
+          failures.push(`${reviewer.name} companion brief is missing or changed`);
+        } else {
+          const directive = companionRuntimeDirective(readFileSync(brief.path, 'utf8'));
+          if (directive) {
+            failures.push(`${reviewer.name} companion brief contains a runtime-native directive: ${directive.trim()}`);
+          }
+        }
+        if (!reviewer.promptTemplate.includes(context.path)) failures.push(`${reviewer.name} does not read pr-context.md`);
+        if (projectRules && !reviewer.promptTemplate.includes(projectRules.path)) {
+          failures.push(`${reviewer.name} does not read authoritative project rules`);
+        }
+      }
+      if (usedBriefs.size !== briefs.length) failures.push(`${briefs.length - usedBriefs.size} companion brief(s) are unbound`);
+      return failures.length > 0
+        ? fail(sample(failures))
+        : pass(`${companions.length} companion dispatch(es), each generic and bound to one immutable materialized brief`);
     },
   },
   {
@@ -760,6 +839,45 @@ export const CHECKS: InvariantCheck[] = [
       return ctx.marker.attempted === 0
         ? pass(`delivery is '${ctx.state!.kind}' and nothing was attempted`)
         : fail(`delivery is '${ctx.state!.kind}' but ${ctx.marker.attempted} finding(s) were posted`);
+    },
+  },
+  {
+    id: 'INV-DEL-04',
+    needs: 'run',
+    run(ctx) {
+      if (!ctx.state) return skip('no authenticated delivery state (legacy run)');
+      const currentPlan = typeof ctx.plan?.ambientPluginsDisabled === 'boolean';
+      const missingAccounting = currentPlan
+        ? ctx.state.runtimeAttempts.filter((attempt) => !Array.isArray(attempt.adoptedReviewers))
+        : [];
+      if (missingAccounting.length > 0) {
+        return fail(`${missingAccounting.length} current runtime attempt(s) omit structured-result adoption accounting`);
+      }
+      const adoptions = ctx.state.runtimeAttempts.flatMap((attempt) =>
+        (attempt.adoptedReviewers ?? []).map((reviewer) => ({ attempt, reviewer })));
+      if (adoptions.length === 0) return skip('no structured runtime result was adopted');
+      if (!ctx.plan) return fail('structured runtime results were adopted without an authenticated dispatch plan');
+      if (ctx.plan.runtime !== 'copilot') return fail(`${adoptions.length} structured result adoption(s) recorded for ${ctx.plan.runtime}`);
+      const failures: string[] = [];
+      for (const { attempt, reviewer: name } of adoptions) {
+        if (!attempt.reviewers.includes(name)) {
+          failures.push(`${name} was adopted by attempt ${attempt.number} that did not dispatch it`);
+          continue;
+        }
+        const reviewer = ctx.plan.reviewers.find((entry) => entry.name === name);
+        const digest = ctx.state.reviewerDigests[name];
+        if (!reviewer) failures.push(`${name} is absent from the dispatch plan`);
+        else if (!ctx.state.valid.includes(name) || !digest) failures.push(`${name} was adopted but has no canonical delivery digest`);
+        else if (!existsSync(reviewer.canonicalOutputPath) || sha256File(reviewer.canonicalOutputPath) !== digest) {
+          failures.push(`${name} was adopted but its canonical sidecar is missing or changed`);
+        }
+        if ((ctx.state.reviewerAttempts[name] ?? 0) < attempt.number) {
+          failures.push(`${name} adoption attempt ${attempt.number} exceeds authenticated reviewer accounting`);
+        }
+      }
+      return failures.length > 0
+        ? fail(sample(failures))
+        : pass(`${adoptions.length} structured result adoption(s), all bound to their attempt and canonical digest`);
     },
   },
   {

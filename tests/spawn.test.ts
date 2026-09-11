@@ -28,3 +28,31 @@ test('spawnCli — Windows-safe runtime punctuation reaches the child as exact a
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('spawnCli — explicit child environment reaches the process without losing inherited values', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pr-review-spawn-env-'));
+  try {
+    const script = join(root, 'env.js');
+    writeFileSync(
+      script,
+      'process.stdout.write(JSON.stringify({ isolated: process.env.COPILOT_PLUGIN_DIR_ONLY, inherited: process.env.PR_REVIEW_TEST_INHERITED }))',
+      'utf8',
+    );
+    const actual = await new Promise<string>((resolve, reject) => {
+      const child = spawnCli(process.execPath, [script], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, COPILOT_PLUGIN_DIR_ONLY: '1', PR_REVIEW_TEST_INHERITED: 'present' },
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString('utf8'); });
+      child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8'); });
+      child.on('error', reject);
+      child.on('close', (code) => code === 0 ? resolve(stdout) : reject(new Error(`exit ${code}: ${stderr}`)));
+      child.stdin.end();
+    });
+    assert.deepEqual(JSON.parse(actual), { isolated: '1', inherited: 'present' });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

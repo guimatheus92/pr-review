@@ -1,11 +1,13 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MAX_TOTAL_PASSES, prepareSessionContext } from '../src/dispatch/single-session.js';
-import { readDispatchPlan } from '../src/dispatch/delivery.js';
+import { readDispatchPlan, validateDispatchArtifacts } from '../src/dispatch/delivery.js';
 import { selectPasses, type IndexEntry, type ReviewPass } from '../src/dispatch/pass-select.js';
+import type { CompanionPluginSource } from '../src/plugins/companions.js';
+import { materializeCompanionBriefs } from '../src/plugins/companions.js';
 import type { GatherOutput, SkillDefinition } from '../src/types.js';
 
 function fixtureGather(paths: string[]): GatherOutput {
@@ -64,6 +66,67 @@ function baseOpts(outDir: string, paths: string[], passes: ReviewPass[], indexEn
   };
 }
 
+const TOOLKIT_AGENTS = [
+  'code-reviewer',
+  'code-simplifier',
+  'comment-analyzer',
+  'pr-test-analyzer',
+  'silent-failure-hunter',
+  'type-design-analyzer',
+];
+
+function seedCompanionSources(): { sources: CompanionPluginSource[]; cleanup(): void } {
+  const root = mkdtempSync(join(tmpdir(), 'pr-review-companion-sources-'));
+  const toolkit = join(root, 'pr-review-toolkit');
+  const codeReview = join(root, 'code-review');
+  for (const agent of TOOLKIT_AGENTS) {
+    const path = join(toolkit, 'agents', `${agent}.md`);
+    mkdirSync(join(toolkit, 'agents'), { recursive: true });
+    writeFileSync(
+      path,
+      `---\nname: ${agent}\nmodel: opus\ntools: Bash,Read,Write\n---\n# ${agent}\n${agent === 'code-reviewer' ? 'By default, review unstaged changes from `git diff`. The user may specify different files or scope to review.\n' : ''}COMPANION_CRITERIA_${agent}\n`,
+      'utf8',
+    );
+  }
+  mkdirSync(join(toolkit, '.claude-plugin'), { recursive: true });
+  writeFileSync(join(toolkit, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'pr-review-toolkit', version: '1.0.0' }));
+
+  mkdirSync(join(codeReview, 'commands'), { recursive: true });
+  mkdirSync(join(codeReview, '.claude-plugin'), { recursive: true });
+  writeFileSync(join(codeReview, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'code-review', version: '1.0.0' }));
+  writeFileSync(
+    join(codeReview, 'commands', 'code-review.md'),
+    [
+      '---',
+      'allowed-tools: Bash(gh pr view:*), Bash(gh pr comment:*)',
+      'model: opus',
+      '---',
+      'Provide a code review for the given pull request.',
+      '1. Run `gh pr view` and `gh pr diff`.',
+      '**CRITICAL: We only want HIGH SIGNAL issues.**',
+      '- The code will fail to compile or parse.',
+      '- The code will definitely produce wrong results.',
+      'Do NOT flag:',
+      '- Code style or quality concerns.',
+      '5. For each issue found, launch validation agents.',
+      'Use this list when evaluating issues in Steps 4 and 5 (these are false positives, do NOT flag):',
+      '- Pre-existing issues',
+      '- Pedantic nitpicks',
+      'Notes:',
+      '- Use gh CLI to interact with GitHub.',
+      '9. Post inline comments using mcp__github_inline_comment__create_inline_comment.',
+    ].join('\n'),
+    'utf8',
+  );
+  return {
+    sources: [
+      { id: 'pr-review-toolkit', roots: [toolkit] },
+      { id: 'code-review', roots: [codeReview] },
+    ],
+    cleanup: () => rmSync(root, { recursive: true, force: true }),
+  };
+}
+
 test('passes — one pass-*.md per pass (rules + ONE body), union has all, prompt records pass names', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {
@@ -113,12 +176,14 @@ test('passes — one pass-*.md per pass (rules + ONE body), union has all, promp
 // forgets the directive, it fails.
 test('no-posting directive — reaches the orchestrator and EVERY dispatch line, exact count', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  const companions = seedCompanionSources();
   try {
     const passes = [pass('p/one'), pass('p/two')];
     const ctx = prepareSessionContext({
       ...baseOpts(outDir, ['src/app.ts'], passes),
       invokeCompanions: true,
       installedCompanions: ['pr-review-toolkit', 'code-review'],
+      companionSources: companions.sources,
     });
     const prompt = ctx.orchestratorPrompt;
     const directive = 'do NOT post, comment, review, approve, or write ANYTHING to the pull request';
@@ -133,13 +198,15 @@ test('no-posting directive — reaches the orchestrator and EVERY dispatch line,
       assert.ok(line.includes(directive), `dispatch line missing the no-posting directive: ${line.slice(0, 120)}…`);
       assert.equal((line.match(/description=/g) ?? []).length, 1, 'every dispatch has exactly one description');
     }
-    const slashLine = dispatchLines.find((l) => l.includes('/code-review:code-review'));
-    assert.ok(slashLine, 'code-review companion slash line present');
-    assert.ok(slashLine.includes('analysis-only'), 'slash companions run analysis-only');
-    assert.ok(slashLine.includes('SKIP that step'), 'posting steps in the command are explicitly skipped');
+    const codeReviewLine = dispatchLines.find((l) => l.includes('record as reviewer name `companion:code-review`'));
+    assert.ok(codeReviewLine, 'code-review companion line present');
+    assert.ok(codeReviewLine.includes('agent_type="general-purpose"'), 'code-review runs as a generic agent');
+    assert.ok(codeReviewLine.includes('companion-brief-'), 'code-review reads its materialized brief');
+    assert.ok(!codeReviewLine.includes('/code-review:code-review'), 'the runtime-native slash command is never invoked');
     assert.ok(prompt.includes(`${directive}`) && prompt.includes('This binds you AND every subagent'), 'orchestrator-level rule present');
     assert.ok(ctx.dispatchPlan?.verifier.promptTemplate?.includes(directive), 'direct verifier keeps the no-posting directive');
   } finally {
+    companions.cleanup();
     rmSync(outDir, { recursive: true, force: true });
   }
 });
@@ -241,8 +308,9 @@ test('runtime — claude uses Task(subagent_type="general-purpose"), copilot tas
   }
 });
 
-test('shared context — Codex, direct companions, and verifier use skills-all.md without shared project context', () => {
+test('shared context — Codex, materialized companions, and verifier use skills-all.md without shared project context', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  const companions = seedCompanionSources();
   try {
     const passes = [pass('p/one'), pass('p/two')];
     const ctx = prepareSessionContext({
@@ -250,21 +318,210 @@ test('shared context — Codex, direct companions, and verifier use skills-all.m
       includeCodex: true,
       invokeCompanions: true,
       installedCompanions: ['pr-review-toolkit'],
+      companionSources: companions.sources,
     });
     assert.ok(ctx.skillsFiles['all']!.endsWith('skills-all.md'));
     const union = readFileSync(ctx.skillsFiles['all']!, 'utf8');
     assert.ok(union.includes('BODY_OF_p_one') && union.includes('BODY_OF_p_two'));
     const companionLine = ctx.orchestratorPrompt
       .split('\n')
-      .find((l) => l.includes('agent_type="code-reviewer"'));
+      .find((l) => l.includes('record as reviewer name `companion:pr-review-toolkit/code-reviewer`'));
     assert.ok(companionLine, 'companion agents dispatched');
+    assert.ok(companionLine.includes('agent_type="general-purpose"'), 'companion criteria run through a generic agent');
+    assert.ok(companionLine.includes('companion-brief-'), 'companion reads its materialized brief');
     assert.ok(companionLine.includes('skills-all.md'), 'companions read the union');
     assert.ok(ctx.dispatchPlan?.verifier.promptTemplate?.includes('skills-all.md'), 'verifier reads the union');
     assert.ok(ctx.dispatchPlan?.codex.skillsPath?.endsWith('skills-all.md'), 'Codex reads the union');
     assert.ok(companionLine.includes('reviewer-attempts'));
     assert.ok(companionLine.includes('attempt-1.json'));
   } finally {
+    companions.cleanup();
     rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('companions — every brief is materialized, hash-bound, and safe for confined generic dispatch', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-companion-context-'));
+  const companions = seedCompanionSources();
+  try {
+    const ctx = prepareSessionContext({
+      ...baseOpts(outDir, ['src/app.ts'], [pass('p/one')]),
+      invokeCompanions: true,
+      installedCompanions: ['pr-review-toolkit', 'code-review'],
+      companionSources: companions.sources,
+    });
+    const companionPlans = ctx.dispatchPlan!.reviewers.filter((reviewer) => reviewer.kind.startsWith('companion'));
+    assert.equal(companionPlans.length, 7);
+    assert.ok(companionPlans.every((reviewer) => reviewer.agentType === 'general-purpose'));
+    for (const reviewer of companionPlans) {
+      const match = reviewer.promptTemplate.match(/`([^`]*companion-brief-[^`]*)`/);
+      assert.ok(match, `${reviewer.name} prompt names a materialized brief`);
+      const briefPath = match[1]!;
+      assert.ok(existsSync(briefPath));
+      assert.ok(ctx.dispatchPlan!.artifacts.some((artifact) => artifact.path === briefPath));
+      const brief = readFileSync(briefPath, 'utf8');
+      if (reviewer.name.endsWith('/code-reviewer')) {
+        assert.match(brief, /Review only the materialized PR context and diff/);
+      }
+      assert.doesNotMatch(
+        brief,
+        /git diff|gh pr|mcp__github|allowed-tools|^model\s*:|Task tool|launch.{0,40}(?:agent|subagent)|post.{0,40}(?:comment|review thread)/im,
+        `${reviewer.name} brief must contain criteria only`,
+      );
+    }
+
+    const codeReview = companionPlans.find((reviewer) => reviewer.name === 'companion:code-review')!;
+    const briefPath = codeReview.promptTemplate.match(/`([^`]*companion-brief-[^`]*)`/)![1]!;
+    const brief = readFileSync(briefPath, 'utf8');
+    assert.match(brief, /HIGH SIGNAL/);
+    assert.match(brief, /definitely produce wrong results/);
+    assert.match(brief, /Pre-existing issues/);
+    assert.doesNotMatch(brief, /gh pr|mcp__github|post inline|allowed-tools|model: opus/i);
+    assert.ok(codeReview.promptTemplate.includes('pr-context.md'));
+
+    writeFileSync(briefPath, brief + '\nchanged', 'utf8');
+    assert.ok(validateDispatchArtifacts(ctx.dispatchPlan!).some((failure) => failure.includes('immutable artifact changed')));
+  } finally {
+    companions.cleanup();
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('companions — malformed frontmatter is stripped instead of entering a generic brief', () => {
+  const seeded = seedCompanionSources();
+  try {
+    const toolkit = seeded.sources[0]!.roots[0]!;
+    writeFileSync(
+      join(toolkit, 'agents', 'code-reviewer.md'),
+      [
+        '---',
+        'name: [unterminated',
+        'model: opus',
+        '---',
+        '# code-reviewer',
+        'Review definite bugs in the materialized diff.',
+      ].join('\n'),
+      'utf8',
+    );
+
+    const briefs = materializeCompanionBriefs({
+      installed: ['pr-review-toolkit'],
+      sources: [seeded.sources[0]!],
+    });
+    const brief = briefs.find((entry) => entry.reviewerName.endsWith('/code-reviewer'))!;
+    assert.match(brief.body, /Review definite bugs in the materialized diff/);
+    assert.doesNotMatch(brief.body, /name: \[unterminated|model: opus|^---$/m);
+
+    writeFileSync(join(toolkit, 'agents', 'code-reviewer.md'), '---\nname: broken\nno closing delimiter', 'utf8');
+    assert.throws(
+      () => materializeCompanionBriefs({ installed: ['pr-review-toolkit'], sources: [seeded.sources[0]!] }),
+      /unterminated frontmatter.*code-reviewer\.md/i,
+    );
+  } finally {
+    seeded.cleanup();
+  }
+});
+
+test('companions — shell, network, test, and checkout acquisition directives fail closed', () => {
+  for (const directive of [
+    'Use Bash to run npm test before reviewing.',
+    'Call WebFetch on the pull request URL before reviewing.',
+    'Run curl https://example.test/diff before reviewing.',
+    'Execute the test suite before reviewing.',
+    'Clone the repository before reviewing.',
+    'Use\nWebFetch to acquire the pull request.',
+    'Post the finding\nas a review comment.',
+    'Launch a validation\nsubagent before returning.',
+    'Use the Task\ntool to delegate this review.',
+  ]) {
+    const seeded = seedCompanionSources();
+    try {
+      const toolkit = seeded.sources[0]!.roots[0]!;
+      writeFileSync(join(toolkit, 'agents', 'code-simplifier.md'), `# criteria\n${directive}\n`, 'utf8');
+      assert.throws(
+        () => materializeCompanionBriefs({ installed: ['pr-review-toolkit'], sources: [seeded.sources[0]!] }),
+        /runtime-native directive/i,
+        directive,
+      );
+    } finally {
+      seeded.cleanup();
+    }
+  }
+});
+
+test('companions — identical active definitions agree, divergent definitions fail closed', () => {
+  const first = seedCompanionSources();
+  const second = seedCompanionSources();
+  try {
+    const roots = [first.sources[0]!.roots[0]!, second.sources[0]!.roots[0]!];
+    const agreed = materializeCompanionBriefs({
+      installed: ['pr-review-toolkit'],
+      sources: [{ id: 'pr-review-toolkit', roots }],
+    });
+    assert.equal(agreed.length, 6);
+
+    writeFileSync(join(roots[1], 'agents', 'code-reviewer.md'), '# changed criteria', 'utf8');
+    assert.throws(
+      () => materializeCompanionBriefs({
+        installed: ['pr-review-toolkit'],
+        sources: [{ id: 'pr-review-toolkit', roots }],
+      }),
+      /divergent active definitions.*code-reviewer\.md/,
+    );
+  } finally {
+    first.cleanup();
+    second.cleanup();
+  }
+});
+
+test('companions — every active root must provide every required definition', () => {
+  const first = seedCompanionSources();
+  const second = seedCompanionSources();
+  try {
+    const roots = [first.sources[0]!.roots[0]!, second.sources[0]!.roots[0]!];
+    rmSync(join(roots[1], 'agents', 'code-reviewer.md'));
+
+    assert.throws(
+      () => materializeCompanionBriefs({
+        installed: ['pr-review-toolkit'],
+        sources: [{ id: 'pr-review-toolkit', roots }],
+      }),
+      /active runtime root has no readable.*code-reviewer\.md/i,
+    );
+  } finally {
+    first.cleanup();
+    second.cleanup();
+  }
+});
+
+test('companions — duplicate source ids and definitions escaping a plugin root are refused', () => {
+  const seeded = seedCompanionSources();
+  const outside = mkdtempSync(join(tmpdir(), 'pr-review-companion-outside-'));
+  try {
+    assert.throws(
+      () => materializeCompanionBriefs({
+        installed: ['pr-review-toolkit'],
+        sources: [seeded.sources[0]!, seeded.sources[0]!],
+      }),
+      /duplicate companion source id/i,
+    );
+
+    const toolkit = seeded.sources[0]!.roots[0]!;
+    const outsideAgents = join(outside, 'agents');
+    mkdirSync(outsideAgents, { recursive: true });
+    writeFileSync(join(outsideAgents, 'code-reviewer.md'), '# escaped criteria', 'utf8');
+    rmSync(join(toolkit, 'agents'), { recursive: true, force: true });
+    symlinkSync(outsideAgents, join(toolkit, 'agents'), process.platform === 'win32' ? 'junction' : 'dir');
+    assert.throws(
+      () => materializeCompanionBriefs({
+        installed: ['pr-review-toolkit'],
+        sources: [seeded.sources[0]!],
+      }),
+      /no readable.*code-reviewer\.md/,
+    );
+  } finally {
+    seeded.cleanup();
+    rmSync(outside, { recursive: true, force: true });
   }
 });
 
@@ -535,8 +792,9 @@ test('MCP capabilities — dispatch plan denies every inventoried server, dedupe
   }
 });
 
-test('project rules — skills-project.md reaches passes, Codex, direct companions, and verifier but not slash companions', () => {
+test('project rules — skills-project.md reaches passes, Codex, every materialized companion, and verifier', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  const companions = seedCompanionSources();
   try {
     const projectSkills = [
       { name: 'pp-regras-plano', description: 'plan rules', source: '/repo/.agents/skills/pp-regras-plano/SKILL.md', body: 'PROJECT_RULE_MARKER', appliesTo: [] },
@@ -547,6 +805,7 @@ test('project rules — skills-project.md reaches passes, Codex, direct companio
       includeCodex: true,
       invokeCompanions: true,
       installedCompanions: ['pr-review-toolkit', 'code-review'],
+      companionSources: companions.sources,
     });
     const projectFile = ctx.skillsFiles['project']!;
     assert.ok(projectFile.endsWith('skills-project.md'));
@@ -560,11 +819,9 @@ test('project rules — skills-project.md reaches passes, Codex, direct companio
     const passLines = prompt.split('\n').filter((l) => l.includes('record as reviewer name `p/'));
     assert.equal(passLines.length, 2);
     for (const l of passLines) assert.ok(l.includes('skills-project.md'), 'every pass reads the project rules');
-    const companionLine = prompt.split('\n').find((l) => l.includes('agent_type="code-reviewer"'))!;
-    assert.ok(companionLine.includes('skills-project.md'), 'companions get the authoritative rules');
-    const slashLine = prompt.split('\n').find((l) => l.includes('/code-review:code-review'))!;
-    assert.ok(slashLine, 'slash companion is dispatched');
-    assert.ok(!slashLine.includes('skills-project.md') && !slashLine.includes('skills-all.md'), 'slash companion receives no shared skills file');
+    const companionLines = prompt.split('\n').filter((line) => line.includes('record as reviewer name `companion:'));
+    assert.equal(companionLines.length, 7);
+    for (const line of companionLines) assert.ok(line.includes('skills-project.md'), 'every companion gets the authoritative rules');
     assert.ok(ctx.dispatchPlan?.verifier.promptTemplate?.includes('skills-project.md'), 'verifier gets the authoritative rules');
     assert.equal(ctx.dispatchPlan?.codex.skillsPath, projectFile, 'Codex gets the authoritative rules');
 
@@ -583,6 +840,7 @@ test('project rules — skills-project.md reaches passes, Codex, direct companio
       rmSync(outDir2, { recursive: true, force: true });
     }
   } finally {
+    companions.cleanup();
     rmSync(outDir, { recursive: true, force: true });
   }
 });

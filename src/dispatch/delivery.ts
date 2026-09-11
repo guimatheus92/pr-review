@@ -11,7 +11,7 @@ export const DISPATCH_PLAN_SCHEMA_VERSION = 1;
 export const DELIVERY_STATE_SCHEMA_VERSION = 1;
 export const OUTPUT_PATH_TOKEN = '{{PR_REVIEW_OUTPUT_PATH}}';
 
-export type PlannedReviewerKind = 'pass' | 'companion-agent' | 'companion-slash';
+export type PlannedReviewerKind = 'pass' | 'companion-agent';
 export type ReviewerDeliveryStatus = 'valid' | 'missing' | 'invalid';
 
 export interface DispatchReviewerPlan {
@@ -53,6 +53,8 @@ export interface DispatchPlan {
   runtimeBinary: string;
   repoRoot?: string;
   disabledMcpServers: string[];
+  /** Copilot automatic plugin discovery is disabled for this runtime process. */
+  ambientPluginsDisabled?: boolean;
   model: string;
   timeoutMs: number;
   phase1Path: string;
@@ -81,6 +83,8 @@ export interface DispatchPlan {
 export interface RuntimeAttemptState {
   number: number;
   kind: 'initial' | 'automatic-recovery' | 'manual-recovery' | 'verifier';
+  /** Missing only on schema-v1 runs written before attempt lifecycle tracking. */
+  status?: 'started' | 'completed' | 'spawn-rejected';
   reviewers: string[];
   startedAt: string;
   endedAt: string;
@@ -88,6 +92,14 @@ export interface RuntimeAttemptState {
   timedOut: boolean;
   timeoutMs: number;
   durationMs: number;
+  /** Replay/audit authority: exact requested argument, which may differ from the separately recorded Auto route. */
+  requestedModel?: string;
+  /** Root Copilot Auto route reported before task dispatch; not per-reviewer served-model evidence. */
+  resolvedModel?: string;
+  /** Bounded printable runtime error extracted from structured output. */
+  runtimeError?: string;
+  /** Reviewers whose missing attempt file was created from this attempt's structured result. */
+  adoptedReviewers?: string[];
 }
 
 export type VerifierDeliveryState =
@@ -124,6 +136,19 @@ export interface DeliveryState {
     output?: ReviewerOutput;
   };
   reasonCodes: string[];
+}
+
+/** Operator-facing summary of the latest attempt. */
+export function lastRuntimeAttemptDiagnostic(state: Pick<DeliveryState, 'runtimeAttempts'>): string | undefined {
+  const attempt = state.runtimeAttempts.at(-1);
+  if (!attempt) return undefined;
+  const models = [
+    attempt.requestedModel ? `requested model ${attempt.requestedModel}` : undefined,
+    attempt.resolvedModel ? `resolved model ${attempt.resolvedModel}` : undefined,
+  ].filter((value): value is string => !!value).join('; ');
+  const cause = attempt.runtimeError ? ` Cause: ${attempt.runtimeError}` : '';
+  return `Runtime attempt ${attempt.number} (${attempt.kind}): ` +
+    `${models ? `${models}; ` : ''}exit ${attempt.exitCode}; timeout=${attempt.timedOut}.${cause}`;
 }
 
 export interface ReviewerDelivery {
@@ -193,10 +218,7 @@ function parseSidecar(
   if (!existsSync(path)) return { name: reviewerName, path, status: 'missing' };
   try {
     const rawOutput = readFileSync(path, 'utf8');
-    const parsed = JSON.parse(rawOutput) as unknown;
-    if (!Array.isArray(parsed)) throw new Error('expected a JSON array');
-    if (!parsed.every(findingShaped)) throw new Error('array contains an invalid finding');
-    const findings = parsed as Finding[];
+    const findings = parseFindingArray(rawOutput);
     return {
       name: reviewerName,
       path,
@@ -208,6 +230,13 @@ function parseSidecar(
   } catch (error) {
     return { name: reviewerName, path, status: 'invalid', error: (error as Error).message };
   }
+}
+
+function parseFindingArray(rawOutput: string): Finding[] {
+  const parsed = JSON.parse(rawOutput) as unknown;
+  if (!Array.isArray(parsed)) throw new Error('expected a JSON array');
+  if (!parsed.every(findingShaped)) throw new Error('array contains an invalid finding');
+  return parsed as Finding[];
 }
 
 export function createDispatchPlan(draft: DispatchPlanDraft): DispatchPlan {
@@ -329,6 +358,41 @@ export function validateDispatchArtifacts(plan: DispatchPlan): string[] {
 
 export function attemptOutputPath(reviewer: Pick<DispatchReviewerPlan, 'attemptsDir'>, attempt: number): string {
   return join(reviewer.attemptsDir, `attempt-${attempt}.json`);
+}
+
+/** Publish a structured runtime task result only when its expected attempt file is still absent. */
+export function adoptRuntimeReviewerAttempt(
+  reviewer: Pick<DispatchReviewerPlan, 'attemptsDir'>,
+  attempt: number,
+  contents: string,
+): 'created' | 'exists' | 'invalid' {
+  try {
+    parseFindingArray(contents);
+  } catch {
+    return 'invalid';
+  }
+  const path = attemptOutputPath(reviewer, attempt);
+  mkdirSync(dirname(path), { recursive: true });
+  if (existsSync(path)) return 'exists';
+  const tempPath = join(dirname(path), `.${basename(path)}.${process.pid}.${randomUUID()}.runtime.tmp`);
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(tempPath, 'wx');
+    writeFileSync(descriptor, contents, 'utf8');
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    linkSync(tempPath, path);
+    return 'created';
+  } catch (error) {
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor); } catch { /* Preserve the publication error. */ }
+    }
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return 'exists';
+    throw error;
+  } finally {
+    try { if (existsSync(tempPath)) unlinkSync(tempPath); } catch { /* The attempt publication is already decided. */ }
+  }
 }
 
 export function verifierAttemptOutputPath(verifier: DispatchVerifierPlan, attempt: number): string {

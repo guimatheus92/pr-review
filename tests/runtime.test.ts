@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { DEFAULT_MODEL, MCP_PROCESS_DENIAL, normalizeModel, resolveRuntime, RUNTIMES, runtimeSpawnArgs, sanitizeTaskDescription, taskCall } from '../src/dispatch/runtime.js';
+import { DEFAULT_MODEL, MCP_PROCESS_DENIAL, normalizeModel, resolveRuntime, runtimeDisablesAmbientPlugins, runtimeSpawnEnvironment, runtimeTaskName, RUNTIMES, runtimeSpawnArgs, sanitizeTaskDescription, taskCall } from '../src/dispatch/runtime.js';
 
 test('normalizeModel — the shipped default becomes each runtime\'s own stable alias', () => {
   // The previous version of this test asserted the default reached copilot
@@ -77,7 +77,8 @@ test('resolveRuntime — an explicit runtime never probes PATH at all', () => {
 test('runtimeSpawnArgs — per-runtime argv shape', () => {
   assert.deepEqual(runtimeSpawnArgs('copilot', 'm1', '/dir'), [
     '--model', 'm1', '--allow-all-tools', '--deny-tool=shell', '--disable-builtin-mcps',
-    '--no-custom-instructions', '--no-ask-user', '--add-dir', '/dir', '-s',
+    '--excluded-tools=powershell,bash,shell', '--no-custom-instructions', '--no-ask-user',
+    '--output-format', 'json', '--stream', 'off', '--add-dir', '/dir', '-s',
   ]);
   assert.deepEqual(runtimeSpawnArgs('claude', 'opus', '/dir'), [
     '-p', '--model', 'opus', '--permission-mode', 'dontAsk',
@@ -102,7 +103,8 @@ test('runtimeSpawnArgs — per-runtime argv shape', () => {
   ]);
   assert.deepEqual(runtimeSpawnArgs('copilot', 'm1', '/run', '/repo', ['ado', 'bicep']), [
     '--model', 'm1', '--allow-all-tools', '--deny-tool=shell', '--disable-builtin-mcps',
-    '--no-custom-instructions', '--no-ask-user', '--add-dir', '/run', '--add-dir', '/repo',
+    '--excluded-tools=powershell,bash,shell', '--no-custom-instructions', '--no-ask-user',
+    '--output-format', 'json', '--stream', 'off', '--add-dir', '/run', '--add-dir', '/repo',
     '--disable-mcp-server', 'ado', '--disable-mcp-server', 'bicep', '-s',
   ]);
 });
@@ -119,10 +121,21 @@ test('runtimeSpawnArgs — EVERY runtime carries its process-level MCP denial', 
   }
 });
 
+test('runtimeSpawnEnvironment — Copilot alone disables ambient plugin discovery', () => {
+  const inherited = { PATH: 'test-path', COPILOT_PLUGIN_DIR_ONLY: 'ambient-value' };
+  assert.deepEqual(runtimeSpawnEnvironment('copilot', inherited), {
+    PATH: 'test-path',
+    COPILOT_PLUGIN_DIR_ONLY: 'true',
+  });
+  assert.deepEqual(runtimeSpawnEnvironment('claude', inherited), inherited);
+  assert.equal(runtimeDisablesAmbientPlugins('copilot'), true);
+  assert.equal(runtimeDisablesAmbientPlugins('claude'), false);
+});
+
 test('taskCall — tool vocabulary per runtime', () => {
   assert.equal(
-    taskCall('copilot', 'pr-review:security', 'go', 'Review security'),
-    'task(agent_type="pr-review:security", prompt="go", description="Review security")',
+    taskCall('copilot', 'pr-review:security', 'go', 'Review security', 'pr-review-security--abc123'),
+    'task(agent_type="pr-review:security", prompt="go", description="Review security", name="pr-review-security--abc123", mode="sync")',
   );
   assert.equal(
     taskCall('claude', 'pr-review:security', 'go', 'Review security'),
@@ -136,11 +149,19 @@ test('taskCall — JSON-escapes every string argument exactly once', () => {
     'agent"type',
     'Read C:\\work\\file.md\nThen say "done"\t`literal`',
     'Réview\nsecurity "pass"',
+    'pr-review-agent--abc123',
   );
   assert.equal(
     call,
-    'task(agent_type="agent\\"type", prompt="Read C:\\\\work\\\\file.md\\nThen say \\"done\\"\\t`literal`", description="Review security pass")',
+    'task(agent_type="agent\\"type", prompt="Read C:\\\\work\\\\file.md\\nThen say \\"done\\"\\t`literal`", description="Review security pass", name="pr-review-agent--abc123", mode="sync")',
   );
+});
+
+test('runtimeTaskName — reviewer identities become deterministic collision-resistant task names', () => {
+  assert.equal(runtimeTaskName('pack/security'), runtimeTaskName('pack/security'));
+  assert.notEqual(runtimeTaskName('pack/security'), runtimeTaskName('pack_security'));
+  assert.match(runtimeTaskName('pack/security'), /^pr-review-[A-Za-z0-9._-]+--[a-f0-9]{12}$/);
+  assert.ok(runtimeTaskName('x'.repeat(500)).length <= 80);
 });
 
 test('sanitizeTaskDescription — trusted deterministic bounded label', () => {

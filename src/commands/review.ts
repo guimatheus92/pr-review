@@ -22,7 +22,7 @@ import { controlDirForRun, ensureRunDir, ERROR_FILE, RUNS_ROOT, sanitizeForFilen
 import { appendProgress } from '../util/progress.js';
 import { readPostedMarker, writePostedMarker } from '../util/posted-marker.js';
 import { withRetry } from '../util/retry.js';
-import { printable } from '../util/text.js';
+import { printable, redactRuntimeSecrets, safeRuntimeDiagnostic } from '../util/text.js';
 import { resolvePr } from '../providers/index.js';
 import { dedupeAgainstExisting, dedupeWithinBatch } from '../dedupe.js';
 import {
@@ -46,6 +46,7 @@ import {
   repairDeliveryStateMirror,
   recordCodexResult,
   reserveCodexAttempt,
+  lastRuntimeAttemptDiagnostic,
   validateDeliveryArtifacts,
   validateDispatchArtifacts,
   writeFinalizationRecord,
@@ -53,6 +54,7 @@ import {
   type DeliveryState,
   type DispatchPlan,
 } from '../dispatch/delivery.js';
+import { runtimeInstalledPluginRoots } from '../plugins/installed.js';
 
 interface ReviewCmdOptions {
   prUrl: string;
@@ -476,7 +478,16 @@ function toConfigOverrides(opts: ReviewCmdOptions): ConfigOverrides {
 export function writeOrchestratorFailureLog(outDir: string, exitCode: number | null, stdout: string, stderr: string): void {
   try {
     const failLog = join(outDir, 'orchestrator-failure.log');
-    writeFileSync(failLog, `exitCode=${exitCode}\n\n=== stdout ===\n${stdout}\n\n=== stderr ===\n${stderr}\n`, 'utf8');
+    writeFileSync(
+      failLog,
+      JSON.stringify({
+        schemaVersion: 1,
+        exitCode,
+        stdout: redactRuntimeSecrets(stdout),
+        stderr: redactRuntimeSecrets(stderr),
+      }, null, 2) + '\n',
+      'utf8',
+    );
     process.stderr.write(`[review] wrote orchestrator failure log to ${failLog}\n`);
   } catch (err) {
     process.stderr.write(`[review] could not write orchestrator-failure.log: ${(err as Error).message}\n`);
@@ -523,9 +534,10 @@ export async function finalizeReview(a: {
   if (a.findingsUnavailable) {
     const state = a.deliveryState;
     const lastAttempt = state?.runtimeAttempts.at(-1);
+    const runtimeDiagnostic = state ? lastRuntimeAttemptDiagnostic(state) : undefined;
     const runtimeLine = lastAttempt
-      ? `Runtime exited ${lastAttempt.exitCode} after ${(lastAttempt.durationMs / 60_000).toFixed(1)}m; timeout=${lastAttempt.timedOut}. ` +
-        `Consolidated=${state!.consolidated}; phase1=${state!.phase1}; verifier=${state!.verifier.state}.`
+      ? `${runtimeDiagnostic ?? `Runtime exited ${lastAttempt.exitCode}; timeout=${lastAttempt.timedOut}.`} ` +
+        `Duration=${(lastAttempt.durationMs / 60_000).toFixed(1)}m; consolidated=${state!.consolidated}; phase1=${state!.phase1}; verifier=${state!.verifier.state}.`
       : undefined;
     const missingLine = state?.missing.length ? `Missing: ${state.missing.map((name) => safeSummaryValue(name)).join(', ')}.` : undefined;
     const invalidLine = state?.invalid.length ? `Invalid: ${state.invalid.map((name) => safeSummaryValue(name)).join(', ')}.` : undefined;
@@ -558,6 +570,34 @@ export async function finalizeReview(a: {
     appendProgress(a.outDir, 'error', state
       ? `${state.valid.length}/${state.planned.length} reviewers delivered; incomplete`
       : 'orchestrator produced no parseable findings');
+    return { outputs: a.outputs, summary, exitCode: 2 };
+  }
+
+  if ((a.operationalFailures?.length ?? 0) > 0) {
+    const failures = a.operationalFailures!;
+    const summary = renderSummary(
+      a.prUrl,
+      a.outputs,
+      a.outputs.flatMap((output) => output.findings),
+      0,
+      Date.now() - a.overallStart,
+      undefined,
+      a.passRouting,
+      [...(a.degraded ?? []), ...failures],
+    );
+    const operationalError = ['operational review failure:', ...failures.map((failure) => `- ${failure}`)].join('\n');
+    writeFileSync(join(a.outDir, ERROR_FILE), operationalError + '\n', 'utf8');
+    writeFileSync(join(a.outDir, 'pr-review-summary.md'), summary, 'utf8');
+    writeFileSync(
+      join(a.outDir, 'pr-review-findings.json'),
+      JSON.stringify({
+        reviewers: a.outputs.map((output) => ({ reviewer: output.reviewerName, findings: output.findings })),
+        finalFindings: a.outputs.flatMap((output) => output.findings),
+        droppedCount: 0,
+      }, null, 2),
+      'utf8',
+    );
+    appendProgress(a.outDir, 'error', `${failures.length} operational failure(s)`);
     return { outputs: a.outputs, summary, exitCode: 2 };
   }
 
@@ -724,7 +764,7 @@ export async function finalizeReview(a: {
     process.stderr.write(`[review] --dry-run: skipping post\n`);
   }
 
-  const operationalFailures = [...(a.operationalFailures ?? [])];
+  const operationalFailures: string[] = [];
   if (postResult?.verified === false) operationalFailures.push('post outcome could not be verified');
   if (postResult && postResult.errors.length > 0) {
     operationalFailures.push(`${postResult.errors.length} finding post(s) failed`);
@@ -870,6 +910,64 @@ export function resumedCompanionFailures(outDir: string, outputs: readonly Revie
     if (!output.reviewerName.startsWith('companion:')) continue;
     delivered.set(output.reviewerName, (delivered.get(output.reviewerName) ?? 0) + 1);
   }
+
+  if (Object.prototype.hasOwnProperty.call(parsed, 'plannedReviewers')) {
+    const plannedValue = parsed.plannedReviewers;
+    if (
+      !Array.isArray(plannedValue) ||
+      !plannedValue.every((name): name is string => typeof name === 'string' && name.startsWith('companion:'))
+    ) {
+      return ['companions.json has an invalid plannedReviewers roster — companion delivery cannot be accounted for'];
+    }
+    const plannedReviewers = [...plannedValue];
+    if (new Set(plannedReviewers).size !== plannedReviewers.length) {
+      return ['companions.json has duplicate plannedReviewers — companion delivery cannot be accounted for'];
+    }
+    if (
+      parsed.plannedDispatches !== undefined &&
+      parsed.plannedDispatches !== plannedReviewers.length
+    ) {
+      return ['companions.json plannedDispatches disagrees with plannedReviewers — companion delivery cannot be accounted for'];
+    }
+    for (const field of ['completedReviewers', 'missingReviewers', 'duplicateReviewers'] as const) {
+      const value = parsed[field];
+      if (value !== undefined && (!Array.isArray(value) || !value.every((name) => typeof name === 'string'))) {
+        return [`companions.json has an invalid ${field} field — companion delivery cannot be accounted for`];
+      }
+    }
+
+    const planned = new Set(plannedReviewers);
+    const completedReviewers = plannedReviewers.filter((name) => delivered.get(name) === 1);
+    const missingReviewers = plannedReviewers.filter((name) => !delivered.has(name));
+    const duplicateReviewers = plannedReviewers.filter((name) => (delivered.get(name) ?? 0) > 1);
+    const unexpectedReviewers = [...delivered.keys()].filter((name) => !planned.has(name)).sort();
+    try {
+      writeFileSync(
+        path,
+        JSON.stringify(
+          {
+            ...parsed,
+            completedDispatches: completedReviewers.length,
+            completedReviewers,
+            missingReviewers,
+            duplicateReviewers,
+          },
+          null,
+          2,
+        ),
+        'utf8',
+      );
+    } catch (error) {
+      const diagnostic = safeRuntimeDiagnostic((error as Error).message) ?? 'unknown error';
+      process.stderr.write(`[companions] warning: could not update companions.json (${diagnostic})\n`);
+    }
+    return [
+      ...missingReviewers.map((name) => `planned companion '${name}' produced no output`),
+      ...duplicateReviewers.map((name) => `companion '${name}' produced duplicate outputs`),
+      ...unexpectedReviewers.map((name) => `unplanned companion '${name}' produced output`),
+    ];
+  }
+
   // A name recorded missing that this resume delivered EXACTLY once is resolved.
   // Twice is the duplicate failure, so it stays — clearing on `has` alone would
   // launder one failure into the other's blind spot.
@@ -1253,7 +1351,8 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   if (config.invokeCompanions || config.companionWarn) {
     companionPromise = (async () => {
       try {
-        const state = await (opts.detectCompanionsFn ?? detectCompanions)(opts.copilotBinary, runtime);
+        const companionBinary = runtime === 'copilot' ? (opts.copilotBinary ?? 'copilot') : 'claude';
+        const state = await (opts.detectCompanionsFn ?? detectCompanions)(companionBinary, runtime);
         companionState = state;
         installedCompanions = state.recognized;
         if (state.detectionError) companionDetectionWarning = `companion detection failed: ${state.detectionError}`;
@@ -1262,7 +1361,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
           if (warn) process.stderr.write(warn + '\n');
         }
       } catch (err) {
-        companionDetectionWarning = `companion detection failed: ${(err as Error).message}`;
+        companionDetectionWarning = `companion detection failed: ${safeRuntimeDiagnostic((err as Error).message) ?? 'unknown error'}`;
         process.stderr.write(`[companions] ${companionDetectionWarning}\n`);
       }
     })();
@@ -1322,6 +1421,15 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   }
   for (const w of packsResult.warnings) process.stderr.write(w + '\n');
   const plannedCompanionReviewers = config.invokeCompanions ? companionReviewerNames(installedCompanions) : [];
+  const runtimePluginRoots = runtimeInstalledPluginRoots(
+    runtime,
+    opts.homeOverride,
+    runtime === 'claude' ? (companionState?.activeClaudePlugins ?? []) : undefined,
+  );
+  const companionSources = installedCompanions.map((id) => ({
+    id,
+    roots: runtimePluginRoots.filter((plugin) => plugin.id === id).map((plugin) => plugin.root),
+  }));
   writeCompanionArtifact([]);
   const includeCodex = wantCodex && codexAvailable;
   if (wantCodex && !codexAvailable) {
@@ -1396,11 +1504,10 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
       // and `auto` on copilot, and until now that transformation left no trace,
       // so a finished run could not say what it asked for.
       //
-      // Declared ceiling: `auto` is a delegation, not a model. The CLI picks and
-      // does not report the pick — not here, and not in its own logs at default
-      // level (checked against ~/.copilot/logs for a real run: no model name
-      // appears). So `model: "auto"` means "the runtime chose, and nothing
-      // recorded what". To pin the axis for real, pass an explicit `--model`.
+      // `auto` is a delegation, not a concrete model. This artifact records the
+      // request; Copilot's structured event stream records its concrete choice
+      // separately in authenticated delivery-state runtimeAttempts. To request a
+      // specific model rather than delegate, pass `--default-model`.
       model: normalizeModel(runtime, config.defaultModel ?? DEFAULT_MODEL),
       installedPlugins: loaded.installedPlugins.map((plugin) => ({
         id: plugin.id,
@@ -1452,6 +1559,7 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     indexEntries: selection.indexEntries,
     stackTags: selection.stackTags,
     installedCompanions,
+    companionSources,
     skipReviewers: effectiveSkip,
     outDir,
     copilotBinary: opts.copilotBinary,

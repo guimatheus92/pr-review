@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -285,6 +285,22 @@ test('ensureBundleFresh — accepts the canonical current-source bundle', () => 
     const bundle = join(root, 'dist', 'cli.cjs');
     buildBundle(root, bundle, 'silent');
     assert.doesNotThrow(() => ensureBundleFresh(root));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('distribution bundle — copied cli starts without adjacent dependencies', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pr-review-standalone-bundle-'));
+  try {
+    const bundle = join(root, 'cli.cjs');
+    copyFileSync(join(process.cwd(), 'dist', 'cli.cjs'), bundle);
+    const stdout = execFileSync(process.execPath, [bundle, '--help'], {
+      cwd: root,
+      encoding: 'utf8',
+      env: { ...process.env, NODE_PATH: '' },
+    });
+    assert.match(stdout, /Usage: pr-review/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

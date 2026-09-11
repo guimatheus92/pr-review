@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 /**
  * The agent CLIs that can host the orchestrator session. The array is the source
@@ -84,6 +85,20 @@ export function runtimeBinary(runtime: Runtime, binaryOverride?: string): string
   return binaryOverride ?? runtime;
 }
 
+/** Confine Copilot to materialized review inputs by disabling automatic plugin discovery. */
+export function runtimeDisablesAmbientPlugins(runtime: Runtime): boolean {
+  return runtime === 'copilot';
+}
+
+export function runtimeSpawnEnvironment(
+  runtime: Runtime,
+  inherited: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return runtimeDisablesAmbientPlugins(runtime)
+    ? { ...inherited, COPILOT_PLUGIN_DIR_ONLY: 'true' }
+    : inherited;
+}
+
 /** Non-interactive spawn argv for the orchestrator session (prompt goes on stdin). */
 export function runtimeSpawnArgs(
   runtime: Runtime,
@@ -121,8 +136,11 @@ export function runtimeSpawnArgs(
         '--allow-all-tools',
         '--deny-tool=shell',
         MCP_PROCESS_DENIAL[runtime],
+        '--excluded-tools=powershell,bash,shell',
         '--no-custom-instructions',
         '--no-ask-user',
+        '--output-format', 'json',
+        '--stream', 'off',
         '--add-dir', addDir,
         ...repoArg,
         // Not redundant with MCP_PROCESS_DENIAL.copilot — see its docblock.
@@ -135,13 +153,14 @@ export function runtimeSpawnArgs(
 }
 
 /**
- * The generic subagent type both runtimes accept — every review pass, the
- * verifier, and the companion slash path dispatch as this type. There are no
- * registered reviewer agents any more.
+ * The generic subagent type both runtimes accept — every Phase-1 pass and
+ * materialized companion dispatch uses it. The direct verifier is its own
+ * runtime session, and there are no registered reviewer agents any more.
  */
 export const GENERIC_AGENT = 'general-purpose';
 
 const TASK_DESCRIPTION_MAX = 80;
+const TASK_NAME_MAX = 80;
 
 /** Keep task-tool chrome short, deterministic, and independent of branch-authored descriptions. */
 export function sanitizeTaskDescription(description: string): string {
@@ -157,15 +176,30 @@ export function sanitizeTaskDescription(description: string): string {
   return sanitized || 'Run review task';
 }
 
-/** How the runtime spells its subagent-dispatch tool. */
-export function taskCall(runtime: Runtime, agentType: string, prompt: string, description: string): string {
+/** Stable external identity used to pair Copilot JSONL task events with one planned reviewer. */
+export function runtimeTaskName(reviewerName: string): string {
+  const digest = createHash('sha256').update(reviewerName, 'utf8').digest('hex').slice(0, 12);
+  const suffix = `--${digest}`;
+  const readable = reviewerName
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'reviewer';
+  return `pr-review-${readable}`.slice(0, TASK_NAME_MAX - suffix.length) + suffix;
+}
+
+/** How each runtime spells its subagent-dispatch tool; Copilot identity is compile-time required. */
+export function taskCall(runtime: 'copilot', agentType: string, prompt: string, description: string, taskName: string): string;
+export function taskCall(runtime: 'claude', agentType: string, prompt: string, description: string): string;
+export function taskCall(runtime: Runtime, agentType: string, prompt: string, description: string, taskName?: string): string {
   const agent = JSON.stringify(agentType);
   const body = JSON.stringify(prompt);
   const label = JSON.stringify(sanitizeTaskDescription(description));
   if (runtime === 'claude') {
     return `Task(subagent_type=${agent}, prompt=${body}, description=${label})`;
   }
-  return `task(agent_type=${agent}, prompt=${body}, description=${label})`;
+  if (!taskName) throw new Error('Copilot task calls require a deterministic task name');
+  return `task(agent_type=${agent}, prompt=${body}, description=${label}, name=${JSON.stringify(taskName)}, mode="sync")`;
 }
 
 export function taskToolName(runtime: Runtime): string {

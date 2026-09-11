@@ -1,10 +1,12 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { parse as parseJsonc, type ParseError } from 'jsonc-parser';
 import { loadSkillFile } from './builtin.js';
 import { printable } from '../util/text.js';
 import type { SkillDefinition } from '../types.js';
 import { realpathCanonical } from '../util/realpath.js';
+import type { Runtime } from '../dispatch/runtime.js';
 
 interface InstalledPluginManifest {
   name?: unknown;
@@ -21,6 +23,18 @@ export interface InstalledPlugin {
   root: string;
   skills: SkillDefinition[];
   mcpServers: string[];
+}
+
+export interface RuntimeInstalledPluginRoot {
+  id: string;
+  root: string;
+  version?: string;
+}
+
+export interface RuntimePluginSelector {
+  key: string;
+  version: string;
+  root: string;
 }
 
 export interface McpCapability {
@@ -43,6 +57,19 @@ function readJson(path: string): Record<string, unknown> | null {
     process.stderr.write(`[plugins] warning: could not parse ${printable(path)} (${printable((error as Error).message.split('\n')[0] ?? '')})\n`);
     return null;
   }
+}
+
+function readJsoncQuiet(path: string): Record<string, unknown> | null {
+  if (!existsSync(path)) return null;
+  const errors: ParseError[] = [];
+  const parsed = parseJsonc(readFileSync(path, 'utf8'), errors, { allowTrailingComma: true }) as unknown;
+  if (errors.length > 0) {
+    process.stderr.write(`[plugins] warning: could not parse ${printable(path)} as JSONC (${errors[0]!.error})\n`);
+    return null;
+  }
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? parsed as Record<string, unknown>
+    : null;
 }
 
 function serverNames(value: unknown): string[] {
@@ -141,6 +168,74 @@ export function claudePluginRoots(home: string): string[] {
 /** Every host pr-review can run under; a plugin installed in either is discoverable. */
 export function installedPluginRoots(home: string): string[] {
   return [...pluginRoots(join(home, '.copilot', 'installed-plugins')), ...claudePluginRoots(home)];
+}
+
+function runtimePluginRoot(
+  id: string,
+  path: unknown,
+  version: unknown,
+  requireManifestVersion = false,
+): RuntimeInstalledPluginRoot | undefined {
+  if (typeof path !== 'string' || !path.trim()) return undefined;
+  const root = resolve(path);
+  const manifest = readJsonQuiet(join(root, '.claude-plugin', 'plugin.json'));
+  if (manifest?.name !== id) return undefined;
+  if (requireManifestVersion && (typeof manifest.version !== 'string' || manifest.version !== version)) return undefined;
+  return {
+    id,
+    root,
+    version: typeof version === 'string'
+      ? version
+      : typeof manifest.version === 'string' ? manifest.version : undefined,
+  };
+}
+
+/** Active plugin roots from the selected runtime's registry, in registry order. */
+export function runtimeInstalledPluginRoots(
+  runtime: Runtime,
+  home = homedir(),
+  activeClaudePlugins?: readonly RuntimePluginSelector[],
+): RuntimeInstalledPluginRoot[] {
+  if (runtime === 'copilot') {
+    const config = readJsoncQuiet(join(home, '.copilot', 'config.json'));
+    if (!Array.isArray(config?.installedPlugins)) return [];
+    return config.installedPlugins.flatMap((entry) => {
+      const install = entry && typeof entry === 'object' && !Array.isArray(entry)
+        ? entry as Record<string, unknown>
+        : undefined;
+      if (!install || install.enabled === false || typeof install.name !== 'string') return [];
+      const root = runtimePluginRoot(install.name, install.cache_path, install.version);
+      return root ? [root] : [];
+    });
+  }
+
+  if (activeClaudePlugins) {
+    const roots = new Map<string, RuntimeInstalledPluginRoot>();
+    for (const plugin of activeClaudePlugins) {
+      const id = plugin.key.split('@')[0]!;
+      const root = runtimePluginRoot(id, plugin.root, plugin.version, true);
+      if (root?.version === plugin.version) roots.set(root.root, root);
+    }
+    return [...roots.values()];
+  }
+
+  const registry = readJsonQuiet(join(home, '.claude', 'plugins', 'installed_plugins.json'));
+  const plugins = registry?.plugins;
+  if (!plugins || typeof plugins !== 'object' || Array.isArray(plugins)) return [];
+  const roots: RuntimeInstalledPluginRoot[] = [];
+  for (const [key, entries] of Object.entries(plugins as Record<string, unknown>)) {
+    if (!Array.isArray(entries)) continue;
+    const id = key.split('@')[0]!;
+    for (const entry of entries) {
+      const install = entry && typeof entry === 'object' && !Array.isArray(entry)
+        ? entry as Record<string, unknown>
+        : undefined;
+      if (!install) continue;
+      const root = runtimePluginRoot(id, install.installPath, install.version);
+      if (root) roots.push(root);
+    }
+  }
+  return roots;
 }
 
 export function discoverInstalledPlugins(home = homedir()): InstalledPlugin[] {

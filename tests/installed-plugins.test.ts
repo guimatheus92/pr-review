@@ -3,7 +3,7 @@ import { strict as assert } from 'node:assert';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { discoverInstalledPlugins, discoverMcpCapabilities, launchesRepoCode } from '../src/plugins/installed.js';
+import { discoverInstalledPlugins, discoverMcpCapabilities, launchesRepoCode, runtimeInstalledPluginRoots } from '../src/plugins/installed.js';
 import { readCapabilityUsage } from '../src/commands/review.js';
 
 function seedPlugin(home: string, marketplace: string, id: string, over: Record<string, unknown> = {}): string {
@@ -69,6 +69,127 @@ test('discoverInstalledPlugins — a Copilot-only host is normal, not an error',
   try {
     seedPlugin(home, 'market-a', 'copilot-tools');
     assert.deepEqual(discoverInstalledPlugins(home).map((plugin) => plugin.id), ['copilot-tools']);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('runtimeInstalledPluginRoots — Copilot uses enabled registry cache paths and preserves active duplicates', () => {
+  const home = mkdtempSync(join(tmpdir(), 'pr-review-copilot-registry-'));
+  try {
+    const first = seedPlugin(home, 'market-a', 'pr-review-toolkit');
+    const second = seedPlugin(home, 'market-b', 'pr-review-toolkit');
+    const disabled = seedPlugin(home, 'market-c', 'code-review');
+    mkdirSync(join(home, '.copilot'), { recursive: true });
+    writeFileSync(join(home, '.copilot', 'config.json'), JSON.stringify({
+      installedPlugins: [
+        { name: 'pr-review-toolkit', cache_path: first, version: '1.0.0', enabled: true },
+        { name: 'pr-review-toolkit', cache_path: second, version: '1.0.0', enabled: true },
+        { name: 'code-review', cache_path: disabled, version: '1.0.0', enabled: false },
+        { name: 'missing', cache_path: join(home, 'does-not-exist'), enabled: true },
+      ],
+    }));
+
+    assert.deepEqual(runtimeInstalledPluginRoots('copilot', home), [
+      { id: 'pr-review-toolkit', root: first, version: '1.0.0' },
+      { id: 'pr-review-toolkit', root: second, version: '1.0.0' },
+    ]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('runtimeInstalledPluginRoots — Copilot accepts JSONC registry comments and trailing commas', () => {
+  const home = mkdtempSync(join(tmpdir(), 'pr-review-copilot-jsonc-'));
+  try {
+    const toolkit = seedPlugin(home, 'market-a', 'pr-review-toolkit');
+    mkdirSync(join(home, '.copilot'), { recursive: true });
+    writeFileSync(
+      join(home, '.copilot', 'config.json'),
+      [
+        '// Copilot writes this registry as JSONC.',
+        '{',
+        '  "installedPlugins": [',
+        `    { "name": "pr-review-toolkit", "cache_path": ${JSON.stringify(toolkit)}, "version": "1.2.3", },`,
+        '  ],',
+        '}',
+      ].join('\n'),
+    );
+
+    assert.deepEqual(runtimeInstalledPluginRoots('copilot', home), [
+      { id: 'pr-review-toolkit', root: toolkit, version: '1.2.3' },
+    ]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('runtimeInstalledPluginRoots — Claude uses authoritative installPath entries and skips missing roots', () => {
+  const home = mkdtempSync(join(tmpdir(), 'pr-review-claude-registry-'));
+  try {
+    const toolkit = seedClaudePlugin(home, 'market-a', 'pr-review-toolkit', '2.0.0');
+    const duplicate = seedClaudePlugin(home, 'market-b', 'pr-review-toolkit', '2.0.0');
+    mkdirSync(join(home, '.claude', 'plugins'), { recursive: true });
+    writeFileSync(join(home, '.claude', 'plugins', 'installed_plugins.json'), JSON.stringify({
+      version: 2,
+      plugins: {
+        'pr-review-toolkit@market-a': [{ installPath: toolkit, version: '2.0.0' }],
+        'pr-review-toolkit@market-b': [{ installPath: duplicate, version: '2.0.0' }],
+        'code-review@market-a': [{ installPath: join(home, 'missing'), version: '1.0.0' }],
+      },
+    }));
+
+    assert.deepEqual(runtimeInstalledPluginRoots('claude', home), [
+      { id: 'pr-review-toolkit', root: toolkit, version: '2.0.0' },
+      { id: 'pr-review-toolkit', root: duplicate, version: '2.0.0' },
+    ]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('runtimeInstalledPluginRoots — Claude intersects registry roots with the effective qualified id and version', () => {
+  const home = mkdtempSync(join(tmpdir(), 'pr-review-claude-effective-'));
+  try {
+    const active = seedClaudePlugin(home, 'market-a', 'pr-review-toolkit', '2.0.0');
+    const staleOtherProject = seedClaudePlugin(home, 'market-a', 'pr-review-toolkit', '1.0.0');
+    const disabled = seedClaudePlugin(home, 'market-b', 'code-review', '3.0.0');
+    mkdirSync(join(home, '.claude', 'plugins'), { recursive: true });
+    writeFileSync(join(home, '.claude', 'plugins', 'installed_plugins.json'), JSON.stringify({
+      version: 2,
+      plugins: {
+        'pr-review-toolkit@market-a': [
+          { scope: 'user', installPath: active, version: '2.0.0' },
+          { scope: 'project', installPath: staleOtherProject, version: '1.0.0' },
+        ],
+        'code-review@market-b': [{ scope: 'user', installPath: disabled, version: '3.0.0' }],
+      },
+    }));
+
+    assert.deepEqual(
+      runtimeInstalledPluginRoots('claude', home, [{
+        key: 'pr-review-toolkit@market-a', version: '2.0.0', root: active,
+      }]),
+      [{ id: 'pr-review-toolkit', root: active, version: '2.0.0' }],
+    );
+    assert.deepEqual(
+      runtimeInstalledPluginRoots('claude', home, [{
+        key: 'pr-review-toolkit@market-a', version: '999.0.0', root: active,
+      }]),
+      [],
+      'the effective selector version must agree with the plugin manifest',
+    );
+    writeFileSync(
+      join(active, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'pr-review-toolkit' }),
+    );
+    assert.deepEqual(
+      runtimeInstalledPluginRoots('claude', home, [{
+        key: 'pr-review-toolkit@market-a', version: '2.0.0', root: active,
+      }]),
+      [],
+      'strict effective-root validation requires a manifest version',
+    );
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

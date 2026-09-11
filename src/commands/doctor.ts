@@ -46,18 +46,22 @@ export async function runDoctor(): Promise<number> {
     codex ? (config.invokeCodex ? 'will run' : 'installed but disabled (invoke_codex: false)') : 'not installed — skipped automatically',
   );
   if (runtime) {
-    const companions = await detectCompanions('copilot', runtime);
+    const companions = await detectCompanions(runtime, runtime);
     if (companions.detectionError) {
       bad('companion detection', companions.detectionError);
     } else {
       for (const c of KNOWN_COMPANIONS) {
-        const installed = companions.installed.includes(c.id);
-        (installed ? ok : bad)(
+        const active = companions.recognized.includes(c.id);
+        (active ? ok : bad)(
           `companion ${c.id}`,
           // The remediation must be runnable in the runtime this doctor just
           // resolved. `installSlash` for both was the same defect `formatWarning`
           // carried, in the command a user with missing companions actually runs.
-          installed ? `${companionDispatchCount([c.id])} dispatch(es)` : installCommandFor(c, runtime),
+          active
+            ? `${companionDispatchCount([c.id])} dispatch(es)`
+            : companions.installed.includes(c.id)
+              ? 'installed but disabled for this project'
+              : installCommandFor(c, runtime),
         );
       }
     }

@@ -8,6 +8,7 @@ import {
   readAuthoritativeDeliveryState,
   readAuthoritativeDispatchPlan,
   readAuthoritativeFinalization,
+  lastRuntimeAttemptDiagnostic,
   type DispatchPlan,
 } from '../dispatch/delivery.js';
 import { atomicFileExistsSync } from '../util/atomic-json.js';
@@ -225,11 +226,13 @@ export function runStatus(runId: string, now = Date.now()): StatusResult {
 
   if (authoritativeDelivery?.kind === 'terminal-incomplete') {
     const diagnostic = existsSync(errPath) ? `\n\n${readFileSync(errPath, 'utf8').trim()}` : '';
+    const runtimeDiagnostic = lastRuntimeAttemptDiagnostic(authoritativeDelivery);
     return {
       state: 'failed',
       text:
         `${snapshot}\n${deliverySnapshot(authoritativeDelivery)}\n\n` +
         `Reviewer delivery is terminal: ${authoritativeDelivery.reasonCodes.join(', ') || 'unknown reason'}.` +
+        (runtimeDiagnostic ? `\n${runtimeDiagnostic}` : '') +
         diagnostic,
     };
   }

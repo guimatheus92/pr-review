@@ -7,6 +7,7 @@ export const REVIEWER_PROGRESS_FILE = 'reviewer-progress.ndjson';
 export type ReviewerProgressKind =
   | 'session-attempt-started'
   | 'output-first-seen'
+  | 'output-adopted'
   | 'output-promoted'
   | 'output-invalid'
   | 'recovery-started'

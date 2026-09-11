@@ -4,13 +4,16 @@ import { basename, dirname, join, resolve } from 'node:path';
 import type { GatherOutput, ReviewerOutput, Severity, SkillDefinition } from '../types.js';
 import { matchesAny } from '../util/globs.js';
 import { sanitizeForFilename } from '../util/tmp.js';
-import { printable } from '../util/text.js';
+import { printable, safeRuntimeDiagnostic } from '../util/text.js';
 import { parseReviewerOutput } from './parsers.js';
 import {
   GENERIC_AGENT,
   normalizeModel,
   runtimeBinary,
+  runtimeDisablesAmbientPlugins,
+  runtimeSpawnEnvironment,
   runtimeSpawnArgs,
+  runtimeTaskName,
   taskCall,
   taskToolName,
   type Runtime,
@@ -18,10 +21,15 @@ import {
 } from './runtime.js';
 import { appendProgress } from '../util/progress.js';
 import type { IndexEntry, PassRoute, ReviewPass } from './pass-select.js';
-import { companionReviewerNames, KNOWN_COMPANIONS } from '../plugins/companions.js';
+import {
+  companionReviewerNames,
+  materializeCompanionBriefs,
+  type CompanionPluginSource,
+} from '../plugins/companions.js';
 import type { McpCapability } from '../plugins/installed.js';
 import {
   OUTPUT_PATH_TOKEN,
+  adoptRuntimeReviewerAttempt,
   assertDispatchPlanMirrors,
   artifactState,
   assembleConsolidated,
@@ -50,6 +58,7 @@ import {
   type RuntimeAttemptState,
 } from './delivery.js';
 import { canonicalJson, sha256, sha256File } from '../util/atomic-json.js';
+import { parseCopilotRuntimeEvents, type CopilotRuntimeEvents } from './runtime-events.js';
 import {
   appendReviewerProgress,
   describePromotedOutput,
@@ -68,6 +77,8 @@ export interface SingleSessionOptions {
   /** The PR's detected stack tags, rendered into pr-context.md. */
   stackTags: string[];
   installedCompanions: string[];
+  /** Active runtime registry roots used only to snapshot known companion review criteria. */
+  companionSources?: CompanionPluginSource[];
   /** Pass names to skip (full `pack/skill` or bare suffix), plus `verifier` / `codex`. */
   skipReviewers: string[];
   outDir: string;
@@ -80,7 +91,7 @@ export interface SingleSessionOptions {
   runtime?: Runtime;
   /** Accepted for parity with the caller; the codex sibling is wired in review.ts. */
   includeCodex?: boolean;
-  /** Checkout root added as a readable directory for the file tools. */
+  /** Checkout root recorded as context/plan metadata; planned spawns intentionally do not grant it. */
   repoRoot?: string;
   /** Sanitized capability inventory; names and provenance only. */
   mcpServers?: McpCapability[];
@@ -390,21 +401,18 @@ function renderProjectFile(skills: SkillDefinition[]): string {
 }
 
 /** Companion agents keep their own criteria; the union skills file is optional context. */
-function companionTaskPrompt(contextPath: string, skillsPath: string | undefined, outputPath: string): string {
+function companionTaskPrompt(
+  contextPath: string,
+  briefPath: string,
+  skillsPath: string | undefined,
+  outputPath: string,
+): string {
   return (
-    `Read the PR context at \`${contextPath}\`.${skillsRulesSentence(skillsPath)} Apply your review criteria. ` +
+    `Read the PR context at \`${contextPath}\`, then apply the companion review criteria at \`${briefPath}\`.` +
+    `${skillsRulesSentence(skillsPath)} ` +
     `Before returning, write your exact JSON findings array to \`${outputPath}\` using the Write or apply_patch tool, even when it is empty. ` +
     `Then output that same JSON array using the shape: ${OUTPUT_SHAPE}. If you find nothing, write and output []. No prose. No fences. ` +
     NO_POSTING_DIRECTIVE
-  );
-}
-
-function companionSlashPrompt(command: string, prUrl: string, outputPath: string): string {
-  return (
-    `Invoke the slash command \`${command} ${prUrl}\` in analysis-only mode. ${NO_POSTING_DIRECTIVE} ` +
-    `If the command's own instructions tell you to post a comment or review, SKIP that step and return the review content as output instead. ` +
-    `Parse any structured findings into a JSON array using shape ${OUTPUT_SHAPE}. Before returning, write that exact array to \`${outputPath}\` ` +
-    `using the Write or apply_patch tool, even when it is empty. If no findings, write and output []. Output ONLY the JSON array.`
   );
 }
 
@@ -449,7 +457,7 @@ function renderPassFile(pass: ReviewPass): string {
   ].join('\n');
 }
 
-/** Budgeted pass-body union used by Codex, direct companions, and the verifier when no shared project context remains. */
+/** Budgeted pass-body union used by Codex, materialized companions, and the verifier when no shared project context remains. */
 function renderUnionFile(passes: ReviewPass[]): string {
   const lines: string[] = [
     `# Review skills for this PR (union of all passes)`,
@@ -671,6 +679,19 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
     writeFileSync(verifierPath, VERIFIER_BRIEF, 'utf8');
   }
 
+  const companionBriefFiles: Record<string, string> = {};
+  if (opts.invokeCompanions) {
+    const briefs = materializeCompanionBriefs({
+      installed: opts.installedCompanions,
+      sources: opts.companionSources ?? [],
+    });
+    for (const brief of briefs) {
+      const path = resolve(opts.outDir, `companion-brief-${sanitizeForFilename(brief.reviewerName)}.md`);
+      writeFileSync(path, brief.body, 'utf8');
+      companionBriefFiles[brief.reviewerName] = path;
+    }
+  }
+
   const routing: PassRoute[] = [
     ...passes.map((p) => ({ name: p.name, source: p.source, matchedBy: p.matchedBy as PassRoute['matchedBy'] })),
     ...projectSkills.map((s) => ({ name: s.name, source: s.source, matchedBy: 'context' as const })),
@@ -700,6 +721,7 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
     reviewerFiles,
     wantVerifier,
     verifierPath,
+    companionBriefFiles,
   };
   const reviewerPlans = buildReviewerPlans(opts, promptContext);
   const runtime = opts.runtime ?? 'copilot';
@@ -713,6 +735,7 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
     ...indexShardPaths,
     ...indexedSkillPaths,
     ...Object.values(skillsFiles),
+    ...Object.values(companionBriefFiles),
     ...(verifierPath ? [verifierPath] : []),
   ].filter((path, index, all) => existsSync(path) && all.indexOf(path) === index);
   const artifacts: DispatchPlanArtifact[] = immutablePaths.map((path) => ({ path, sha256: sha256File(path) }));
@@ -748,6 +771,7 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
     runtimeBinary: runtimeBinary(runtime, opts.copilotBinary),
     repoRoot: opts.repoRoot,
     disabledMcpServers: inventoriedMcpServerNames(opts.mcpServers),
+    ambientPluginsDisabled: runtimeDisablesAmbientPlugins(runtime),
     model,
     timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     phase1Path,
@@ -839,47 +863,28 @@ function buildReviewerPlans(
     reviewerFiles: Record<string, string>;
     wantVerifier: boolean;
     verifierPath?: string;
+    companionBriefFiles: Record<string, string>;
   },
 ): DispatchReviewerPlan[] {
-  const runtime = opts.runtime ?? 'copilot';
   const unionSkills = ctx.skillsFiles['all'];
   // Project rules are the authoritative context; the union of pass bodies is the fallback.
   const authoritativeSkills = ctx.skillsFiles['project'] ?? unionSkills;
   const companionReviewers: DispatchReviewerPlan[] = [];
-  const companionSlashReviewers: DispatchReviewerPlan[] = [];
   if (opts.invokeCompanions) {
-    for (const companion of KNOWN_COMPANIONS) {
-      if (!opts.installedCompanions.includes(companion.id)) continue;
-      if (companion.dispatch.kind === 'agents') {
-        for (const agent of companion.dispatch.agents) {
-          const shortAgent = agent.replace(/^[^:]+:/, '');
-          const reviewerName = `companion:${companion.id}/${shortAgent}`;
-          const agentType = runtime === 'copilot' ? shortAgent : agent;
-          companionReviewers.push(reviewerPlan({
-            outDir: opts.outDir,
-            name: reviewerName,
-            kind: 'companion-agent',
-            description: `Run ${shortAgent}`,
-            agentType,
-            promptTemplate: companionTaskPrompt(ctx.contextPath, authoritativeSkills, OUTPUT_PATH_TOKEN),
-            canonicalOutputPath: ctx.reviewerFiles[reviewerName]!,
-            source: companion.id,
-          }));
-        }
-      } else {
-        const command = companion.dispatch.command;
-        const reviewerName = `companion:${companion.id}`;
-        companionSlashReviewers.push(reviewerPlan({
-          outDir: opts.outDir,
-          name: reviewerName,
-          kind: 'companion-slash',
-          description: 'Run code review',
-          agentType: GENERIC_AGENT,
-          promptTemplate: companionSlashPrompt(command, opts.prUrl, OUTPUT_PATH_TOKEN),
-          canonicalOutputPath: ctx.reviewerFiles[reviewerName]!,
-          source: command,
-        }));
-      }
+    for (const reviewerName of companionReviewerNames(opts.installedCompanions)) {
+      const briefPath = ctx.companionBriefFiles[reviewerName];
+      if (!briefPath) throw new Error(`companion brief was not materialized for ${reviewerName}`);
+      const companionId = reviewerName.slice('companion:'.length).split('/')[0]!;
+      companionReviewers.push(reviewerPlan({
+        outDir: opts.outDir,
+        name: reviewerName,
+        kind: 'companion-agent',
+        description: `Run ${reviewerName.slice('companion:'.length)}`,
+        agentType: GENERIC_AGENT,
+        promptTemplate: companionTaskPrompt(ctx.contextPath, briefPath, authoritativeSkills, OUTPUT_PATH_TOKEN),
+        canonicalOutputPath: ctx.reviewerFiles[reviewerName]!,
+        source: companionId,
+      }));
     }
   }
 
@@ -905,7 +910,7 @@ function buildReviewerPlans(
     });
   });
 
-  return [...passReviewers, ...companionReviewers, ...companionSlashReviewers];
+  return [...passReviewers, ...companionReviewers];
 }
 
 export function buildDispatchPrompt(
@@ -918,7 +923,11 @@ export function buildDispatchPrompt(
   const dispatchLines = reviewers.map((reviewer) => {
     const attempt = attemptFor(reviewer);
     const outputPath = resolve(reviewer.attemptsDir, `attempt-${attempt}.json`);
-    return `- ${taskCall(runtime, reviewer.agentType, renderAttemptPrompt(reviewer.promptTemplate, outputPath), reviewer.description)} — record as reviewer name \`${reviewer.name}\``;
+    const prompt = renderAttemptPrompt(reviewer.promptTemplate, outputPath);
+    const call = runtime === 'copilot'
+      ? taskCall('copilot', reviewer.agentType, prompt, reviewer.description, runtimeTaskName(reviewer.name))
+      : taskCall('claude', reviewer.agentType, prompt, reviewer.description);
+    return `- ${call} — record as reviewer name \`${reviewer.name}\``;
   });
   const lines = [
     `You are the pr-review ${mode === 'initial' ? 'orchestrator' : 'recovery orchestrator'}. Your ONLY job is to dispatch the listed review tasks in parallel and wait for them to return. Node owns delivery accounting and aggregation.`,
@@ -1056,6 +1065,23 @@ function timedOutFrom(result: SpawnResult): boolean {
   return result.timedOut ?? result.stderr.includes('[timed out]');
 }
 
+function runtimeCause(
+  result: SpawnResult,
+  events?: CopilotRuntimeEvents,
+  additional: readonly string[] = [],
+): string | undefined {
+  const fragments = [
+    events?.runtimeError,
+    events && events.diagnostics.length > 0 ? `Copilot JSONL: ${events.diagnostics.join('; ')}` : undefined,
+    timedOutFrom(result) ? `runtime timed out` : result.exitCode !== 0 ? `runtime exited ${result.exitCode}` : undefined,
+    result.stderr.trim() ? `stderr: ${result.stderr}` : undefined,
+    ...additional,
+  ].filter((value): value is string => !!value);
+  const normalized = [...new Set(fragments.map((fragment) =>
+    safeRuntimeDiagnostic(fragment)).filter((value): value is string => !!value))];
+  return safeRuntimeDiagnostic(normalized.join(' | '));
+}
+
 function runtimeAttempt(
   number: number,
   kind: RuntimeAttemptState['kind'],
@@ -1064,10 +1090,15 @@ function runtimeAttempt(
   endedAt: number,
   result: SpawnResult,
   timeoutMs: number,
+  requestedModel: string,
+  runtimeEvents?: CopilotRuntimeEvents,
+  adoptedReviewers: string[] = [],
+  additionalRuntimeErrors: readonly string[] = [],
 ): RuntimeAttemptState {
   return {
     number,
     kind,
+    status: 'completed',
     reviewers,
     startedAt: new Date(startedAt).toISOString(),
     endedAt: new Date(endedAt).toISOString(),
@@ -1075,7 +1106,100 @@ function runtimeAttempt(
     timedOut: timedOutFrom(result),
     timeoutMs,
     durationMs: endedAt - startedAt,
+    requestedModel,
+    resolvedModel: runtimeEvents?.valid ? runtimeEvents.resolvedModel : undefined,
+    runtimeError: runtimeCause(result, runtimeEvents, additionalRuntimeErrors),
+    adoptedReviewers,
   };
+}
+
+function preflightRuntimeAttempt(plan: DispatchPlan, requestedModel: string): void {
+  const argv = runtimeSpawnArgs(
+    plan.runtime,
+    requestedModel,
+    plan.runDir,
+    undefined,
+    plan.disabledMcpServers,
+  );
+  for (const [name, value] of [
+    ['runtime binary', plan.runtimeBinary],
+    ...argv.map((argument) => ['runtime argument', argument]),
+  ] as const) {
+    assertSafeArg(name, value);
+  }
+}
+
+function startedRuntimeAttempt(
+  number: number,
+  kind: RuntimeAttemptState['kind'],
+  reviewers: readonly Pick<DispatchReviewerPlan, 'name'>[],
+  requestedModel: string,
+  timeoutMs: number,
+): RuntimeAttemptState {
+  const startedAt = new Date().toISOString();
+  return {
+    number,
+    kind,
+    status: 'started',
+    reviewers: reviewers.map((reviewer) => reviewer.name),
+    startedAt,
+    endedAt: startedAt,
+    exitCode: -1,
+    timedOut: false,
+    timeoutMs,
+    durationMs: 0,
+    requestedModel,
+    adoptedReviewers: [],
+  };
+}
+
+function hasRemainingReviewerAttempt(plan: DispatchPlan, state: DeliveryState): boolean {
+  const unresolved = new Set([...state.missing, ...state.invalid]);
+  return plan.reviewers.some((reviewer) =>
+    unresolved.has(reviewer.name) &&
+    (state.reviewerAttempts[reviewer.name] ?? 0) < reviewer.maxAttempts);
+}
+
+function attemptAuthorizesReviewer(
+  state: DeliveryState,
+  reviewerName: string,
+  attemptNumber: number,
+): boolean {
+  return state.runtimeAttempts.some((attempt) =>
+    attempt.number === attemptNumber &&
+    attempt.kind !== 'verifier' &&
+    attempt.status !== 'spawn-rejected' &&
+    attempt.reviewers.includes(reviewerName));
+}
+
+function attemptAuthorizesVerifier(state: DeliveryState, attemptNumber: number): boolean {
+  return state.runtimeAttempts.some((attempt) =>
+    attempt.number === attemptNumber &&
+    attempt.kind === 'verifier' &&
+    attempt.status !== 'spawn-rejected' &&
+    attempt.reviewers.includes('verifier'));
+}
+
+function recoveryModel(plan: DispatchPlan, state: DeliveryState): string {
+  if (plan.runtime !== 'copilot' || plan.model !== 'auto') return plan.model;
+  const initial = state.runtimeAttempts.find((attempt) => attempt.kind === 'initial');
+  if (initial?.resolvedModel) return initial.resolvedModel;
+  throw new Error(
+    'Copilot Auto recovery cannot continue because the initial root Auto route was not captured. ' +
+    'Start a fresh review, or choose an explicit model with --default-model <model>.',
+  );
+}
+
+function failMissingRecoveryModel(state: DeliveryState): void {
+  state.kind = 'terminal-incomplete';
+  state.reasonCodes = ['auto-model-provenance-missing'];
+  state.updatedAt = new Date().toISOString();
+}
+
+function hasRequiredInitialRoute(plan: DispatchPlan, state: DeliveryState): boolean {
+  if (plan.runtime !== 'copilot' || plan.model !== 'auto') return true;
+  const initial = state.runtimeAttempts.find((attempt) => attempt.kind === 'initial');
+  return initial?.status !== 'spawn-rejected' && !!initial?.resolvedModel;
 }
 
 function statePaths(ctx: SessionContext): { mirror: string; authoritative?: string } {
@@ -1113,11 +1237,96 @@ function assertPlanIntegrity(ctx: SessionContext, plan: DispatchPlan): void {
   if (failures.length > 0) throw new Error(failures.join('; '));
 }
 
+function assertRecoverableCompanionPlans(plan: DispatchPlan, reviewers: readonly DispatchReviewerPlan[]): void {
+  const artifactPaths = new Set(plan.artifacts.map((artifact) => resolve(artifact.path)));
+  for (const reviewer of reviewers) {
+    if (!reviewer.name.startsWith('companion:')) continue;
+    const briefPath = reviewer.promptTemplate.match(/`([^`]*companion-brief-[^`]*)`/)?.[1];
+    const currentShape = reviewer.kind === 'companion-agent' &&
+      reviewer.agentType === GENERIC_AGENT &&
+      reviewer.promptTemplate.includes(OUTPUT_PATH_TOKEN) &&
+      !!briefPath &&
+      artifactPaths.has(resolve(briefPath));
+    if (!currentShape) {
+      throw new Error(
+        `legacy native companion plan '${reviewer.name}' cannot be re-dispatched; start a fresh review`,
+      );
+    }
+  }
+}
+
+function replaceRuntimeAttempt(
+  state: DeliveryState,
+  reservation: RuntimeAttemptState,
+  replacement: RuntimeAttemptState,
+): void {
+  const index = state.runtimeAttempts.indexOf(reservation);
+  if (index < 0) throw new Error('runtime attempt reservation is missing from delivery state');
+  state.runtimeAttempts[index] = replacement;
+}
+
+async function executePlannedBatch(
+  ctx: SessionContext,
+  plan: DispatchPlan,
+  state: DeliveryState,
+  reviewers: DispatchReviewerPlan[],
+  attemptNumber: number,
+  kind: 'initial' | 'automatic-recovery' | 'manual-recovery',
+  requestedModel: string,
+  opts: SingleSessionOptions,
+  spawn: typeof spawnRuntime,
+): Promise<{ child: SpawnResult; attempt: RuntimeAttemptState }> {
+  preflightRuntimeAttempt(plan, requestedModel);
+  const reservation = startedRuntimeAttempt(
+    attemptNumber,
+    kind,
+    reviewers,
+    requestedModel,
+    plan.timeoutMs,
+  );
+  for (const reviewer of reviewers) state.reviewerAttempts[reviewer.name] = attemptNumber;
+  state.runtimeAttempts.push(reservation);
+  state.kind = 'running';
+  state.reasonCodes = ['runtime-attempt-running'];
+  persistState(ctx, state);
+  try {
+    const completed = await spawnPlannedBatch(
+      plan,
+      reviewers,
+      attemptNumber,
+      kind,
+      requestedModel,
+      opts,
+      spawn,
+    );
+    replaceRuntimeAttempt(state, reservation, completed.attempt);
+    persistState(ctx, state);
+    return completed;
+  } catch (error) {
+    const endedAt = Date.now();
+    replaceRuntimeAttempt(state, reservation, {
+      ...reservation,
+      status: 'spawn-rejected',
+      endedAt: new Date(endedAt).toISOString(),
+      durationMs: Math.max(0, endedAt - Date.parse(reservation.startedAt)),
+      runtimeError: safeRuntimeDiagnostic((error as Error).message),
+    });
+    const exhausted = !hasRemainingReviewerAttempt(plan, state);
+    state.kind = exhausted ? 'terminal-incomplete' : 'recoverable-incomplete';
+    state.reasonCodes = exhausted
+      ? ['attempts-exhausted', 'runtime-spawn-rejected']
+      : ['runtime-spawn-rejected'];
+    persistState(ctx, state);
+    throw error;
+  }
+}
+
 async function spawnPlannedBatch(
   plan: DispatchPlan,
   reviewers: DispatchReviewerPlan[],
   attempt: number,
   kind: 'initial' | 'automatic-recovery' | 'manual-recovery',
+  requestedModel: string,
   opts: SingleSessionOptions,
   spawn: typeof spawnRuntime,
 ): Promise<{ child: SpawnResult; attempt: RuntimeAttemptState }> {
@@ -1163,7 +1372,7 @@ async function spawnPlannedBatch(
     child = await spawn({
       runtime: plan.runtime,
       binary: plan.runtimeBinary,
-      model: plan.model,
+      model: requestedModel,
       promptBody,
       timeoutMs: plan.timeoutMs,
       addDir: plan.runDir,
@@ -1173,6 +1382,39 @@ async function spawnPlannedBatch(
     watcher.stop();
   }
   const endedAt = Date.now();
+  const runtimeEvents = plan.runtime === 'copilot' ? parseCopilotRuntimeEvents(child.stdout) : undefined;
+  const adoptedReviewers: string[] = [];
+  const adoptionErrors: string[] = [];
+  if (runtimeEvents?.valid) {
+    const byTaskName = new Map<string, DispatchReviewerPlan | null>();
+    for (const reviewer of reviewers) {
+      const taskName = runtimeTaskName(reviewer.name);
+      byTaskName.set(taskName, byTaskName.has(taskName) ? null : reviewer);
+    }
+    for (const taskResult of runtimeEvents.taskResults) {
+      const reviewer = byTaskName.get(taskResult.taskName);
+      if (!reviewer) continue;
+      try {
+        const adoption = adoptRuntimeReviewerAttempt(reviewer, attempt, taskResult.content);
+        if (adoption === 'created') {
+          adoptedReviewers.push(reviewer.name);
+          appendReviewerProgress(plan.runDir, {
+            kind: 'output-adopted',
+            reviewer: reviewer.name,
+            attempt,
+            bytes: Buffer.byteLength(taskResult.content),
+            detail: 'copilot-jsonl',
+          });
+        }
+      } catch (error) {
+        const diagnostic = safeRuntimeDiagnostic(
+          `structured result adoption failed for ${reviewer.name}: ${(error as Error).message}`,
+        );
+        if (diagnostic) adoptionErrors.push(diagnostic);
+        process.stderr.write(`[delivery] ${diagnostic ?? 'structured result adoption failed'}\n`);
+      }
+    }
+  }
   if (kind !== 'initial') {
     appendReviewerProgress(plan.runDir, {
       kind: 'recovery-completed',
@@ -1182,7 +1424,19 @@ async function spawnPlannedBatch(
   }
   return {
     child,
-    attempt: runtimeAttempt(attempt, kind, reviewers.map((reviewer) => reviewer.name), startedAt, endedAt, child, plan.timeoutMs),
+    attempt: runtimeAttempt(
+      attempt,
+      kind,
+      reviewers.map((reviewer) => reviewer.name),
+      startedAt,
+      endedAt,
+      child,
+      plan.timeoutMs,
+      requestedModel,
+      runtimeEvents,
+      adoptedReviewers,
+      adoptionErrors,
+    ),
   };
 }
 
@@ -1248,10 +1502,65 @@ async function runDirectVerifier(
   const promotion = promoteVerifierAttempt(plan.verifier, attemptNumber, plan.model, endedAt - startedAt);
   return {
     child,
-    attempt: runtimeAttempt(attemptNumber, 'verifier', ['verifier'], startedAt, endedAt, child, plan.timeoutMs),
+    attempt: runtimeAttempt(
+      attemptNumber,
+      'verifier',
+      ['verifier'],
+      startedAt,
+      endedAt,
+      child,
+      plan.timeoutMs,
+      plan.model,
+      plan.runtime === 'copilot' ? parseCopilotRuntimeEvents(child.stdout) : undefined,
+    ),
     output: promotion.status === 'valid' ? readVerifierOutput(plan, endedAt - startedAt) : undefined,
     status: promotion.status,
   };
+}
+
+async function executeVerifierAttempt(
+  ctx: SessionContext,
+  plan: DispatchPlan,
+  state: DeliveryState,
+  attemptNumber: number,
+  phase1Digest: string,
+  opts: SingleSessionOptions,
+  spawn: typeof spawnRuntime,
+): Promise<Awaited<ReturnType<typeof runDirectVerifier>>> {
+  preflightRuntimeAttempt(plan, plan.model);
+  const reservation = startedRuntimeAttempt(
+    attemptNumber,
+    'verifier',
+    [{ name: 'verifier' }],
+    plan.model,
+    plan.timeoutMs,
+  );
+  state.verifier = { state: 'required', phase1Digest, attempts: attemptNumber };
+  state.runtimeAttempts.push(reservation);
+  state.kind = 'running';
+  state.reasonCodes = ['verifier-runtime-running'];
+  persistState(ctx, state);
+  appendProgress(plan.runDir, 'verify', `attempt ${attemptNumber}`);
+  appendReviewerProgress(plan.runDir, { kind: 'verifier-started', reviewer: 'verifier', attempt: attemptNumber });
+  try {
+    const completed = await runDirectVerifier(plan, attemptNumber, opts, spawn);
+    replaceRuntimeAttempt(state, reservation, completed.attempt);
+    persistState(ctx, state);
+    return completed;
+  } catch (error) {
+    const endedAt = Date.now();
+    replaceRuntimeAttempt(state, reservation, {
+      ...reservation,
+      status: 'spawn-rejected',
+      endedAt: new Date(endedAt).toISOString(),
+      durationMs: Math.max(0, endedAt - Date.parse(reservation.startedAt)),
+      runtimeError: safeRuntimeDiagnostic((error as Error).message),
+    });
+    state.kind = attemptNumber >= plan.verifier.maxAttempts ? 'terminal-incomplete' : 'recoverable-incomplete';
+    state.reasonCodes = ['verifier-runtime-spawn-rejected'];
+    persistState(ctx, state);
+    throw error;
+  }
 }
 
 async function runPlannedSession(
@@ -1276,12 +1585,10 @@ async function runPlannedSession(
 
   let state = createDeliveryState(plan, inspectPlan(plan, 0));
   state.kind = 'running';
-  for (const reviewer of plan.reviewers) state.reviewerAttempts[reviewer.name] = 1;
   if (plan.codex.enabled) reserveCodexAttempt(plan, state);
   persistState(ctx, state);
 
-  let latest = await spawnPlannedBatch(plan, plan.reviewers, 1, 'initial', opts, spawn);
-  state.runtimeAttempts.push(latest.attempt);
+  let latest = await executePlannedBatch(ctx, plan, state, plan.reviewers, 1, 'initial', plan.model, opts, spawn);
   let collisions = promoteBatch(plan.runDir, plan.reviewers, 1, plan.model, latest.attempt.durationMs);
   assertPlanIntegrity(ctx, plan);
   assertDeliveryArtifactsUnchanged(plan, state);
@@ -1310,11 +1617,37 @@ async function runPlannedSession(
       );
       await new Promise<void>((resolveBackoff) => setTimeout(resolveBackoff, ORCHESTRATOR_RETRY_BACKOFF_MS[0]));
     }
+    let recoveryModelValue: string;
+    try {
+      recoveryModelValue = recoveryModel(plan, state);
+    } catch {
+      failMissingRecoveryModel(state);
+      persistState(ctx, state);
+      return {
+        result: {
+          outputs: inventory.outputs,
+          rawOrchestratorOutput: latest.child.stdout,
+          rawOrchestratorStderr: latest.child.stderr,
+          exitCode: 2,
+          durationMs: Date.now() - start,
+          findingsUnavailable: true,
+          deliveryState: state,
+        },
+        state,
+      };
+    }
     appendProgress(plan.runDir, 'recover', `automatic — ${unresolved.length} unresolved reviewer(s)`);
-    for (const reviewer of unresolved) state.reviewerAttempts[reviewer.name] = 2;
-    persistState(ctx, state);
-    latest = await spawnPlannedBatch(plan, unresolved, 2, 'automatic-recovery', opts, spawn);
-    state.runtimeAttempts.push(latest.attempt);
+    latest = await executePlannedBatch(
+      ctx,
+      plan,
+      state,
+      unresolved,
+      2,
+      'automatic-recovery',
+      recoveryModelValue,
+      opts,
+      spawn,
+    );
     collisions = promoteBatch(plan.runDir, unresolved, 2, plan.model, latest.attempt.durationMs);
     assertPlanIntegrity(ctx, plan);
     assertDeliveryArtifactsUnchanged(plan, state);
@@ -1348,6 +1681,23 @@ async function runPlannedSession(
     };
   }
 
+  if (!hasRequiredInitialRoute(plan, state)) {
+    failMissingRecoveryModel(state);
+    persistState(ctx, state);
+    return {
+      result: {
+        outputs: inventory.outputs,
+        rawOrchestratorOutput: latest.child.stdout,
+        rawOrchestratorStderr: latest.child.stderr,
+        exitCode: 2,
+        durationMs: Date.now() - start,
+        findingsUnavailable: true,
+        deliveryState: state,
+      },
+      state,
+    };
+  }
+
   assemblePhase1(plan.phase1Path, inventory);
   appendReviewerProgress(plan.runDir, {
     kind: 'phase1-assembled',
@@ -1366,13 +1716,16 @@ async function runPlannedSession(
     appendReviewerProgress(plan.runDir, { kind: 'verifier-decision', detail: 'skipped-no-severe' });
   } else {
     const verifierAttempt = state.verifier.attempts + 1;
-    state.verifier = { state: 'required', phase1Digest, attempts: verifierAttempt };
-    persistState(ctx, state);
-    appendProgress(plan.runDir, 'verify', `attempt ${verifierAttempt}`);
-    appendReviewerProgress(plan.runDir, { kind: 'verifier-started', reviewer: 'verifier', attempt: verifierAttempt });
-    const verifier = await runDirectVerifier(plan, verifierAttempt, opts, spawn);
+    const verifier = await executeVerifierAttempt(
+      ctx,
+      plan,
+      state,
+      verifierAttempt,
+      phase1Digest,
+      opts,
+      spawn,
+    );
     assertDeliveryArtifactsUnchanged(plan, state);
-    state.runtimeAttempts.push(verifier.attempt);
     state.verifier = {
       state: verifier.status === 'valid' ? 'valid' : verifier.status === 'missing' ? 'missing' : 'invalid',
       phase1Digest,
@@ -1459,9 +1812,11 @@ export async function resumePlannedSession(
   for (const reviewer of plan.reviewers) {
     const authenticatedDigest = state.reviewerDigests[reviewer.name];
     const recordedAttempt = state.reviewerAttempts[reviewer.name] ?? 0;
+    const authorizedAttempt = recordedAttempt > 0 &&
+      attemptAuthorizesReviewer(state, reviewer.name, recordedAttempt);
     if (existsSync(reviewer.canonicalOutputPath)) {
       if (!authenticatedDigest) {
-        if (recordedAttempt === 0) {
+        if (!authorizedAttempt) {
           throw new Error(`delivery artifact integrity failure: unbound canonical reviewer output: ${reviewer.name}`);
         }
         const recovery = promoteReviewerAttempt(reviewer, recordedAttempt, plan.model, 0);
@@ -1475,17 +1830,21 @@ export async function resumePlannedSession(
       }
       continue;
     }
-    if (recordedAttempt > 0) promoteReviewerAttempt(reviewer, recordedAttempt, plan.model, 0);
+    if (authorizedAttempt) promoteReviewerAttempt(reviewer, recordedAttempt, plan.model, 0);
   }
   if (
     plan.verifier.enabled &&
     plan.verifier.canonicalOutputPath &&
     existsSync(plan.verifier.canonicalOutputPath) &&
-    state.verifier.attempts === 0
+    !attemptAuthorizesVerifier(state, state.verifier.attempts)
   ) {
     throw new Error('delivery artifact integrity failure: unbound canonical verifier output');
   }
-  if (plan.verifier.enabled && plan.verifier.canonicalOutputPath && state.verifier.attempts > 0) {
+  if (
+    plan.verifier.enabled &&
+    plan.verifier.canonicalOutputPath &&
+    attemptAuthorizesVerifier(state, state.verifier.attempts)
+  ) {
     if (existsSync(plan.verifier.canonicalOutputPath)) {
       if (!state.verifier.digest || !state.verifier.phase1Digest) {
         const recovery = promoteVerifierAttempt(plan.verifier, state.verifier.attempts, plan.model, 0);
@@ -1517,6 +1876,19 @@ export async function resumePlannedSession(
   }
   let inventory = inspectPlan(plan, 0);
   state = createDeliveryState(plan, inventory, state);
+  if (inventory.complete && !hasRequiredInitialRoute(plan, state)) {
+    failMissingRecoveryModel(state);
+    persistState(ctx, state);
+    return {
+      outputs: inventory.outputs,
+      rawOrchestratorOutput: '',
+      rawOrchestratorStderr: '',
+      exitCode: 2,
+      durationMs: Date.now() - start,
+      findingsUnavailable: true,
+      deliveryState: state,
+    };
+  }
   const unresolvedNames = new Set([...inventory.missing, ...inventory.invalid]);
   const unresolved = plan.reviewers.filter((reviewer) =>
     unresolvedNames.has(reviewer.name) &&
@@ -1538,22 +1910,31 @@ export async function resumePlannedSession(
 
   let latest: SpawnResult = { stdout: '', stderr: '', exitCode: 0, timedOut: false };
   if (unresolved.length > 0) {
+    assertRecoverableCompanionPlans(plan, unresolved);
     const attempts = new Set(unresolved.map((reviewer) => (state!.reviewerAttempts[reviewer.name] ?? 0) + 1));
     if (attempts.size !== 1) throw new Error('unresolved reviewers have incompatible next attempt numbers');
     const attemptNumber = [...attempts][0]!;
+    let recoveryModelValue: string;
+    try {
+      recoveryModelValue = recoveryModel(plan, state);
+    } catch (error) {
+      failMissingRecoveryModel(state);
+      persistState(ctx, state);
+      throw error;
+    }
     appendProgress(plan.runDir, 'recover', `manual — ${unresolved.length} unresolved reviewer(s)`);
-    for (const reviewer of unresolved) state.reviewerAttempts[reviewer.name] = attemptNumber;
-    persistState(ctx, state);
-    const batch = await spawnPlannedBatch(
+    const batch = await executePlannedBatch(
+      ctx,
       plan,
+      state,
       unresolved,
       attemptNumber,
       'manual-recovery',
+      recoveryModelValue,
       { outDir: plan.runDir, invokeCompanions: false, repoRoot: plan.repoRoot } as SingleSessionOptions,
       spawn,
     );
     latest = batch.child;
-    state.runtimeAttempts.push(batch.attempt);
     const collisions = promoteBatch(plan.runDir, unresolved, attemptNumber, plan.model, batch.attempt.durationMs);
     assertPlanIntegrity({
       ...ctx,
@@ -1621,19 +2002,17 @@ export async function resumePlannedSession(
       };
     }
     const verifierAttempt = state.verifier.attempts + 1;
-    state.verifier = { state: 'required', phase1Digest, attempts: verifierAttempt };
-    persistState(ctx, state);
-    appendProgress(plan.runDir, 'verify', `attempt ${verifierAttempt}`);
-    appendReviewerProgress(plan.runDir, { kind: 'verifier-started', reviewer: 'verifier', attempt: verifierAttempt });
-    const verifier = await runDirectVerifier(
+    const verifier = await executeVerifierAttempt(
+      ctx,
       plan,
+      state,
       verifierAttempt,
+      phase1Digest,
       { outDir: plan.runDir, invokeCompanions: false, repoRoot: plan.repoRoot } as SingleSessionOptions,
       spawn,
     );
     assertDeliveryArtifactsUnchanged(plan, state);
     latest = verifier.child;
-    state.runtimeAttempts.push(verifier.attempt);
     state.verifier = {
       state: verifier.status === 'valid' ? 'valid' : verifier.status === 'missing' ? 'missing' : 'invalid',
       phase1Digest,
@@ -1885,7 +2264,11 @@ function spawnRuntime(args: {
   assertSafeArg('add-dir', args.addDir);
   return new Promise((resolve) => {
     const argv = runtimeSpawnArgs(args.runtime, args.model, args.addDir, args.repoRoot, args.disabledMcpServers);
-    const child = spawnCli(args.binary, argv, { stdio: ['pipe', 'pipe', 'pipe'], cwd: args.addDir });
+    const child = spawnCli(args.binary, argv, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: args.addDir,
+      env: runtimeSpawnEnvironment(args.runtime),
+    });
 
     let stdout = '';
     let stderr = '';

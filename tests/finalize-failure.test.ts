@@ -9,6 +9,7 @@ import { runStatus } from '../src/commands/status.js';
 import { readProgress } from '../src/util/progress.js';
 import type { Finding, PrRef, ReviewerOutput } from '../src/types.js';
 import type { BatchComment, PrProvider } from '../src/providers/types.js';
+import type { DeliveryState } from '../src/dispatch/delivery.js';
 
 const PATCH = ['@@ -10,4 +10,5 @@', ' c10', '-old11', '+new11', '+new12', ' c13'].join('\n');
 
@@ -104,6 +105,38 @@ test('finalizeReview — a pipeline failure never mints the done artifacts; stat
   }
 });
 
+test('finalizeReview — incomplete delivery names the authenticated runtime error and model chain', async () => {
+  const dir = seedRun('finalize-runtime-diagnostic-test');
+  try {
+    const state = {
+      kind: 'terminal-incomplete',
+      planned: ['one'], valid: [], missing: ['one'], invalid: [], recoveredFindingCount: 0,
+      consolidated: 'missing', phase1: 'missing', verifier: { state: 'not-evaluated', attempts: 0 },
+      codex: { state: 'disabled', attempts: 0 }, reasonCodes: ['attempts-exhausted'],
+      runtimeAttempts: [{
+        number: 2, kind: 'automatic-recovery', reviewers: ['one'],
+        startedAt: new Date(0).toISOString(), endedAt: new Date(1).toISOString(),
+        exitCode: 1, timedOut: false, timeoutMs: 1000, durationMs: 1,
+        requestedModel: 'gpt-5.6-luna', resolvedModel: 'gpt-5.4',
+        runtimeError: 'Execution failed: 400 advisor tool is not supported',
+      }],
+    } as unknown as DeliveryState;
+
+    const result = await finalizeReview({
+      prUrl: 'u', outDir: dir, gather: gatherFixture(), outputs: [],
+      dedupeMode: 'strict', publish: false, dryRun: true,
+      findingsUnavailable: true, deliveryState: state, overallStart: Date.now(),
+    });
+
+    assert.equal(result.exitCode, 2);
+    assert.match(result.summary, /requested model gpt-5\.6-luna/);
+    assert.match(result.summary, /resolved model gpt-5\.4/);
+    assert.match(result.summary, /400 advisor tool is not supported/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('writeOrchestratorFailureLog — persists the ENTIRE stdout/stderr, never a tail', () => {
   const id = 'finalize-failure-log-test';
   const dir = seedRun(id);
@@ -112,10 +145,98 @@ test('writeOrchestratorFailureLog — persists the ENTIRE stdout/stderr, never a
     const stdout = 'HEAD-OF-STDOUT ' + 'x'.repeat(20_000) + ' TAIL-OF-STDOUT';
     const stderr = 'HEAD-OF-STDERR ' + 'y'.repeat(20_000) + ' TAIL-OF-STDERR';
     writeOrchestratorFailureLog(dir, 0, stdout, stderr);
-    const log = readFileSync(join(dir, 'orchestrator-failure.log'), 'utf8');
-    assert.ok(log.includes(stdout), 'full stdout must be present (head included)');
-    assert.ok(log.includes(stderr), 'full stderr must be present (head included)');
-    assert.match(log, /exitCode=0/);
+    const log = JSON.parse(readFileSync(join(dir, 'orchestrator-failure.log'), 'utf8')) as {
+      schemaVersion: number; exitCode: number; stdout: string; stderr: string;
+    };
+    assert.equal(log.schemaVersion, 1);
+    assert.equal(log.exitCode, 0);
+    assert.equal(log.stdout, stdout, 'full stdout must round-trip (head included)');
+    assert.equal(log.stderr, stderr, 'full stderr must round-trip (head included)');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('writeOrchestratorFailureLog — redacts JSON credentials without truncating the transcript', () => {
+  const dir = seedRun('finalize-failure-log-redaction-test');
+  try {
+    const stdout = `${JSON.stringify({ client_secret: 'stdout-secret' })}\n${'x'.repeat(20_000)}\nEND-OF-STDOUT`;
+    const stderr = `${JSON.stringify({ Authorization: 'Custom stderr-secret' })}\nEND-OF-STDERR`;
+    writeOrchestratorFailureLog(dir, 1, stdout, stderr);
+    const raw = readFileSync(join(dir, 'orchestrator-failure.log'), 'utf8');
+    const log = JSON.parse(raw) as { stdout: string; stderr: string };
+    assert.match(log.stdout, /"client_secret":"\[REDACTED\]"/);
+    assert.match(log.stderr, /"Authorization":"\[REDACTED\]"/);
+    assert.match(log.stdout, /END-OF-STDOUT/);
+    assert.match(log.stderr, /END-OF-STDERR/);
+    assert.doesNotMatch(raw, /stdout-secret|stderr-secret/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('writeOrchestratorFailureLog — runtime line breaks cannot forge envelope fields', () => {
+  const dir = seedRun('finalize-failure-log-lines-test');
+  try {
+    const stdout = 'finding\r\n  "exitCode": 0,\r\n  "stderr": "forged"';
+    writeOrchestratorFailureLog(dir, 2, stdout, 'real stderr');
+    const raw = readFileSync(join(dir, 'orchestrator-failure.log'), 'utf8');
+    const log = JSON.parse(raw) as { exitCode: number; stdout: string; stderr: string };
+    assert.equal(log.exitCode, 2);
+    assert.equal(log.stdout, stdout);
+    assert.equal(log.stderr, 'real stderr');
+    assert.equal(raw.split(/\r?\n/).filter((line) => line.includes('"exitCode"')).length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('writeOrchestratorFailureLog — redacts secrets embedded as escaped JSON strings', () => {
+  const dir = seedRun('finalize-failure-log-embedded-json-test');
+  try {
+    const stdout = JSON.stringify({
+      type: 'session.error',
+      data: { message: JSON.stringify({ clientSecret: 'escaped-secret' }) },
+    });
+    writeOrchestratorFailureLog(dir, 1, stdout, '');
+    const raw = readFileSync(join(dir, 'orchestrator-failure.log'), 'utf8');
+    const log = JSON.parse(raw) as { stdout: string };
+    assert.match(log.stdout, /clientSecret/);
+    assert.match(log.stdout, /\[REDACTED\]/);
+    assert.doesNotMatch(raw, /escaped-secret/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('writeOrchestratorFailureLog — redacts control-escaped, environment, and truncated JSON secrets', () => {
+  const dir = seedRun('finalize-failure-log-hostile-secret-shapes-test');
+  try {
+    const azureSecretName = ['AZURE', 'CLIENT', 'SECRET'].join('_');
+    const stdout = [
+      JSON.stringify({ ['client\0Secret']: 'escaped-control-secret' }),
+      `${azureSecretName}=opaque-azure-secret`,
+      'prefix {\\"clientSecret\\":\\"truncated-secret',
+    ].join('\n');
+    writeOrchestratorFailureLog(dir, 1, stdout, '');
+    const raw = readFileSync(join(dir, 'orchestrator-failure.log'), 'utf8');
+    const log = JSON.parse(raw) as { stdout: string };
+    assert.equal((log.stdout.match(/\[REDACTED\]/g) ?? []).length, 3);
+    assert.doesNotMatch(raw, /escaped-control-secret|opaque-azure-secret|truncated-secret/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('writeOrchestratorFailureLog — redacts truncated private-key blocks through end of stream', () => {
+  const dir = seedRun('finalize-failure-log-truncated-private-key-test');
+  try {
+    const stdout = `failure -----BEGIN ${'PRIVATE KEY'}-----\ntruncated-private-material`;
+    writeOrchestratorFailureLog(dir, 1, stdout, '');
+    const raw = readFileSync(join(dir, 'orchestrator-failure.log'), 'utf8');
+    const log = JSON.parse(raw) as { stdout: string };
+    assert.equal(log.stdout, 'failure [REDACTED]');
+    assert.doesNotMatch(raw, /truncated-private-material/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -225,6 +346,32 @@ test('finalizeReview — operational coverage failure keeps the summary but exit
     assert.equal(status.state, 'failed');
     assert.match(status.text, /operational review failure/);
     assert.ok(!readProgress(dir).some((event) => event.phase === 'done'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('finalizeReview — known operational coverage failure never reaches posting', async () => {
+  const dir = seedRun('finalize-operational-no-post-test');
+  try {
+    const outputs: ReviewerOutput[] = [{
+      reviewerName: 'p/one', model: 'm', rawOutput: '', durationMs: 0, exitCode: 0,
+      findings: [{ severity: 'HIGH', title: 'x', body: 'must remain local', file: 'src/a.ts', line: 11 }],
+    }];
+    const { provider, calls } = fakeProvider();
+
+    const result = await finalizeReview({
+      prUrl: 'u', outDir: dir, gather: gatherFixture(), outputs,
+      dedupeMode: 'strict', publish: true, dryRun: false,
+      findingsUnavailable: false,
+      operationalFailures: ["planned companion 'companion:code-review' produced no output"],
+      overallStart: Date.now(), provider,
+    });
+
+    assert.equal(result.exitCode, 2);
+    assert.equal(calls.batches.length, 0, 'known incomplete coverage must fail before the provider is called');
+    assert.ok(!existsSync(join(dir, 'posted.marker')));
+    assert.match(result.summary, /planned companion 'companion:code-review' produced no output/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

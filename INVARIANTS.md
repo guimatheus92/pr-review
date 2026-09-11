@@ -315,12 +315,13 @@ Finding nothing is a valid result. Not recording is not.
 
 Ceiling, declared rather than implied: `model` is what pr-review *asked for*
 after `normalizeModel`, not necessarily what served the session. `auto` is a
-delegation. When the runtime reports the concrete model it selected, each
-runtime attempt records that value separately from the requested model. A
-Copilot recovery from `auto` reuses the authenticated concrete model selected
-for the initial attempt; if that selection was not captured, recovery fails
-closed rather than inventing a model. A run needing a specific model requested
-must still pin `--default-model`.
+delegation. When Copilot reports one valid pre-dispatch Auto route, the runtime
+attempt records it separately from the requested model; it is root-session
+routing evidence, not per-reviewer served-model evidence. Selective reviewer
+redispatch from `auto` reuses that authenticated root route from the initial
+attempt; if it was not captured, the run cannot complete or redispatch rather
+than inventing a model. A run needing a specific model requested must still pin
+`--default-model`.
 
 **Why:** "Why didn't it apply my rule?" is unanswerable without the routing
 table, and an unrecorded capability inventory means a run cannot be audited
@@ -329,10 +330,12 @@ under `--runtime auto` no caller can tell from its own arguments which agent CLI
 hosted the session, so without the record nothing on disk can prove it.
 
 **Enforced:** `src/commands/review.ts`, `src/plugins/loader.ts`,
-`src/plugins/installed.ts`, `src/dispatch/pass-select.ts`
+`src/plugins/installed.ts`, `src/dispatch/pass-select.ts`,
+`src/dispatch/single-session.ts`
 
 **Verified:** `tests/installed-plugins.test.ts`, `tests/pass-select.test.ts`,
-`tests/skills-smoke.test.ts`
+`tests/skills-smoke.test.ts`, `tests/single-session-retry.test.ts`,
+`tests/verify.test.ts`
 
 **Check:** run
 
@@ -388,9 +391,10 @@ silently inherit another's.
 
 ### INV-CTX-06 — Companion execution uses materialized review inputs
 
-**Always:** Companion plugins are discovered before dispatch, but their review
-criteria are copied into the run directory and hash-bound into the authenticated
-dispatch plan. Every companion then runs as a generic analysis task over the
+**Always:** Companion plugins are discovered before dispatch, and only plugins
+reported enabled for the selected runtime and current project are eligible. Their
+review criteria are copied into the run directory and hash-bound into the
+authenticated dispatch plan. Every companion then runs as a generic analysis task over the
 same materialized PR context and authoritative project rules as other passes; a
 companion command that assumes shell, network, checkout instructions, or direct
 PR posting is never invoked inside the confined review session. Copilot review
@@ -537,7 +541,12 @@ content is an exact valid `Finding[]`. The fallback uses create-only semantics
 and then enters the same validation, digest, promotion, recovery, and posting
 gates as an agent-written sidecar. It never replaces an existing invalid file,
 adopts prose or malformed JSON, guesses between duplicate task identities, or
-trusts a nested subagent event as top-level delivery.
+trusts a nested subagent event as top-level delivery. Runtime argv is validated
+before an attempt is reserved, and a crash-surviving sidecar can be promoted
+only when a matching non-rejected runtime attempt is authenticated in delivery
+state. A failed fallback publication remains a bounded attempt diagnostic; it
+does not reject the completed runtime launch, discard another valid sidecar, or
+erase captured Auto-route provenance.
 
 **Why:** In a live 18-reviewer run, six tasks successfully returned `[]` but did
 not create their required sidecars because they chose PowerShell for the write

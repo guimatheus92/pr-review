@@ -412,6 +412,73 @@ test('runStatus — terminal schema-v1 delivery remains failed', () => {
   }
 });
 
+test('runStatus — terminal delivery surfaces authenticated runtime cause and model provenance', () => {
+  const id = 'status-test-runtime-cause';
+  const dir = seed(id);
+  let controlDir = '';
+  try {
+    const state = deliveryState('terminal-incomplete');
+    state.runtimeAttempts = [{
+      number: 2,
+      kind: 'automatic-recovery',
+      reviewers: ['reviewer-18'],
+      startedAt: new Date(0).toISOString(),
+      endedAt: new Date(1).toISOString(),
+      exitCode: 1,
+      timedOut: false,
+      timeoutMs: 1000,
+      durationMs: 1,
+      requestedModel: 'gpt-5.6-luna',
+      resolvedModel: 'gpt-5.4',
+      runtimeError: 'Execution failed: 400 advisor tool is not supported',
+    }];
+    writeFileSync(join(dir, 'run.pid'), String(DEAD_PID), 'utf8');
+    controlDir = seedRecoveryAuthority(dir, state);
+    writeFileSync(join(dir, 'delivery-state.json'), JSON.stringify({ ...state, runtimeAttempts: [] }), 'utf8');
+
+    const result = runStatus(id);
+
+    assert.equal(result.state, 'failed');
+    assert.match(result.text, /requested model gpt-5\.6-luna/);
+    assert.match(result.text, /resolved model gpt-5\.4/);
+    assert.match(result.text, /400 advisor tool is not supported/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    if (controlDir) rmSync(controlDir, { recursive: true, force: true });
+  }
+});
+
+test('runStatus — the latest attempt remains primary when only an earlier attempt has a runtime error', () => {
+  const id = 'status-test-latest-runtime-cause';
+  const dir = seed(id);
+  let controlDir = '';
+  try {
+    const state = deliveryState('terminal-incomplete');
+    state.runtimeAttempts = [
+      {
+        number: 1, kind: 'initial', reviewers: ['reviewer-18'], startedAt: new Date(0).toISOString(), endedAt: new Date(1).toISOString(),
+        exitCode: 1, timedOut: false, timeoutMs: 1000, durationMs: 1, requestedModel: 'auto', resolvedModel: 'gpt-5.6-luna',
+        runtimeError: 'initial rate limit',
+      },
+      {
+        number: 2, kind: 'automatic-recovery', reviewers: ['reviewer-18'], startedAt: new Date(2).toISOString(), endedAt: new Date(3).toISOString(),
+        exitCode: 127, timedOut: false, timeoutMs: 1000, durationMs: 1, requestedModel: 'gpt-5.6-luna',
+      },
+    ];
+    writeFileSync(join(dir, 'run.pid'), String(DEAD_PID), 'utf8');
+    controlDir = seedRecoveryAuthority(dir, state);
+
+    const result = runStatus(id);
+
+    assert.match(result.text, /Runtime attempt 2 \(automatic-recovery\)/);
+    assert.match(result.text, /exit 127/);
+    assert.doesNotMatch(result.text, /initial rate limit/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    if (controlDir) rmSync(controlDir, { recursive: true, force: true });
+  }
+});
+
 test('runStatus — missing run dir', () => {
   assert.equal(runStatus('status-test-does-not-exist-zzz').state, 'missing');
 });

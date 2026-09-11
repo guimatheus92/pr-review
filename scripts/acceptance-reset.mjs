@@ -85,9 +85,16 @@ function credential(...names) {
   return undefined;
 }
 
-function cli(file, args) {
+export function resolveCliToken(file, args) {
   try {
-    const out = execFileSync(file, args, { stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' }).trim();
+    const windows = process.platform === 'win32';
+    if (windows && [file, ...args].some((value) =>
+      typeof value !== 'string' || !value || /[\u0000-\u001f\u007f"&|<>()^%!]/.test(value))) {
+      return null;
+    }
+    const executable = windows ? (process.env.ComSpec ?? 'cmd.exe') : file;
+    const executableArgs = windows ? ['/d', '/s', '/c', file, ...args] : args;
+    const out = execFileSync(executable, executableArgs, { stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' }).trim();
     return out.length > 0 ? out : null;
   } catch {
     return null;
@@ -97,12 +104,12 @@ function cli(file, args) {
 /** @returns {{scheme: 'bearer'|'basic'|'token', value: string}} */
 export function resolveToken(provider, host) {
   if (provider === 'github') {
-    const token = credential('GITHUB_TOKEN', 'GH_TOKEN') ?? cli('gh', ['auth', 'token']);
+    const token = credential('GITHUB_TOKEN', 'GH_TOKEN') ?? resolveCliToken('gh', ['auth', 'token']);
     if (!token) throw new Error('no GitHub token: set GITHUB_TOKEN, add it to .env, or run `gh auth login`');
     return { scheme: 'bearer', value: token };
   }
   if (provider === 'gitlab') {
-    const token = credential('GITLAB_TOKEN', 'GITLAB_ACCESS_TOKEN') ?? cli('glab', ['config', 'get', 'token', '-h', host ?? 'gitlab.com']);
+    const token = credential('GITLAB_TOKEN', 'GITLAB_ACCESS_TOKEN') ?? resolveCliToken('glab', ['config', 'get', 'token', '-h', host ?? 'gitlab.com']);
     if (!token) throw new Error('no GitLab token: set GITLAB_TOKEN (scope `api`) in the environment or .env, or run `glab auth login`');
     return { scheme: 'bearer', value: token };
   }
@@ -111,7 +118,7 @@ export function resolveToken(provider, host) {
     if (pat) return { scheme: 'basic', value: Buffer.from(`:${pat}`).toString('base64') };
     const bearer =
       credential('AZURE_DEVOPS_BEARER') ??
-      cli('az', ['account', 'get-access-token', '--resource', '499b84ac-1321-427f-aa17-267ca6975798', '--query', 'accessToken', '-o', 'tsv']);
+      resolveCliToken('az', ['account', 'get-access-token', '--resource', '499b84ac-1321-427f-aa17-267ca6975798', '--query', 'accessToken', '-o', 'tsv']);
     if (!bearer) {
       throw new Error('no Azure DevOps credential: set AZURE_DEVOPS_PAT (Code read+write, PR Threads read+write) in the environment or .env, or run `az login`');
     }

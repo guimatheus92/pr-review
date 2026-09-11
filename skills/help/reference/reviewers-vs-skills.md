@@ -50,7 +50,7 @@ Valid `--skip` / `skip_reviewers` names are **pass names** — the full `<pack>/
 
 - **Verifier** — still a pipeline step, not a skill. Its brief (`VERIFIER_BRIEF` in `src/dispatch/single-session.ts`) is written to `verifier.md` and dispatched as a generic agent when phase 1 produced a CRITICAL/HIGH finding.
 - **Codex** — the optional second-opinion sibling process, unchanged; it reads `skills-project.md` when pass selection leaves shared project context, or the budgeted `skills-all.md` union as fallback.
-- **Companion plugins** — pr-review-toolkit's direct agents receive the same shared file as Codex and the verifier. The `code-review` slash companion receives the PR URL through its command, not a shared skills file.
+- **Companion plugins** — each installed companion criterion is copied into a hash-bound run-local brief and dispatched through a generic agent. Every planned companion identity, up to seven, reads the same `skills-project.md` or `skills-all.md` shared file as Codex and the verifier; `code-review` consumes the materialized PR diff rather than invoking its native URL/`gh` workflow.
 
 ## Frontmatter quick reference
 

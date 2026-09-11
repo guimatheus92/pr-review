@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadAll } from '../src/plugins/loader.js';
@@ -9,6 +9,7 @@ import {
   companionDispatchCount,
   companionReviewerNames,
   detectClaudePlugins,
+  parseClaudePluginListJson,
   parseInstalledPluginsState,
   declaresEmptyPluginList,
   parsePluginListOutput,
@@ -178,6 +179,118 @@ test('parseInstalledPluginsJson — claude runtime plugin detection', async () =
   });
   const names = parseInstalledPluginsJson(raw);
   assert.deepEqual(names.sort(), ['code-review', 'codex', 'pr-review-toolkit']);
+});
+
+test('parseClaudePluginListJson — only effective enabled companion identities become root selectors', () => {
+  const activeRoot = join(tmpdir(), 'active-toolkit');
+  const parsed = parseClaudePluginListJson(JSON.stringify([
+    { id: 'pr-review-toolkit@market-a', version: '2.0.0', enabled: true, installPath: activeRoot },
+    { id: 'code-review@market-b', version: '3.0.0', enabled: false, installPath: join(tmpdir(), 'disabled') },
+    { id: 'unrelated@market-c' },
+  ]));
+
+  assert.equal(parsed.detectionError, undefined);
+  assert.deepEqual(parsed.installed.sort(), ['code-review', 'pr-review-toolkit', 'unrelated']);
+  assert.deepEqual(parsed.activeClaudePlugins, [{
+    key: 'pr-review-toolkit@market-a', version: '2.0.0', root: activeRoot,
+  }]);
+});
+
+// Shape copied verbatim from `claude plugin list --json` on a machine where the
+// acceptance matrix failed all three claude cells: one user-scope install plus two
+// project-scope installs of the SAME id for an unrelated project, differing only by
+// drive-letter case. The list is not cwd-filtered, so reading it as if it were turned
+// another project's installs into a conflict and dropped all 7 companion dispatches.
+const REAL_PLUGIN_LIST = [
+  {
+    id: 'code-review@claude-plugins-official', version: '3deb821cb71c', scope: 'user',
+    enabled: true, installPath: join(tmpdir(), 'cache', 'code-review', '3deb821cb71c'),
+  },
+  {
+    id: 'code-review@claude-plugins-official', version: '3ea32df27be7', scope: 'project',
+    enabled: true, installPath: join(tmpdir(), 'cache', 'code-review', '3ea32df27be7'),
+    projectPath: 'C:\\Users\\guilh\\repos\\PrecoPratico',
+  },
+  {
+    id: 'code-review@claude-plugins-official', version: '3b600518a637', scope: 'project',
+    enabled: true, installPath: join(tmpdir(), 'cache', 'code-review', '3b600518a637'),
+    projectPath: 'c:\\Users\\guilh\\repos\\PrecoPratico',
+  },
+];
+
+test('parseClaudePluginListJson — another project\'s installs never become a conflict', () => {
+  const parsed = parseClaudePluginListJson(
+    JSON.stringify(REAL_PLUGIN_LIST),
+    'C:\\Users\\guilh\\repos\\pr-review',
+  );
+
+  assert.equal(parsed.detectionError, undefined);
+  assert.deepEqual(parsed.activeClaudePlugins, [{
+    key: 'code-review@claude-plugins-official',
+    version: '3deb821cb71c',
+    root: join(tmpdir(), 'cache', 'code-review', '3deb821cb71c'),
+  }]);
+});
+
+test('parseClaudePluginListJson — a project-scoped install governs subdirectories of its project', () => {
+  // Inside that project the two entries genuinely are ambiguous: same id, same
+  // project, different versions. Failing closed there is the point of the check,
+  // and case-folding is what makes `c:` and `C:` one project rather than two.
+  for (const cwd of [
+    'C:\\Users\\guilh\\repos\\PrecoPratico',
+    'C:\\Users\\guilh\\repos\\PrecoPratico\\apps\\backend',
+  ]) {
+    const parsed = parseClaudePluginListJson(JSON.stringify(REAL_PLUGIN_LIST), cwd);
+    assert.match(parsed.detectionError ?? '', /conflicting active installations/, `cwd=${cwd}`);
+  }
+});
+
+test('parseClaudePluginListJson — plugin-derived detection errors are single-line and bounded', () => {
+  const parsed = parseClaudePluginListJson(JSON.stringify([
+    {
+      id: 'pr-review-toolkit@market\nFORGED', enabled: true, version: '1.0.0',
+      installPath: join(tmpdir(), 'one'),
+    },
+    {
+      id: 'pr-review-toolkit@market\nFORGED', enabled: true, version: '2.0.0',
+      installPath: join(tmpdir(), 'two'),
+    },
+  ]));
+
+  assert.match(parsed.detectionError ?? '', /conflicting active installations/);
+  assert.doesNotMatch(parsed.detectionError ?? '', /[\r\n]/);
+  assert.ok((parsed.detectionError ?? '').length <= 1_000);
+});
+
+test('detectCompanions — Claude dispatches enabled companions only', async () => {
+  const { detectCompanions } = await import('../src/plugins/companions.js');
+  const dir = mkdtempSync(join(tmpdir(), 'pr-review-claude-list-'));
+  try {
+    const activeRoot = join(dir, 'active-toolkit');
+    const output = JSON.stringify([
+      { id: 'pr-review-toolkit@market-a', version: '2.0.0', enabled: true, installPath: activeRoot },
+      { id: 'code-review@market-b', version: '3.0.0', enabled: false, installPath: join(dir, 'disabled') },
+    ]);
+    const script = join(dir, 'fake-claude.mjs');
+    writeFileSync(script, `process.stdout.write(${JSON.stringify(output)});`, 'utf8');
+    const binary = process.platform === 'win32' ? join(dir, 'fake-claude.cmd') : join(dir, 'fake-claude');
+    if (process.platform === 'win32') {
+      writeFileSync(binary, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`, 'utf8');
+    } else {
+      writeFileSync(binary, `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`, 'utf8');
+      chmodSync(binary, 0o755);
+    }
+
+    const state = await detectCompanions(binary, 'claude');
+    assert.deepEqual(state.installed.sort(), ['code-review', 'pr-review-toolkit']);
+    assert.deepEqual(state.recognized, ['pr-review-toolkit']);
+    assert.deepEqual(state.activeClaudePlugins, [{
+      key: 'pr-review-toolkit@market-a', version: '2.0.0', root: activeRoot,
+    }]);
+    assert.deepEqual(state.missing, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('detectClaudePlugins — an absent registry means no plugins are installed', () => {

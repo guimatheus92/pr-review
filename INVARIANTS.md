@@ -315,9 +315,13 @@ Finding nothing is a valid result. Not recording is not.
 
 Ceiling, declared rather than implied: `model` is what pr-review *asked for*
 after `normalizeModel`, not necessarily what served the session. `auto` is a
-delegation — the Copilot CLI picks and reports the pick nowhere, its own logs
-at default level included. A run needing a specific model attributed must pin
-`--model`.
+delegation. When Copilot reports one valid pre-dispatch Auto route, the runtime
+attempt records it separately from the requested model; it is root-session
+routing evidence, not per-reviewer served-model evidence. Selective reviewer
+redispatch from `auto` reuses that authenticated root route from the initial
+attempt; if it was not captured, the run cannot complete or redispatch rather
+than inventing a model. A run needing a specific model requested must still pin
+`--default-model`.
 
 **Why:** "Why didn't it apply my rule?" is unanswerable without the routing
 table, and an unrecorded capability inventory means a run cannot be audited
@@ -326,10 +330,12 @@ under `--runtime auto` no caller can tell from its own arguments which agent CLI
 hosted the session, so without the record nothing on disk can prove it.
 
 **Enforced:** `src/commands/review.ts`, `src/plugins/loader.ts`,
-`src/plugins/installed.ts`, `src/dispatch/pass-select.ts`
+`src/plugins/installed.ts`, `src/dispatch/pass-select.ts`,
+`src/dispatch/single-session.ts`
 
 **Verified:** `tests/installed-plugins.test.ts`, `tests/pass-select.test.ts`,
-`tests/skills-smoke.test.ts`
+`tests/skills-smoke.test.ts`, `tests/single-session-retry.test.ts`,
+`tests/verify.test.ts`
 
 **Check:** run
 
@@ -380,6 +386,41 @@ silently inherit another's.
 `src/dispatch/single-session.ts`
 
 **Verified:** `tests/runtime.test.ts`, `tests/session-context.test.ts`
+
+**Check:** run
+
+### INV-CTX-06 — Companion execution uses materialized review inputs
+
+**Always:** Companion plugins are discovered before dispatch, and only plugins
+reported enabled for the selected runtime and current project are eligible. Their
+review criteria are copied into the run directory and hash-bound into the
+authenticated dispatch plan. Every companion then runs as a generic analysis task over the
+same materialized PR context and authoritative project rules as other passes; a
+companion command that assumes shell, network, checkout instructions, or direct
+PR posting is never invoked inside the confined review session. Copilot review
+sessions disable automatic plugin discovery, so unrelated installed plugin
+hooks and instructions cannot enter the run.
+
+Companions are OPTIONAL coverage layered on the skill passes, so one that cannot
+be materialized is dropped and named as degraded coverage — never fatal, and never
+left in the planned roster, because a planned reviewer that is not dispatched reads
+as missing output under INV-DEL-01. Eligibility is scoped by pr-review, not assumed
+from the runtime: `claude plugin list --json` reports every project-scoped install
+on the machine regardless of the invocation directory.
+
+**Why:** A live review loaded an unrelated AVD plugin into every reviewer and
+ran 35 `userPromptSubmitted` hooks, each timing out after 45 seconds. The
+`code-review` companion simultaneously received only a PR URL even though its
+upstream command requires `gh pr view` / `gh pr diff`, while the review runtime
+correctly denied shell and posting. Installed plugin state is useful discovery
+input; it is not a deterministic execution environment.
+
+**Enforced:** `src/plugins/installed.ts`, `src/plugins/companions.ts`,
+`src/commands/review.ts`, `src/dispatch/single-session.ts`,
+`src/dispatch/runtime.ts`
+
+**Verified:** `tests/installed-plugins.test.ts`, `tests/session-context.test.ts`,
+`tests/loader.test.ts`, `tests/runtime.test.ts`
 
 **Check:** run
 
@@ -496,6 +537,37 @@ review that looks whole and is not, with no signal about what is missing.
 **Enforced:** `src/commands/review.ts`, `src/dispatch/delivery.ts`
 
 **Verified:** `tests/finalize-failure.test.ts`, `tests/resume.test.ts`
+
+**Check:** run
+
+### INV-DEL-04 — A runtime result can recover only its own missing sidecar
+
+**Always:** On Copilot, a successful task result from the runtime's structured
+JSON event stream may materialize an attempt sidecar only when the expected file
+is absent, the task maps uniquely to one planned reviewer and attempt, and its
+content is an exact valid `Finding[]`. The fallback uses create-only semantics
+and then enters the same validation, digest, promotion, recovery, and posting
+gates as an agent-written sidecar. It never replaces an existing invalid file,
+adopts prose or malformed JSON, guesses between duplicate task identities, or
+trusts a nested subagent event as top-level delivery. Runtime argv is validated
+before an attempt is reserved, and a crash-surviving sidecar can be promoted
+only when a matching non-rejected runtime attempt is authenticated in delivery
+state. A failed fallback publication remains a bounded attempt diagnostic; it
+does not reject the completed runtime launch, discard another valid sidecar, or
+erase captured Auto-route provenance.
+
+**Why:** In a live 18-reviewer run, six tasks successfully returned `[]` but did
+not create their required sidecars because they chose PowerShell for the write
+and shell was correctly denied. Node then discarded results it had received and
+sent seven reviewers into recovery. The runtime already emits a structured,
+task-identified result; losing it solely because the model chose the wrong write
+tool adds failure without adding authority.
+
+**Enforced:** `src/dispatch/runtime-events.ts`,
+`src/dispatch/single-session.ts`, `src/dispatch/delivery.ts`
+
+**Verified:** `tests/runtime-events.test.ts`, `tests/delivery.test.ts`,
+`tests/single-session-retry.test.ts`
 
 **Check:** run
 

@@ -117,6 +117,19 @@ function seedPlannedPartialRun(
   const state = createDeliveryState(plan, inventory);
   state.reviewerAttempts['pack/valid'] = 1;
   state.reviewerAttempts['pack/missing'] = 2;
+  state.runtimeAttempts.push({
+    number: 1,
+    kind: 'initial',
+    reviewers: plan.reviewers.map((reviewer) => reviewer.name),
+    startedAt: new Date(0).toISOString(),
+    endedAt: new Date(1).toISOString(),
+    exitCode: 0,
+    timedOut: false,
+    timeoutMs: plan.timeoutMs,
+    durationMs: 1,
+    requestedModel: 'auto',
+    resolvedModel: 'gpt-5.6-luna',
+  });
   writeDeliveryState(state, ctx.deliveryStatePath!, ctx.authoritativeDeliveryStatePath!);
   return {
     dir,
@@ -185,6 +198,19 @@ function enableCodexOnSeed(seeded: ReturnType<typeof seedPlannedPartialRun>) {
   const state = createDeliveryState(plan, inventory);
   state.reviewerAttempts['pack/valid'] = 1;
   state.reviewerAttempts['pack/missing'] = 2;
+  state.runtimeAttempts.push({
+    number: 1,
+    kind: 'initial',
+    reviewers: plan.reviewers.map((reviewer) => reviewer.name),
+    startedAt: new Date(0).toISOString(),
+    endedAt: new Date(1).toISOString(),
+    exitCode: 0,
+    timedOut: false,
+    timeoutMs: plan.timeoutMs,
+    durationMs: 1,
+    requestedModel: 'auto',
+    resolvedModel: 'gpt-5.6-luna',
+  });
   state.codex = { state: 'pending', attempts: 1 };
   writeDeliveryState(state, ctx.deliveryStatePath!, ctx.authoritativeDeliveryStatePath!);
   return { plan, state };
@@ -585,6 +611,33 @@ test('resume — schema-v1 partial run dispatches only unresolved reviewer at at
   }
 });
 
+test('resume — legacy Copilot Auto run without resolved model fails closed before spawn', async () => {
+  const seeded = seedPlannedPartialRun();
+  try {
+    const statePath = join(seeded.dir, 'delivery-state.json');
+    const authorityPath = join(controlDirForRun(seeded.dir, TEST_HOME), 'delivery-state.json');
+    const state = JSON.parse(readFileSync(statePath, 'utf8')) as DeliveryState;
+    delete state.runtimeAttempts[0]!.resolvedModel;
+    writeDeliveryState(state, statePath, authorityPath);
+    let spawnCalls = 0;
+
+    await assert.rejects(
+      resumePlannedSession(seeded.plan, statePath, authorityPath, async () => {
+        spawnCalls++;
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }),
+      /initial root Auto route was not captured.*fresh review.*--default-model/s,
+    );
+    assert.equal(spawnCalls, 0);
+    const persisted = JSON.parse(readFileSync(statePath, 'utf8')) as DeliveryState;
+    assert.equal(persisted.reviewerAttempts['pack/missing'], 2, 'a recovery that never spawned consumes no attempt');
+    assert.equal(persisted.kind, 'terminal-incomplete');
+    assert.deepEqual(persisted.reasonCodes, ['auto-model-provenance-missing']);
+  } finally {
+    seeded.cleanup();
+  }
+});
+
 test('resume — concurrent schema-v1 recovery admits one owner and status reports it running', async () => {
   const seeded = seedPlannedPartialRun(true);
   let releaseRecovery!: () => void;
@@ -864,9 +917,7 @@ test('resume — a companion that produced no output makes the RESUMED run exit 
   }
 });
 
-test('resume — a complete companion roster leaves the resumed run at exit 0', async () => {
-  // The other half: without this, a check that always returned a failure would
-  // satisfy the test above and break every clean resume.
+test('resume — a roster that claims complete without companion output exits 2 before posting', async () => {
   const seeded = seedPlannedPartialRun();
   completeSeededDelivery(seeded);
   try {
@@ -875,7 +926,7 @@ test('resume — a complete companion roster leaves the resumed run at exit 0', 
       JSON.stringify({ plannedReviewers: ['companion:code-review'], missingReviewers: [], duplicateReviewers: [] }),
       'utf8',
     );
-    const { provider } = fakeProvider();
+    const { provider, calls } = fakeProvider();
     const result = await runReview({
       homeOverride: TEST_HOME,
       prUrl: 'u',
@@ -888,7 +939,9 @@ test('resume — a complete companion roster leaves the resumed run at exit 0', 
         throw new Error('a complete delivery must not re-dispatch');
       },
     });
-    assert.equal(result.exitCode, 0);
+    assert.equal(result.exitCode, 2);
+    assert.match(result.summary, /code-review/);
+    assert.equal(calls.batches.length + calls.singles.length, 0);
   } finally {
     seeded.cleanup();
   }

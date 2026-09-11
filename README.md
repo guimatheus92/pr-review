@@ -210,6 +210,7 @@ hosts:
 /pr-review <pr-url> --lang pt-BR           # language for finding titles/bodies (default: en)
 /pr-review <pr-url> --fail-on high         # exit 1 if any high/critical finding survives dedupe
 /pr-review <pr-url> --runtime claude       # host the session in Claude Code instead of Copilot CLI
+/pr-review <pr-url> --default-model <id>   # request a runtime model instead of the normalized default
 /pr-review <pr-url> --no-codex             # skip the Codex second-opinion reviewer
 /pr-review <pr-url> --no-companions        # skip installed companion plugins (pr-review-toolkit, code-review)
 /pr-review <pr-url> --detach               # run in the background; poll with `pr-review status <run-id>`
@@ -304,6 +305,8 @@ When the `codex` CLI is installed, an optional `codex` second-opinion reviewer r
 
 Installed [companion plugins](skills/help/reference/companion-plugins.md) (pr-review-toolkit, code-review) are dispatched inside the same session when present; `--no-companions` or `invoke_companions: false` opts out.
 
+Companion installation is discovery input, not runtime authority. The CLI resolves each recognized companion from the selected runtime's effective enabled plugin set for the current project, copies its review criteria into `companion-brief-*.md` under the run directory, hash-binds those files in the dispatch plan, and runs every planned companion identity (up to seven when both known plugins are active) as a generic agent over the same `pr-context.md` and authoritative project rules as other passes. Copilot sessions disable automatic plugin discovery, so unrelated installed-plugin hooks and instructions do not enter the review. The `code-review` adapter keeps its high-signal and false-positive criteria but does not invoke its `gh` acquisition, model-specific fan-out, or posting steps.
+
 <details>
 <summary><b>Installed plugins as a capability source, and the MCP inventory</b></summary>
 <br>
@@ -320,7 +323,11 @@ A full review takes roughly 6–10 minutes. `pr-review review <url> --detach` re
 <summary><b>Delivery, recovery and resume in detail</b></summary>
 <br>
 
-Each task call carries the runtime-required `description` and writes exact `Finding[]` JSON to `reviewer-attempts/<reviewer>/attempt-N.json`. Node validates and promotes it to a collision-resistant, write-once `raw-<reviewer>.json`; the LLM orchestrator only dispatches tasks and never aggregates results. If the initial session delivers only part of the planned set, Node preserves every valid sidecar and runs one automatic recovery session containing only missing/invalid reviewers. A still-incomplete run exits 2 and `--resume <run-id>` gets the bounded final targeted attempt. Partial findings are diagnostic evidence only: they are never deduped or posted.
+Each task call carries the required `description`; Copilot task calls additionally carry a deterministic name for structured-event correlation. Reviewers write exact `Finding[]` JSON to `reviewer-attempts/<reviewer>/attempt-N.json`. Node validates and promotes it to a collision-resistant, write-once `raw-<reviewer>.json`; the LLM orchestrator only dispatches tasks and never aggregates results. Copilot also emits structured task results. When an expected attempt file is absent, Node may create it from exactly one successful, correctly named top-level task result whose content is already a valid `Finding[]`; it never replaces an existing invalid file, accepts prose, or guesses between duplicate identities. The adopted bytes then go through the same validation, digest, and promotion path as an agent-written file.
+
+The structured-event fallback is bounded to a 64 MiB stream, 20,000 nonblank events, 256 task starts, and 1 MiB per task result. A malformed JSON line, conflicting pre-dispatch Auto route, or stream/event/task ceiling breach disables all adoption from that process. Duplicate task names or call IDs make those identities ineligible. Agent-written sidecars remain primary in every case.
+
+Runtime argv is validated before an attempt is reserved. Each reviewer and verifier attempt then records `started`, `completed`, or `spawn-rejected` in authenticated state; only a non-rejected matching attempt can promote crash-surviving output. If the initial session delivers only part of the planned set, Node preserves every valid sidecar and runs one automatic recovery session containing only missing/invalid reviewers. For Copilot Auto, authenticated attempt state records both the requested `auto` delegation and the root Auto route reported before task dispatch; automatic and manual selective reviewer redispatches reuse that model instead of invoking Auto again. A schema-v1 Copilot Auto run without that provenance cannot complete or recover, even when every reviewer sidecar arrived, and fails closed with a fresh-run/`--default-model` instruction. The separate direct verifier continues to use the plan's requested model. A still-incomplete run exits 2 and `--resume <run-id>` gets the bounded final targeted attempt. Partial findings are diagnostic evidence only: they are never deduped or posted.
 
 After complete Phase 1 delivery, Node writes `phase1-findings.json`, decides whether HIGH/CRITICAL findings require reconciliation, runs the verifier as a separate direct session, and writes `single-session-findings.json`. The run plan, attempts, artifact hashes, verifier/Codex state, execution mode, and posting marker are mirrored in the run directory (`~/.pr-review/runs/<id>/`) and authenticated under `~/.pr-review/control/`. `status` reports counts such as `reviewers 18/22 · 14 findings · 4 missing` and prints `--dry-run` in the recovery command for a dry-run run. A complete dry run can be promoted to publishing — resume it without `--dry-run` and the previewed findings post; an incomplete one is refused (`incomplete-promotion`), and publish can never be demoted to dry-run. Previews and benign no-dispatch runs do not create recovery control. Legacy consolidated runs retain replay support; legacy Phase 1 is dry-run diagnostic evidence only.
 
@@ -343,6 +350,8 @@ pr-review review <pr-url> [flags]            # full pipeline
 #   --fail-on <severity>    critical|high|medium|low|nit → exit 1 on surviving findings
 #   --runtime <name>        copilot|claude|auto — which agent CLI hosts the session
 #                           (yaml: runtime, env: PR_REVIEW_RUNTIME; default auto)
+#   --default-model <id>    model requested from that runtime (yaml: default_model,
+#                           env: PR_REVIEW_DEFAULT_MODEL)
 #   --no-codex              skip the Codex second-opinion reviewer
 #   --no-companions         skip installed companion plugins for this run
 #   --detach                start in the background, print a run-id, return immediately
@@ -425,7 +434,7 @@ npm run build
 npm run dogfood -- --base origin/main --include-untracked  # include new, non-ignored files
 ```
 
-The command supports `github.com` origins, derives the current fork identity from `origin`, and gathers committed, staged, and unstaged changes. Untracked files require `--include-untracked`; even with opt-in, secret-bearing names and high-confidence credential content are refused before any gather or prompt artifact is written. Tracked diff hunks, including persisted context lines, are checked for high-confidence credentials too; for renames it validates both the old and new path, and the generated `dist/cli.cjs` content is excluded only after both names pass that check. Artifacts live only under `~/.pr-review/runs/`, and the CLI always receives `--dry-run`. It refuses a missing/stale bundle, so run `npm run build` first. Add `--context-only` while tuning routing. Companion plugins are disabled because URL-based companion commands cannot consume a synthetic local PR safely; exercise them against a real PR dry-run. Generated and binary artifacts remain recorded but are excluded from LLM context with an explicit reason.
+The command supports `github.com` origins, derives the current fork identity from `origin`, and gathers committed, staged, and unstaged changes. Untracked files require `--include-untracked`; even with opt-in, secret-bearing names and high-confidence credential content are refused before any gather or prompt artifact is written. Tracked diff hunks, including persisted context lines, are checked for high-confidence credentials too; for renames it validates both the old and new path, and the generated `dist/cli.cjs` content is excluded only after both names pass that check. Artifacts live only under `~/.pr-review/runs/`, and the CLI always receives `--dry-run`. It refuses a missing/stale bundle, so run `npm run build` first. Add `--context-only` while tuning routing. Companion coverage is intentionally disabled for synthetic gathers; exercise it against a real PR dry-run. Generated and binary artifacts remain recorded but are excluded from LLM context with an explicit reason.
 
 </details>
 

@@ -44,7 +44,9 @@ hosts:                           # self-hosted hostname → provider (github | a
   tfs.corp.com: azuredevops
 ```
 
-Runtime `auto` (the default) probes PATH: copilot first, then claude; it errors if neither is found. Model note: the copilot-style default `claude-opus-4.8` is mapped to `opus` for the claude runtime; models you set explicitly pass through as-is.
+Runtime `auto` (the default) chooses the host CLI by probing PATH: Copilot first, then Claude; it errors if neither is found. That setting is separate from the model. `default_model` (or `--default-model` / `PR_REVIEW_DEFAULT_MODEL`) is the model request handed to the selected runtime after normalization. The shipped `claude-opus-4.8` sentinel maps to Copilot's `auto` delegation and Claude's `opus` family alias; every other configured model string passes through unchanged.
+
+For Copilot Auto, `capabilities.json` records the requested value (`auto`) while authenticated delivery state records the root Auto route from the valid pre-dispatch `session.auto_mode_resolved` event. This is not per-reviewer served-model evidence. If a selective reviewer redispatch is needed, pr-review reuses that route rather than asking Auto to route again. A schema-v1 Copilot Auto run without this provenance cannot be completed or safely redispatched, even when every reviewer sidecar arrived; it fails closed and asks for a fresh review or an explicit `--default-model`. The separate direct verifier continues to use the plan model.
 
 ## Skill packs (`skill_packs`)
 
@@ -86,7 +88,7 @@ diff_excludes:
 | Variable | Maps to |
 |---|---|
 | `PR_REVIEW_RUNTIME` | `runtime` (also `--runtime <copilot\|claude\|auto>`; default `auto`) |
-| `PR_REVIEW_DEFAULT_MODEL` | `default_model` |
+| `PR_REVIEW_DEFAULT_MODEL` | `default_model` (also `--default-model <model>`; the requested model, separate from runtime selection) |
 | `PR_REVIEW_LANG` | `language` (also settable via `--lang <code>`; default `en`) |
 | `PR_REVIEW_SKILLS_DIR` | extra skills dir, selected like repo skill dirs (also `--skills-dir`, yaml `extra_skills_dirs`); `--force-skill <dir>` is the per-run bypass, CLI only |
 | `PR_REVIEW_NO_COMPANION_WARN` | `companion_warn: false` |

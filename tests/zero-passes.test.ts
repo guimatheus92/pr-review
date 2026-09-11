@@ -86,6 +86,31 @@ function setup(paths: string[], underRunsRoot = false) {
   };
 }
 
+function seedToolkitPlugin(home: string, runtime: 'copilot' | 'claude'): string {
+  const root = runtime === 'copilot'
+    ? join(home, '.copilot', 'installed-plugins', 'market', 'pr-review-toolkit')
+    : join(home, '.claude', 'plugins', 'cache', 'market', 'pr-review-toolkit', '1.0.0');
+  mkdirSync(join(root, '.claude-plugin'), { recursive: true });
+  mkdirSync(join(root, 'agents'), { recursive: true });
+  writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'pr-review-toolkit', version: '1.0.0' }));
+  for (const agent of ['code-reviewer', 'code-simplifier', 'comment-analyzer', 'pr-test-analyzer', 'silent-failure-hunter', 'type-design-analyzer']) {
+    writeFileSync(join(root, 'agents', `${agent}.md`), `---\nname: ${agent}\nmodel: opus\n---\n# ${agent}\ncriteria`, 'utf8');
+  }
+  if (runtime === 'copilot') {
+    mkdirSync(join(home, '.copilot'), { recursive: true });
+    writeFileSync(join(home, '.copilot', 'config.json'), JSON.stringify({
+      installedPlugins: [{ name: 'pr-review-toolkit', cache_path: root, version: '1.0.0', enabled: true }],
+    }));
+  } else {
+    mkdirSync(join(home, '.claude', 'plugins'), { recursive: true });
+    writeFileSync(join(home, '.claude', 'plugins', 'installed_plugins.json'), JSON.stringify({
+      version: 2,
+      plugins: { 'pr-review-toolkit@market': [{ installPath: root, version: '1.0.0' }] },
+    }));
+  }
+  return root;
+}
+
 const BASE = {
   prUrl: 'https://github.com/pr-review/eval/pull/1',
   dryRun: true,
@@ -425,6 +450,7 @@ test('runReview — pack URL credentials never enter run artifacts', async () =>
 test('runReview — actual missing and duplicate companion outputs fail operationally', async () => {
   const s = setup(['src/app.ts']);
   try {
+    seedToolkitPlugin(s.home, 'copilot');
     const planned = companionReviewerNames(['pr-review-toolkit']);
     const duplicate = planned[0]!;
     const output = (reviewerName: string): ReviewerOutput => ({
@@ -466,6 +492,57 @@ test('runReview — actual missing and duplicate companion outputs fail operatio
     s.restore();
   }
 });
+
+for (const runtime of ['copilot', 'claude'] as const) {
+  test(`runReview — ${runtime} registry roots materialize all toolkit companion briefs`, async () => {
+    const s = setup(['src/app.ts']);
+    try {
+      const root = seedToolkitPlugin(s.home, runtime);
+      const expected = companionReviewerNames(['pr-review-toolkit']);
+      let inspected = false;
+      const result = await runReview({
+        ...BASE,
+        runtime,
+        withCompanions: true,
+        homeOverride: s.home,
+        runDir: s.runDir,
+        fromGather: s.gatherFile,
+        provider: fakeProvider(),
+        detectCompanionsFn: async () => ({
+          installed: ['pr-review-toolkit'], recognized: ['pr-review-toolkit'], missing: [],
+          activeClaudePlugins: runtime === 'claude'
+            ? [{ key: 'pr-review-toolkit@market', version: '1.0.0', root }]
+            : undefined,
+        }),
+        selectPassesFn: () => ({
+          passes: [{ name: 'p/generic', source: '/x.md', body: 'review', matchedBy: 'baseline', matchedOn: [] }],
+          projectSkills: [], indexEntries: [], stackTags: ['typescript'],
+          routes: [{ name: 'p/generic', source: '/x.md', matchedBy: 'baseline' }], missingBaseline: [],
+        }),
+        runSingleSessionFn: async (sessionOpts, ctx) => {
+          inspected = true;
+          assert.deepEqual(sessionOpts.companionSources, [{ id: 'pr-review-toolkit', roots: [root] }]);
+          const companions = ctx.dispatchPlan!.reviewers.filter((reviewer) => reviewer.name.startsWith('companion:'));
+          assert.deepEqual(companions.map((reviewer) => reviewer.name), expected);
+          assert.ok(companions.every((reviewer) => reviewer.agentType === 'general-purpose'));
+          assert.equal(ctx.dispatchPlan!.artifacts.filter((artifact) => basename(artifact.path).startsWith('companion-brief-')).length, 6);
+          return {
+            outputs: [
+              { reviewerName: 'p/generic', model: 'm', findings: [], rawOutput: '[]', durationMs: 1, exitCode: 0 },
+              ...expected.map((reviewerName) => ({ reviewerName, model: 'm', findings: [], rawOutput: '[]', durationMs: 1, exitCode: 0 })),
+            ],
+            rawOrchestratorOutput: '', rawOrchestratorStderr: '', exitCode: 0, durationMs: 1,
+            findingsUnavailable: false,
+          };
+        },
+      });
+      assert.equal(inspected, true);
+      assert.equal(result.exitCode, 0);
+    } finally {
+      s.restore();
+    }
+  });
+}
 
 test('runReview — missing and duplicate ordinary pass outputs fail operationally', async () => {
   const s = setup(['src/app.ts']);

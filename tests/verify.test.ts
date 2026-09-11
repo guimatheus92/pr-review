@@ -13,8 +13,9 @@ import {
   type DeliveryState,
 } from '../src/dispatch/delivery.js';
 import { writePostedMarker } from '../src/util/posted-marker.js';
-import { sha256File } from '../src/util/atomic-json.js';
+import { canonicalJson, sha256, sha256File } from '../src/util/atomic-json.js';
 import { CHECKS, TEST_ONLY, loadVerifyContext, runChecks, runVerify } from '../src/commands/verify.js';
+import { NO_POSTING_DIRECTIVE } from '../src/dispatch/single-session.js';
 import type { PrProvider } from '../src/providers/types.js';
 import type { ExistingComment, Finding, PrMetadata } from '../src/types.js';
 
@@ -75,6 +76,8 @@ function healthyRun(over: {
   mutatePlan?: (plan: Record<string, unknown>) => void;
   /** Applied before the state is signed. Keeps planFingerprint intact. */
   mutateState?: (state: DeliveryState) => void;
+  /** Create artifacts first so the signed plan binds their final paths and digests. */
+  seedPlanArtifacts?: (runDir: string) => Array<{ path: string; sha256: string }>;
 } = {}): Fixture {
   const home = mkdtempSync(join(tmpdir(), 'pr-review-verify-'));
   const runDir = join(home, '.pr-review', 'runs', RUN_ID);
@@ -116,7 +119,7 @@ function healthyRun(over: {
   );
   writeFileSync(
     join(runDir, 'capabilities.json'),
-    JSON.stringify({ runtime: 'copilot', installedPlugins: [], selectedPluginSkills: [], mcpServers: [], warnings: [], usage: [] }),
+    JSON.stringify({ runtime: 'copilot', model: 'm', installedPlugins: [], selectedPluginSkills: [], mcpServers: [], warnings: [], usage: [] }),
     'utf8',
   );
   writeFileSync(
@@ -127,7 +130,8 @@ function healthyRun(over: {
   writeFileSync(join(runDir, 'pr-review-findings.json'), JSON.stringify({ finalFindings: findings, droppedCount: 0 }), 'utf8');
   writeFileSync(join(runDir, 'pr-review-summary.md'), '# PR Review Summary\n', 'utf8');
   writeFileSync(join(runDir, 'progress.ndjson'), '', 'utf8');
-  writeFileSync(join(runDir, 'raw-pack_security.json'), '{"findings":[]}', 'utf8');
+  const reviewerPath = join(runDir, 'raw-pack_security.json');
+  writeFileSync(reviewerPath, '[]', 'utf8');
   if (over.errorTxt) writeFileSync(join(runDir, ERROR_FILE), 'boom\n', 'utf8');
 
   const controlDir = controlDirForRun(runDir, home);
@@ -141,6 +145,7 @@ function healthyRun(over: {
     runtimeBinary: 'copilot',
     ...(over.repoRoot ? { repoRoot: over.repoRoot } : {}),
     disabledMcpServers: [],
+    ambientPluginsDisabled: true,
     model: 'm',
     timeoutMs: 1,
     phase1Path: join(runDir, 'phase1-findings.json'),
@@ -148,12 +153,20 @@ function healthyRun(over: {
     execution: { dryRun, publish: !dryRun, dedupeMode: 'strict' },
     configProjection: {},
     configFingerprint: 'test',
-    artifacts: [],
-    reviewers: [],
+    artifacts: over.seedPlanArtifacts?.(runDir) ?? [],
+    reviewers: [{
+      name: 'pack/security', kind: 'pass', description: 'Review security', agentType: 'general-purpose',
+      promptTemplate: '{{PR_REVIEW_OUTPUT_PATH}}', canonicalOutputPath: reviewerPath,
+      attemptsDir: join(runDir, 'reviewer-attempts', 'pack-security'), maxAttempts: 3,
+    }],
     verifier: { enabled: false, maxAttempts: 3 },
     codex: { enabled: false, contextPath: join(runDir, 'pr-context.md'), attemptsDir: join(runDir, 'codex-attempts'), maxAttempts: 3 },
   });
   over.mutatePlan?.(plan as unknown as Record<string, unknown>);
+  if (over.mutatePlan) {
+    const { fingerprint: _fingerprint, ...core } = plan;
+    plan.fingerprint = sha256(canonicalJson(core));
+  }
   writeDispatchPlan(plan, join(runDir, 'dispatch-plan.json'), join(controlDir, 'dispatch-plan.json'));
 
   const state: DeliveryState = {
@@ -167,8 +180,8 @@ function healthyRun(over: {
     invalid: [],
     recoveredFindingCount: findings.length,
     severityCounts: { CRITICAL: 0, HIGH: 1, MEDIUM: 0, LOW: 1, NIT: 0 },
-    reviewerAttempts: {},
-    reviewerDigests: {},
+    reviewerAttempts: { 'pack/security': 1 },
+    reviewerDigests: { 'pack/security': sha256File(reviewerPath) },
     runtimeAttempts: [
       {
         number: 1,
@@ -179,6 +192,9 @@ function healthyRun(over: {
         exitCode: 0,
         timedOut: false,
         timeoutMs: 1,
+        durationMs: 10_000,
+        requestedModel: 'm',
+        adoptedReviewers: [],
       },
     ],
     phase1: 'valid',
@@ -515,6 +531,326 @@ test('verify — a pass reporting MCP usage fails INV-CTX-05 despite process-lev
     f.cleanup();
   }
 });
+
+test('verify — INV-CTX-02 requires current requested model provenance', async () => {
+  const missingCapabilityModel = healthyRun();
+  try {
+    const path = join(missingCapabilityModel.runDir, 'capabilities.json');
+    const capabilities = JSON.parse(readFileSync(path, 'utf8'));
+    delete capabilities.model;
+    writeFileSync(path, JSON.stringify(capabilities), 'utf8');
+    const check = row(await rowsFor(missingCapabilityModel), 'INV-CTX-02');
+    assert.equal(check.status, 'fail');
+    assert.match(check.evidence, /requested model/i);
+  } finally {
+    missingCapabilityModel.cleanup();
+  }
+
+  const missingAttemptModel = healthyRun({
+    mutateState: (state) => { delete state.runtimeAttempts[0]!.requestedModel; },
+  });
+  try {
+    const check = row(await rowsFor(missingAttemptModel), 'INV-CTX-02');
+    assert.equal(check.status, 'fail');
+    assert.match(check.evidence, /attempt.*requested model/i);
+  } finally {
+    missingAttemptModel.cleanup();
+  }
+});
+
+test('verify — INV-CTX-02 requires reviewer recoveries to reuse the initial Auto route', async () => {
+  const setCapabilityModel = (fixture: Fixture, model: string): void => {
+    const path = join(fixture.runDir, 'capabilities.json');
+    const capabilities = JSON.parse(readFileSync(path, 'utf8'));
+    capabilities.model = model;
+    writeFileSync(path, JSON.stringify(capabilities), 'utf8');
+  };
+  const mismatched = healthyRun({
+    mutatePlan: (plan) => { plan.model = 'auto'; },
+    mutateState: (state) => {
+      state.runtimeAttempts[0]!.requestedModel = 'auto';
+      state.runtimeAttempts[0]!.resolvedModel = 'gpt-5.6-luna';
+      state.runtimeAttempts.push(
+        {
+          ...state.runtimeAttempts[0]!,
+          number: 2,
+          kind: 'automatic-recovery',
+          requestedModel: 'claude-sonnet-5',
+          resolvedModel: undefined,
+        },
+        {
+          ...state.runtimeAttempts[0]!,
+          number: 1,
+          kind: 'verifier',
+          reviewers: ['verifier'],
+          requestedModel: 'auto',
+          resolvedModel: undefined,
+        },
+      );
+    },
+  });
+  try {
+    setCapabilityModel(mismatched, 'auto');
+    const check = row(await rowsFor(mismatched), 'INV-CTX-02');
+    assert.equal(check.status, 'fail');
+    assert.match(check.evidence, /recovery.*gpt-5\.6-luna/i);
+    assert.doesNotMatch(check.evidence, /verifier/i);
+  } finally {
+    mismatched.cleanup();
+  }
+
+  const matched = healthyRun({
+    mutatePlan: (plan) => { plan.model = 'auto'; },
+    mutateState: (state) => {
+      state.runtimeAttempts[0]!.requestedModel = 'auto';
+      state.runtimeAttempts[0]!.resolvedModel = 'gpt-5.6-luna';
+      state.runtimeAttempts.push(
+        {
+          ...state.runtimeAttempts[0]!,
+          number: 2,
+          kind: 'manual-recovery',
+          requestedModel: 'gpt-5.6-luna',
+          resolvedModel: undefined,
+        },
+        {
+          ...state.runtimeAttempts[0]!,
+          number: 1,
+          kind: 'verifier',
+          reviewers: ['verifier'],
+          requestedModel: 'auto',
+          resolvedModel: undefined,
+        },
+      );
+    },
+  });
+  try {
+    setCapabilityModel(matched, 'auto');
+    assert.equal(row(await rowsFor(matched), 'INV-CTX-02').status, 'pass');
+  } finally {
+    matched.cleanup();
+  }
+});
+
+test('verify — INV-CTX-02 rejects Copilot Auto state with no initial runtime attempt', async () => {
+  const f = healthyRun({
+    mutatePlan: (plan) => { plan.model = 'auto'; },
+    mutateState: (state) => { state.runtimeAttempts = []; },
+  });
+  try {
+    const path = join(f.runDir, 'capabilities.json');
+    const capabilities = JSON.parse(readFileSync(path, 'utf8'));
+    capabilities.model = 'auto';
+    writeFileSync(path, JSON.stringify(capabilities), 'utf8');
+    const check = row(await rowsFor(f), 'INV-CTX-02');
+    assert.equal(check.status, 'fail');
+    assert.match(check.evidence, /no initial runtime attempt/i);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — INV-CTX-06 audits Copilot isolation even with no companions', async () => {
+  const f = healthyRun({ mutatePlan: (plan) => { plan.ambientPluginsDisabled = false; } });
+  try {
+    const check = row(await rowsFor(f), 'INV-CTX-06');
+    assert.equal(check.status, 'fail');
+    assert.match(check.evidence, /ambient plugin/i);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — INV-CTX-06 passes only for generic companions with hash-bound run-local briefs', async () => {
+  let briefPath = '';
+  const f = healthyRun({
+    seedPlanArtifacts: (runDir) => {
+      briefPath = join(runDir, 'companion-brief-code-review.md');
+      const contextPath = join(runDir, 'pr-context.md');
+      writeFileSync(briefPath, '# safe companion criteria', 'utf8');
+      writeFileSync(contextPath, '# PR context', 'utf8');
+      return [briefPath, contextPath].map((path) => ({ path, sha256: sha256File(path) }));
+    },
+    mutatePlan: (plan) => {
+      plan.ambientPluginsDisabled = true;
+      const contextPath = join(futureRunDir(plan), 'pr-context.md');
+      plan.reviewers = [{
+        name: 'companion:code-review',
+        kind: 'companion-agent',
+        description: 'Run code review',
+        agentType: 'general-purpose',
+        promptTemplate: `Read PR context at \`${contextPath}\` and companion criteria at \`${briefPath}\`. {{PR_REVIEW_OUTPUT_PATH}}`,
+        canonicalOutputPath: join(futureRunDir(plan), 'raw-companion.json'),
+        attemptsDir: join(futureRunDir(plan), 'reviewer-attempts', 'companion'),
+        maxAttempts: 3,
+      }];
+    },
+  });
+  try {
+    const check = row(await rowsFor(f), 'INV-CTX-06');
+    assert.equal(check.status, 'pass');
+    assert.match(check.evidence, /1 companion/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — INV-CTX-06 accepts the required no-posting directive in a generic companion prompt', async () => {
+  let briefPath = '';
+  const f = healthyRun({
+    seedPlanArtifacts: (runDir) => {
+      briefPath = join(runDir, 'companion-brief-code-review.md');
+      const contextPath = join(runDir, 'pr-context.md');
+      writeFileSync(briefPath, '# safe companion criteria', 'utf8');
+      writeFileSync(contextPath, '# PR context', 'utf8');
+      return [briefPath, contextPath].map((path) => ({ path, sha256: sha256File(path) }));
+    },
+    mutatePlan: (plan) => {
+      const contextPath = join(futureRunDir(plan), 'pr-context.md');
+      plan.reviewers = [{
+        name: 'companion:code-review',
+        kind: 'companion-agent',
+        description: 'Run code review',
+        agentType: 'general-purpose',
+        promptTemplate: `Read PR context at \`${contextPath}\` and companion criteria at \`${briefPath}\`. ${NO_POSTING_DIRECTIVE} {{PR_REVIEW_OUTPUT_PATH}}`,
+        canonicalOutputPath: join(futureRunDir(plan), 'raw-companion.json'),
+        attemptsDir: join(futureRunDir(plan), 'reviewer-attempts', 'companion'),
+        maxAttempts: 3,
+      }];
+    },
+  });
+  try {
+    assert.equal(row(await rowsFor(f), 'INV-CTX-06').status, 'pass');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — INV-CTX-06 rejects a runtime-native companion agent or unbound brief', async () => {
+  const f = healthyRun({
+    seedPlanArtifacts: (runDir) => {
+      const contextPath = join(runDir, 'pr-context.md');
+      writeFileSync(contextPath, '# PR context', 'utf8');
+      return [{ path: contextPath, sha256: sha256File(contextPath) }];
+    },
+    mutatePlan: (plan) => {
+      plan.ambientPluginsDisabled = true;
+      plan.reviewers = [{
+        name: 'companion:code-review', kind: 'companion-slash', description: 'Run', agentType: 'code-reviewer',
+        promptTemplate: 'Invoke /code-review:code-review. {{PR_REVIEW_OUTPUT_PATH}}',
+        canonicalOutputPath: join(futureRunDir(plan), 'raw-companion.json'),
+        attemptsDir: join(futureRunDir(plan), 'reviewer-attempts', 'companion'), maxAttempts: 3,
+      }];
+    },
+  });
+  try {
+    const check = row(await rowsFor(f), 'INV-CTX-06');
+    assert.equal(check.status, 'fail');
+    assert.match(check.evidence, /generic|brief/i);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — INV-CTX-06 rejects acquisition or posting commands inside a bound brief', async () => {
+  let briefPath = '';
+  const f = healthyRun({
+    seedPlanArtifacts: (runDir) => {
+      briefPath = join(runDir, 'companion-brief-code-review.md');
+      const contextPath = join(runDir, 'pr-context.md');
+      writeFileSync(briefPath, '# criteria\nUse Bash to run npm test before reviewing.', 'utf8');
+      writeFileSync(contextPath, '# PR context', 'utf8');
+      return [briefPath, contextPath].map((path) => ({ path, sha256: sha256File(path) }));
+    },
+    mutatePlan: (plan) => {
+      const runDir = futureRunDir(plan);
+      plan.reviewers = [{
+        name: 'companion:code-review', kind: 'companion-agent', description: 'Run', agentType: 'general-purpose',
+        promptTemplate: `Read \`${join(runDir, 'pr-context.md')}\` and \`${briefPath}\`. {{PR_REVIEW_OUTPUT_PATH}}`,
+        canonicalOutputPath: join(runDir, 'raw-companion.json'), attemptsDir: join(runDir, 'reviewer-attempts', 'companion'), maxAttempts: 3,
+      }];
+    },
+  });
+  try {
+    const check = row(await rowsFor(f), 'INV-CTX-06');
+    assert.equal(check.status, 'fail');
+    assert.match(check.evidence, /runtime-native directive/i);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — INV-DEL-04 passes a structured adoption bound to its canonical digest', async () => {
+  const f = healthyRun({
+    mutateState: (state) => { state.runtimeAttempts[0]!.adoptedReviewers = ['pack/security']; },
+  });
+  try {
+    const check = row(await rowsFor(f), 'INV-DEL-04');
+    assert.equal(check.status, 'pass');
+    assert.match(check.evidence, /1 structured result adoption/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — INV-DEL-04 rejects missing adoption accounting in a current plan', async () => {
+  const f = healthyRun({
+    mutateState: (state) => { delete state.runtimeAttempts[0]!.adoptedReviewers; },
+  });
+  try {
+    const check = row(await rowsFor(f), 'INV-DEL-04');
+    assert.equal(check.status, 'fail');
+    assert.match(check.evidence, /omit structured-result adoption accounting/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — INV-DEL-04 accepts explicit empty accounting on a rejected spawn', async () => {
+  const f = healthyRun({
+    mutateState: (state) => {
+      state.runtimeAttempts[0]!.status = 'spawn-rejected';
+      state.runtimeAttempts[0]!.adoptedReviewers = [];
+    },
+  });
+  try {
+    const check = row(await rowsFor(f), 'INV-DEL-04');
+    assert.equal(check.status, 'skip');
+    assert.match(check.evidence, /no structured runtime result was adopted/i);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — INV-DEL-04 rejects authenticated JSONL adoption without canonical delivery', async () => {
+  const f = healthyRun({
+    mutatePlan: (plan) => {
+      plan.reviewers = [{
+        name: 'pack/security', kind: 'pass', description: 'Review security', agentType: 'general-purpose',
+        promptTemplate: '{{PR_REVIEW_OUTPUT_PATH}}',
+        canonicalOutputPath: join(futureRunDir(plan), 'raw-pack_security.json'),
+        attemptsDir: join(futureRunDir(plan), 'reviewer-attempts', 'pack-security'), maxAttempts: 3,
+      }];
+    },
+    mutateState: (state) => {
+      state.runtimeAttempts[0]!.adoptedReviewers = ['pack/security'];
+      state.valid = [];
+      state.missing = ['pack/security'];
+      state.reviewerDigests = {};
+      state.reviewerAttempts['pack/security'] = 1;
+    },
+  });
+  try {
+    const check = row(await rowsFor(f), 'INV-DEL-04');
+    assert.equal(check.status, 'fail');
+    assert.match(check.evidence, /adopted.*canonical delivery digest|no digest/i);
+  } finally {
+    f.cleanup();
+  }
+});
+
+function futureRunDir(plan: Record<string, unknown>): string {
+  return String(plan.runDir);
+}
 
 /** Mark `.claude/skills/team-rules.md` as changed by the PR under review. */
 function changeRuleFile(f: Fixture) {

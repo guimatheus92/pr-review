@@ -152,22 +152,45 @@ test('resumedCompanionFailures — a companion the resume did NOT deliver stays 
   }
 });
 
-test('resumedCompanionFailures — reconciliation is ONE-WAY: it never invents a failure the record lacks', () => {
-  // INV-POST-04's rule, applied here: an error may be promoted to delivered,
-  // never the reverse. The record was computed by the fresh path from the same
-  // plan; deriving NEW failures from a roster this resume does not own is how a
-  // correct delivery gets refused and, under INV-DEL-03, goes unposted.
+test('resumedCompanionFailures — plannedReviewers is authoritative even when the recorded verdict claims complete', () => {
   const dir = runDir(JSON.stringify({ plannedReviewers: PLANNED, missingReviewers: [], duplicateReviewers: [] }));
   try {
-    assert.deepEqual(resumedCompanionFailures(dir, []), []);
+    assert.deepEqual(resumedCompanionFailures(dir, []), [
+      "planned companion 'companion:pr-review-toolkit/code-reviewer' produced no output",
+      "planned companion 'companion:code-review' produced no output",
+    ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('resumedCompanionFailures — a recorded-missing name delivered TWICE is not resolved', () => {
-  // Clearing on "has an output" alone would launder the missing failure into
-  // the duplicate one's blind spot and report a clean run over both.
+test('resumedCompanionFailures — a modern malformed roster fails closed', () => {
+  const dir = runDir(JSON.stringify({ plannedReviewers: 'not-an-array', missingReviewers: [], duplicateReviewers: [] }));
+  try {
+    assert.deepEqual(resumedCompanionFailures(dir, []), [
+      'companions.json has an invalid plannedReviewers roster — companion delivery cannot be accounted for',
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resumedCompanionFailures — a modern one-to-one delivery is complete regardless of a stale verdict', () => {
+  const dir = runDir(JSON.stringify({
+    plannedDispatches: 1,
+    plannedReviewers: [PLANNED[1]],
+    completedReviewers: [],
+    missingReviewers: [PLANNED[1]],
+    duplicateReviewers: [],
+  }));
+  try {
+    assert.deepEqual(resumedCompanionFailures(dir, [output(PLANNED[1]!)]), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resumedCompanionFailures — a planned name delivered TWICE is a duplicate failure', () => {
   const dir = runDir(JSON.stringify({
     plannedReviewers: [PLANNED[0]],
     missingReviewers: [PLANNED[0]],
@@ -175,7 +198,7 @@ test('resumedCompanionFailures — a recorded-missing name delivered TWICE is no
   }));
   try {
     assert.deepEqual(resumedCompanionFailures(dir, [output(PLANNED[0]!), output(PLANNED[0]!)]), [
-      "planned companion 'companion:pr-review-toolkit/code-reviewer' produced no output",
+      "companion 'companion:pr-review-toolkit/code-reviewer' produced duplicate outputs",
     ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });

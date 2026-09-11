@@ -15,6 +15,7 @@ export function buildBundle(root = process.cwd(), outfile = join(root, 'dist', '
     platform: 'node',
     target: 'node22',
     format: 'cjs',
+    mainFields: ['module', 'main'],
     outfile,
     banner: { js: SHEBANG },
     external: ['node:*'],

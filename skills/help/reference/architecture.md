@@ -31,9 +31,10 @@ Node CLI (deterministic plumbing)
      └─ runCodex()             → optional attempt-scoped read-only sibling
  12. assemble Phase 1           → only after every planned reviewer is valid
  13. direct verifier            → separate session only for CRITICAL/HIGH Phase 1 findings
- 14. dedupe                     → complete delivery only; intra-batch + existing comments
- 15. runPost() / renderSummary  → inline comments or complete dry-run summary
- 16. exit code                  → 0 complete, 1 findings ≥ --fail-on, 2 incomplete/operational failure
+ 14. dedupe + persist           → complete delivery only; all findings against the original comment snapshot
+ 15. publication partition      → authenticated threshold; all findings stay in artifacts
+ 16. runPost() / renderSummary  → eligible pending comments; complete body-only local summary
+ 17. exit code                  → 0 complete, 1 any retained finding ≥ --fail-on, 2 incomplete/operational failure
 ```
 
 The sections below describe how delivery, trust and recovery are *built*. What
@@ -58,6 +59,27 @@ Node assembles Phase 1 in plan order only at complete Phase 1 delivery. HIGH/CRI
 When the `codex` CLI is installed, its read-only sibling runs in parallel and writes `codex-attempts/attempt-N.json`. Only exact top-level `Finding[]` JSON is valid. The attempt is reserved in authenticated state before launch, so a crash consumes the slot and a completed attempt can be adopted without rerunning. A failed attempt writes `codex-failure.log` and keeps delivery incomplete rather than disappearing from recovery.
 
 `prepareSessionContext` is exported so `pr-review review <url> --context-only` can prepare the context files and print the detected stack (`## Stack`) and the pass-routing table (`## Passes`: pass, matched by, matched on, source) plus the on-demand index count without spawning the runtime — exiting 2 when zero passes match a code PR.
+
+### Retention and publication
+
+`src/util/severity.ts` owns severity parsing and ordering for publication, exit
+gating, summary sorting, and the audit. `--publish-min-severity` is not an analysis
+instruction or a configuration setting. New plans are schema v2 and authenticate
+the canonical threshold in `execution`; old v1 plans remain publish-all.
+
+`finalizeReview` first deduplicates all complete outputs against the original
+gather snapshot and persists every retained finding. It then partitions eligibility
+and records aggregate metadata without shrinking `finalFindings`. The summary
+prints all bodies; `--fail-on` evaluates the full retained set. Suppression is
+never counted as `skipped`, attempted, an error, or dedupe loss.
+
+Resume reconstructs retention from authenticated inputs and keeps a separate
+eligible pending queue. Exact confirmed comment identities accumulate in signed
+posting state without demotion on stale reads. Explicit threshold conflicts fail
+before recovery; `--force-post` does not change policy. Effective finalization mode
+records complete dry-run promotion without rewriting the original plan. `verify`
+recomputes retention and eligibility from authenticated evidence rather than
+believing counts supplied only in the findings artifact.
 
 ## Source map
 

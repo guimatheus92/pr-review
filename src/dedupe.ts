@@ -26,6 +26,12 @@ export interface DedupeResult {
   dropped: { finding: Finding; reason: string; matchedCommentId?: string }[];
 }
 
+export function dedupeFindings(findings: Finding[], existing: ExistingComment[], mode: DedupeMode): DedupeResult {
+  const withinBatch = dedupeWithinBatch(findings, mode);
+  const againstExisting = dedupeAgainstExisting(withinBatch.kept, existing, mode);
+  return { kept: againstExisting.kept, dropped: [...withinBatch.dropped, ...againstExisting.dropped] };
+}
+
 export function dedupeAgainstExisting(
   findings: Finding[],
   existing: ExistingComment[],

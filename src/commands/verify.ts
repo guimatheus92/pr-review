@@ -1,20 +1,22 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { RUNS_ROOT } from '../util/tmp.js';
 import { ERROR_FILE } from '../util/tmp.js';
 import { readPostedMarker, type PostedMarker } from '../util/posted-marker.js';
 import { readAuthoritativeControl } from './status.js';
-import { readAuthoritativeFinalization, isPathInside, type DispatchPlan, type DeliveryState, type FinalizationRecord } from '../dispatch/delivery.js';
+import { readAuthoritativeFinalization, isPathInside, inspectReviewerDelivery, planPublicationMinimumSeverity, validateDeliveryArtifacts, type DispatchPlan, type DeliveryState, type FinalizationRecord } from '../dispatch/delivery.js';
 import { commentKey, postingShape, windowStart, CLOCK_SLACK_MS } from './post.js';
-import { readCapabilityUsage, type CapabilityUsage } from './review.js';
+import { decideExitCode, readCapabilityUsage, type CapabilityUsage } from './review.js';
 import { resolvePr } from '../providers/index.js';
 import { withRetry } from '../util/retry.js';
 import { linguistCachePath } from '../stack/linguist.js';
 import type { PrProvider } from '../providers/types.js';
 import type { ExistingComment, Finding, GatherOutput, PrMetadata, PrRef } from '../types.js';
-import { sha256File } from '../util/atomic-json.js';
+import { canonicalJson, sha256File } from '../util/atomic-json.js';
 import { companionRuntimeDirective } from '../plugins/companions.js';
+import { partitionFindingsForPublication, type PublicationMetadata } from '../util/severity.js';
+import { dedupeFindings } from '../dedupe.js';
 
 /**
  * Post-hoc audit of a finished run against INVARIANTS.md.
@@ -86,6 +88,8 @@ interface StackArtifact {
 interface FindingsArtifact {
   finalFindings?: Finding[];
   droppedCount?: number;
+  reviewers?: Array<{ reviewer: string; findings: Finding[] }>;
+  publication?: PublicationMetadata;
 }
 
 export interface VerifyContext {
@@ -100,6 +104,11 @@ export interface VerifyContext {
   finalizationError: string | null;
   marker: PostedMarker | 'corrupt' | null;
   findings: FindingsArtifact | null;
+  publication: PublicationMetadata | null;
+  publicationError: string | null;
+  retentionError: string | null;
+  suppressedShape: Finding[];
+  effectiveExecution: { dryRun: boolean; publish: boolean } | null;
   stack: StackArtifact | null;
   routes: PassRouteLike[] | null;
   capabilities: CapabilitiesArtifact | null;
@@ -261,12 +270,17 @@ export const CHECKS: InvariantCheck[] = [
     id: 'INV-POST-01',
     needs: 'run+pr',
     run(ctx) {
-      if (ctx.plan?.execution.dryRun) {
+      if (ctx.publicationError) return fail(ctx.publicationError);
+      if (ctx.effectiveExecution?.dryRun) {
         return ctx.marker && ctx.marker !== 'corrupt' && ctx.marker.attempted > 0
           ? fail(`dry-run recorded a publish attempt (posted.marker: ${ctx.marker.posted}/${ctx.marker.attempted})`)
           : skip('dry-run: nothing was posted, so there is nothing on the PR to check');
       }
-      if (ctx.expectedKeys.size === 0) return skip('the run retained no locatable findings');
+      if (ctx.expectedKeys.size === 0 && ctx.expectedTopLevel.size === 0) {
+        return ctx.effectiveExecution?.publish && ctx.marker && ctx.marker !== 'corrupt' && ctx.marker.attempted === 0
+          ? pass('0 eligible findings; zero publication attempts recorded')
+          : skip('the run retained no publication-eligible locatable findings');
+      }
       const remaining = new Map(ctx.expectedKeys);
       for (const c of ctx.liveWindow!) {
         if (!c.file) continue;
@@ -416,7 +430,9 @@ export const CHECKS: InvariantCheck[] = [
             'indistinguishable by location once the diff moves',
         );
       }
+      const originalIds = new Set(ctx.gather.existingComments.map((comment) => comment.id));
       const unplanned = ctx.liveWindow!.filter((c) => {
+        if (originalIds.has(c.id)) return false;
         if (c.author !== ctx.selfAuthor || !c.file) return false;
         return !ctx.expectedKeys.has(commentKey(c.file, c.line, c.body));
       });
@@ -432,22 +448,47 @@ export const CHECKS: InvariantCheck[] = [
     id: 'INV-POST-07',
     needs: 'run+pr',
     run(ctx) {
-      if (ctx.plan?.execution.dryRun) return skip('dry-run: nothing was attempted');
-      const retainedCount = ctx.findings?.finalFindings?.length ?? 0;
+      if (ctx.publicationError) return fail(ctx.publicationError);
+      const eligibleKeys = new Set(ctx.postingShape.map((finding) => commentKey(finding.file, finding.line, finding.body)));
+      const suppressedKeys = new Set(ctx.suppressedShape.map((finding) => commentKey(finding.file, finding.line, finding.body)));
+      const originalIds = new Set(ctx.gather.existingComments.map((comment) => comment.id));
+      const suppressedWrites = ctx.liveWindow!.filter((comment) => {
+        const key = commentKey(comment.file, comment.line, comment.body);
+        return !originalIds.has(comment.id) && suppressedKeys.has(key) && !eligibleKeys.has(key);
+      });
+      if (!ctx.prAdvanced && suppressedWrites.length > 0) {
+        return fail(`${suppressedWrites.length} suppressed finding(s) appeared as new comments despite the publication threshold`);
+      }
+      if (ctx.effectiveExecution?.dryRun) return skip('dry-run: nothing was attempted');
+      const eligibleCount = ctx.publication?.eligibleCount ?? ctx.findings?.finalFindings?.length ?? 0;
       if (!ctx.marker) {
         // Every publish attempt writes the marker. Absent WITH findings to post
         // means either the attempt was never recorded or the record was lost —
         // the exact artifact state that let a duplicated post go unnoticed.
-        return ctx.plan?.execution.publish && retainedCount > 0
-          ? fail(`a publish run retained ${retainedCount} finding(s) but recorded no posting state`)
+        return ctx.effectiveExecution?.publish && (eligibleCount > 0 || ctx.plan?.schemaVersion === 2)
+          ? fail(`a publish run retained ${eligibleCount} eligible finding(s) but recorded no posting state`)
           : skip('no publish attempt was recorded for this run');
       }
       if (ctx.marker === 'corrupt') return fail('posted.marker is corrupt — the outcome of the publish attempt is unknown');
-      const retained = retainedCount;
-      if (ctx.marker.attempted !== retained) {
-        return fail(`${retained} finding(s) retained but ${ctx.marker.attempted} attempted — the difference was neither posted nor reported`);
+      if (ctx.marker.attempted !== eligibleCount) {
+        return fail(`${eligibleCount} finding(s) retained for publication but ${ctx.marker.attempted} attempted — the difference was neither posted nor reported`);
       }
       if (ctx.marker.verified === false) return fail('the publish outcome could not be verified');
+      if (ctx.plan?.schemaVersion === 2) {
+        if (ctx.marker.planFingerprint !== ctx.plan.fingerprint || !ctx.marker.confirmedKeys) {
+          return fail('posting confirmations are not bound to this authenticated publication plan');
+        }
+        const remaining = new Map<string, number>();
+        for (const finding of ctx.postingShape) {
+          const key = commentKey(finding.file, finding.line, finding.body);
+          remaining.set(key, (remaining.get(key) ?? 0) + 1);
+        }
+        for (const key of ctx.marker.confirmedKeys) {
+          const count = remaining.get(key) ?? 0;
+          if (count === 0) return fail('posting state confirms a finding outside the eligible set');
+          remaining.set(key, count - 1);
+        }
+      }
       return pass(`${ctx.marker.attempted} attempted = ${ctx.marker.posted} posted + ${ctx.marker.attempted - ctx.marker.posted} reported error(s)`);
     },
   },
@@ -892,6 +933,10 @@ export const CHECKS: InvariantCheck[] = [
       if (![0, 1, 2].includes(exitCode)) return fail(`finalization recorded exit ${exitCode}`);
       if (exitCode === 2 && !ctx.errorTxt) return fail('exit 2 without error.txt — the failure is unnamed');
       if (exitCode === 0 && ctx.errorTxt) return fail('exit 0 with error.txt present — a stale failure was not cleared');
+      if (ctx.plan?.schemaVersion === 2 && exitCode !== 2 && ctx.findings?.finalFindings) {
+        const expected = decideExitCode(false, ctx.findings.finalFindings, ctx.plan.execution.failOn);
+        if (exitCode !== expected) return fail(`exit ${exitCode}, expected ${expected} from --fail-on over all retained findings, including suppressed findings`);
+      }
       return pass(`exit ${exitCode}${exitCode === 2 ? ' with error.txt naming the failure' : ' and no error.txt'}`);
     },
   },
@@ -900,6 +945,8 @@ export const CHECKS: InvariantCheck[] = [
     needs: 'run',
     run(ctx) {
       if (failedBeforeSelection(ctx)) return skip('the run failed before pass selection — only the pre-selection artifacts exist');
+      if (ctx.publicationError) return fail(ctx.publicationError);
+      if (ctx.retentionError) return fail(ctx.retentionError);
       const required = ['pr-review-gather.json', 'stack.json', 'passes.json', 'companions.json', 'capabilities.json'];
       if (ctx.finalization || existsSync(join(ctx.runDir, 'pr-review-summary.md'))) {
         required.push('pr-review-summary.md', 'pr-review-findings.json', 'progress.ndjson');
@@ -933,6 +980,40 @@ function readFileSafe(path: string): string | null {
     return existsSync(path) ? readFileSync(path, 'utf8') : null;
   } catch {
     return null;
+  }
+}
+
+function checkRetainedEvidence(plan: DispatchPlan, state: DeliveryState, gather: GatherOutput, findings: FindingsArtifact): string | null {
+  try {
+    const failures = validateDeliveryArtifacts(plan, state);
+    if (failures.length > 0) throw new Error(failures.join('; '));
+    const gatherPath = join(plan.runDir, 'pr-review-gather.json');
+    const gatherBinding = plan.artifacts.find((artifact) => resolve(artifact.path) === resolve(gatherPath));
+    if (!gatherBinding || sha256File(gatherPath) !== gatherBinding.sha256) throw new Error('original gather is not digest-bound to the plan');
+    const files = Object.fromEntries(plan.reviewers.map((reviewer) => {
+      if (!state.reviewerDigests[reviewer.name]) throw new Error(`reviewer ${reviewer.name} has no authenticated digest`);
+      return [reviewer.name, reviewer.canonicalOutputPath];
+    }));
+    if (state.verifier.state === 'valid') {
+      if (!plan.verifier.canonicalOutputPath || !state.verifier.digest) throw new Error('verifier has no authenticated output');
+      files.verifier = plan.verifier.canonicalOutputPath;
+    }
+    const inventory = inspectReviewerDelivery(files, plan.model, 0);
+    if (!inventory.complete) throw new Error('retained findings cannot be reconstructed from incomplete reviewer evidence');
+    const outputs = inventory.outputs;
+    if (plan.codex.enabled) {
+      if (state.codex.state !== 'valid' || !state.codex.output) throw new Error('Codex evidence is incomplete');
+      outputs.push(state.codex.output);
+    }
+    const retained = dedupeFindings(outputs.flatMap((output) => output.findings), gather.existingComments, plan.execution.dedupeMode);
+    if (canonicalJson(retained.kept) !== canonicalJson(findings.finalFindings) || retained.dropped.length !== findings.droppedCount) {
+      throw new Error('finalFindings does not retain the complete deduplicated review from the original inputs');
+    }
+    const reviewers = outputs.map((output) => ({ reviewer: output.reviewerName, findings: output.findings }));
+    if (canonicalJson(reviewers) !== canonicalJson(findings.reviewers)) throw new Error('reviewer evidence was removed or changed in the findings artifact');
+    return null;
+  } catch (error) {
+    return (error as Error).message;
   }
 }
 
@@ -1034,6 +1115,11 @@ export async function loadVerifyContext(opts: {
   }
 
   const findings = readJson<FindingsArtifact>(join(runDir, 'pr-review-findings.json'), corrupt);
+  const marker = readPostedMarker(runDir, opts.home);
+  const effectiveExecution = finalization?.execution ??
+    (plan?.schemaVersion === 2 && marker && marker !== 'corrupt' && marker.planFingerprint === plan.fingerprint
+      ? { dryRun: false, publish: true }
+      : plan?.execution ?? null);
   const capabilities = readJson<CapabilitiesArtifact>(join(runDir, 'capabilities.json'), corrupt);
   const routesRaw = readJson<unknown>(join(runDir, 'passes.json'), corrupt);
   const routes =
@@ -1046,8 +1132,26 @@ export async function loadVerifyContext(opts: {
   // --offline audit depend on the URL still being resolvable. It MUST be the
   // same function `runPost` applied, or this audit grades a correct run against
   // locations it never planned to write.
-  const finalFindings = findings?.finalFindings ?? [];
-  const planned = postingShape(finalFindings, gather.changedFiles, gather.pr.provider);
+  let publication: PublicationMetadata | null = null;
+  let publicationError: string | null = null;
+  let publicationEligibleFindings: Finding[] = [];
+  let suppressedByPublicationFilter: Finding[] = [];
+  try {
+    const selected = partitionFindingsForPublication(findings?.finalFindings ?? [], plan ? planPublicationMinimumSeverity(plan) : 'NIT');
+    publication = selected.publication;
+    publicationEligibleFindings = selected.publicationEligibleFindings;
+    suppressedByPublicationFilter = selected.suppressedByPublicationFilter;
+    if (plan?.schemaVersion === 2 && finalization && canonicalJson(findings?.publication) !== canonicalJson(publication)) {
+      publicationError = 'publication metadata does not match the authenticated threshold and complete retained finding counts';
+    }
+  } catch (error) {
+    publicationError = `publication evidence is invalid: ${(error as Error).message}`;
+  }
+  const retentionError = plan?.schemaVersion === 2 && state?.kind === 'complete' && finalization && findings
+    ? checkRetainedEvidence(plan, state, gather, findings)
+    : null;
+  const planned = postingShape(publicationEligibleFindings, gather.changedFiles, gather.pr.provider);
+  const suppressedShape = postingShape(suppressedByPublicationFilter, gather.changedFiles, gather.pr.provider);
   const expectedKeys = keyCounts(planned);
   const expectedTopLevel = new Map<string, number>();
   if (gather.pr.provider === 'azuredevops') {
@@ -1093,7 +1197,6 @@ export async function loadVerifyContext(opts: {
   // since, and without an upper bound every later run's comments read as
   // "written by this run and never planned". Observed on the first live run of
   // this command: 33 of 58 comments on a re-reviewed PR.
-  const marker = readPostedMarker(runDir, opts.home);
   const finishedAt = finalization ? Date.parse(finalization.completedAt) : NaN;
   const postedAt = marker && marker !== 'corrupt' ? marker.postedAt : NaN;
   const ceilingSource = Number.isFinite(finishedAt) ? finishedAt : postedAt;
@@ -1147,6 +1250,11 @@ export async function loadVerifyContext(opts: {
     finalizationError,
     marker,
     findings,
+    publication,
+    publicationError,
+    retentionError,
+    suppressedShape,
+    effectiveExecution,
     stack: readJson<StackArtifact>(join(runDir, 'stack.json'), corrupt),
     routes,
     capabilities,

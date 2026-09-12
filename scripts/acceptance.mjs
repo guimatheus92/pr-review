@@ -20,13 +20,17 @@
 // and `pr-review packs sync` done at least once.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, watch, writeFileSync } from 'node:fs';
+import { strict as assert } from 'node:assert';
+import { createHash } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import { matchExpectedFindings, safeLogValue, stackExpectationFailures } from './eval-assertions.mjs';
 import { credentialEnv, credentialedGitUrl, listComments, parsePrUrl, resetPr, resolveToken } from './acceptance-reset.mjs';
+import { parseSeverity } from '../dist/util/severity.js';
+import { publicationFixtureFindings } from '../evals/acceptance/publication-runtime.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ACCEPTANCE = join(ROOT, 'evals', 'acceptance');
@@ -55,6 +59,7 @@ const wantRuntimes = list('runtime', RUNTIMES.join(','));
 const wantCases = list('case', 'defects,filelist,nofetch');
 const dryRun = has('dry-run');
 const resetOnly = has('reset-only');
+const publishMinSeverity = parseSeverity(flag('publish-min-severity') ?? undefined, '--publish-min-severity');
 // Lazily: naming --out must not still mint an empty temp directory.
 const outDir = flag('out') ?? mkdtempSync(join(tmpdir(), 'pr-review-acceptance-'));
 const checkoutRoot = flag('checkout');
@@ -345,11 +350,14 @@ function runtimeRefusedToWork(prUrl) {
 }
 
 /** The run `verify` resolved for this PR — the runner never guesses a run dir. */
-function verifyRun(prUrl) {
+function verifyRun(prUrl, options = {}) {
   let raw = '';
   let exitCode = 0;
   try {
-    raw = run(process.execPath, [CLI, 'verify', '--pr', prUrl, '--json']);
+    raw = run(process.execPath, [
+      CLI, 'verify', ...(options.runId ? [options.runId] : ['--pr', prUrl]),
+      ...(options.home ? ['--home', options.home] : []), '--json',
+    ], { env: options.env });
   } catch (err) {
     exitCode = err.status ?? 1;
     raw = err.stdout ?? '';
@@ -394,7 +402,8 @@ async function runDefectsCell(provider, runtime) {
   // sibling, and an enabled-but-failing one blocks completion — so a Codex
   // outage (a usage limit, say) would fail all six cells for a reason that has
   // nothing to do with what they test. Codex has its own coverage.
-  const argv = [CLI, 'review', prUrl, '--no-cache', '--no-codex', '--runtime', runtime, ...(dryRun ? ['--dry-run'] : [])];
+  const argv = [CLI, 'review', prUrl, '--no-cache', '--no-codex', '--runtime', runtime,
+    ...(dryRun ? ['--dry-run'] : []), ...(publishMinSeverity ? ['--publish-min-severity', publishMinSeverity] : [])];
   let reviewExit = 0;
   try {
     run(process.execPath, argv, { cwd, stdio: ['ignore', 'inherit', 'inherit'] });
@@ -476,7 +485,7 @@ async function runDefectsCell(provider, runtime) {
     }
     const bodies = live.map((c) => c.body).join('\n---\n');
     const landed = (expected.must_find ?? []).some((p) => new RegExp(p, 'is').test(bodies));
-    if (!landed) failures.push('no posted comment body matches any must_find pattern — findings were retained but not delivered');
+    if (!landed && !publishMinSeverity) failures.push('no posted comment body matches any must_find pattern — findings were retained but not delivered');
     // INV-POST-01 re-anchors everything inline on GitHub and GitLab, so a
     // non-inline comment there is a violation. Azure DevOps legitimately posts
     // a location-less finding as a resolvable PR-level thread, so the same
@@ -660,10 +669,176 @@ async function runNoFetchCell() {
   return { provider: 'azuredevops', runtime: '-', case: 'nofetch', ok: failures.length === 0, failures, prUrl, files, elapsedMs };
 }
 
+function awaitFixtureFinalization(runDir) {
+  return new Promise((resolve, reject) => {
+    const finish = (error, record) => {
+      observer.close();
+      clearTimeout(deadline);
+      if (error) reject(error);
+      else resolve(record);
+    };
+    const inspect = () => {
+      const finalized = readArtifact(runDir, 'finalization.json');
+      if (finalized) finish(null, finalized);
+      else if (existsSync(join(runDir, 'error.txt'))) finish(new Error(readFileSync(join(runDir, 'error.txt'), 'utf8')));
+    };
+    const observer = watch(runDir, inspect);
+    observer.on('error', (error) => finish(error));
+    const deadline = setTimeout(() => finish(new Error('detached publication fixture did not finalize within 60 seconds')), 60_000);
+    inspect();
+  });
+}
+
+async function runPublicationCell(provider) {
+  if (dryRun) throw new Error('the publication case requires real posting; omit --dry-run');
+  const fixtureRuntime = wantRuntimes[0];
+  const prUrl = matrix.providers[provider]?.pulls?.[fixtureRuntime];
+  if (!prUrl) throw new Error('publication fixture PR is missing from matrix.yaml');
+  const pr = parsePrUrl(prUrl);
+  const token = resolveToken(provider, pr.host);
+  const authentication = provider === 'azuredevops'
+    ? token.scheme === 'basic'
+      ? { AZURE_DEVOPS_PAT: Buffer.from(token.value, 'base64').toString('utf8').replace(/^:/, '') }
+      : { AZURE_DEVOPS_BEARER: token.value }
+    : { [provider === 'github' ? 'GITHUB_TOKEN' : 'GITLAB_TOKEN']: token.value };
+  const evidenceDir = join(outDir, `publication-${provider}`);
+  const home = join(evidenceDir, 'home');
+  mkdirSync(join(home, '.pr-review'), { recursive: true });
+  writeFileSync(join(home, '.pr-review', 'config.yaml'), 'skill_packs: []\n');
+  const fixtureCli = join(evidenceDir, 'cli.cjs');
+  copyFileSync(CLI, fixtureCli);
+  const rule = join(evidenceDir, 'publication-rule.md');
+  writeFileSync(rule, '---\nname: publication-contract\ndescription: Review the full materialized change.\n---\nAnalyze every changed file and return every finding.\n');
+  const runtimeScript = join(ACCEPTANCE, 'publication-runtime.mjs');
+  const binary = join(evidenceDir, process.platform === 'win32' ? 'runtime.cmd' : 'runtime');
+  writeFileSync(binary, process.platform === 'win32'
+    ? `@echo off\r\n"${process.execPath}" "${runtimeScript}" %*\r\n`
+    : `#!/bin/sh\nexec "${process.execPath}" "${runtimeScript}" "$@"\n`);
+  if (process.platform !== 'win32') chmodSync(binary, 0o755);
+  const env = { ...authentication, USERPROFILE: home, HOME: home };
+  const evidence = { provider, runtime: 'deterministic-copilot', prUrl, bundleSha256: createHash('sha256').update(readFileSync(fixtureCli)).digest('hex'), commands: [], runs: [] };
+  const invoke = (args, expectedExit = 0, scenario = 'mixed', executable = fixtureCli) => {
+    let exitCode = 0;
+    let stdout = '';
+    let stderr = '';
+    try {
+      stdout = run(process.execPath, [executable, ...args], {
+        cwd: evidenceDir, env: { ...env, PR_REVIEW_PUBLICATION_SCENARIO: scenario }, stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      exitCode = error.status ?? 1;
+      stdout = String(error.stdout ?? '');
+      stderr = String(error.stderr ?? '');
+    }
+    evidence.commands.push({ args: [executable, ...args], exitCode, stdout, stderr });
+    if (expectedExit === null) assert.notEqual(exitCode, 0, 'the older CLI must refuse a schema-v2 plan');
+    else assert.equal(exitCode, expectedExit, `publication command exited ${exitCode}, expected ${expectedExit}: ${safeLogValue(stderr)}`);
+    return { stdout, stderr };
+  };
+  const audit = (runId, label) => {
+    const verified = verifyRun(prUrl, { runId, home, env });
+    assert.ok(verified.report, `publication audit produced no JSON: ${safeLogValue(verified.raw)}`);
+    evidence.runs.push({ label, runId, verifyExit: verified.exitCode, report: verified.report });
+    writeFileSync(join(evidenceDir, `${label}-verify.json`), JSON.stringify(verified.report, null, 2));
+    assert.equal(verified.exitCode, 0, JSON.stringify(verified.report.rows.filter((row) => row.status === 'fail')));
+  };
+  const review = async (scenario, threshold, preview = false, detached = false) => {
+    await resetPr(prUrl);
+    const runId = `${provider}-publication-${scenario}-${Date.now()}`;
+    const runDir = join(home, '.pr-review', 'runs', runId);
+    mkdirSync(runDir, { recursive: true });
+    const args = ['review', prUrl, '--no-cache', '--no-codex', '--no-companions', '--no-autodiscover',
+      '--force-skill', rule, '--copilot', binary, '--default-model', 'publication-fixture',
+      '--publish-min-severity', threshold, '--fail-on', 'medium', ...(preview ? ['--dry-run'] : []),
+      ...(detached ? ['--detach'] : ['--run-dir', runDir])];
+    if (detached) {
+      const launch = invoke(args, 0, scenario);
+      const actualId = /run-id:\s+(\S+)/.exec(launch.stdout)?.[1];
+      assert.ok(actualId, 'detached CLI returned no run id');
+      const actualDir = join(home, '.pr-review', 'runs', actualId);
+      const completion = await awaitFixtureFinalization(actualDir);
+      assert.equal(completion.exitCode, 1);
+      return { runId: actualId, runDir: actualDir };
+    }
+    invoke(args, 1, scenario);
+    return { runId, runDir };
+  };
+  try {
+    const mixed = await review('mixed', 'hIgH', true);
+    const gather = readArtifact(mixed.runDir, 'pr-review-gather.json');
+    const expectedFindings = publicationFixtureFindings(gather).slice(0, 5);
+    const artifact = readArtifact(mixed.runDir, 'pr-review-findings.json');
+    assert.deepEqual(artifact.finalFindings, expectedFindings);
+    assert.equal(artifact.droppedCount, 1);
+    assert.deepEqual(artifact.publication, { minimumSeverity: 'HIGH', eligibleCount: 2, suppressedCount: 3 });
+    assert.equal((await listComments(pr, token)).length, 0);
+    audit(mixed.runId, 'mixed-preview');
+    const baselineCli = flag('baseline-cli');
+    if (baselineCli) {
+      const old = invoke(['review', prUrl, '--resume', mixed.runId, '--dry-run'], null, 'mixed', baselineCli);
+      assert.match(old.stderr, /unsupported or malformed authoritative dispatch plan/);
+    }
+    invoke(['review', prUrl, '--resume', mixed.runId], 1);
+    assert.deepEqual(readArtifact(mixed.runDir, 'pr-review-findings.json').finalFindings, expectedFindings);
+    assert.deepEqual((await listComments(pr, token)).map((comment) => comment.body).sort(), expectedFindings.slice(0, 2).map((finding) => finding.body).sort());
+    audit(mixed.runId, 'mixed-published');
+    for (const threshold of ['critical', 'medium', 'nit']) {
+      const conflict = invoke(['review', prUrl, '--resume', mixed.runId, '--force-post', '--publish-min-severity', threshold], 2);
+      assert.match(conflict.stderr, /publish-min-severity-mismatch/);
+    }
+    invoke(['review', prUrl, '--resume', mixed.runId, '--force-post'], 1);
+    assert.equal((await listComments(pr, token)).length, 2);
+    audit(mixed.runId, 'mixed-resumed');
+
+    for (const [label, input] of [
+      ['final', artifact],
+      ['reviewers', { reviewers: [{ reviewer: 'fixture', model: 'fixture', findings: expectedFindings }] }],
+      ['array', [{ reviewer: 'fixture', model: 'fixture', findings: expectedFindings }]],
+    ]) {
+      await resetPr(prUrl);
+      const path = join(evidenceDir, `post-${label}.json`);
+      const bytes = JSON.stringify(input);
+      writeFileSync(path, bytes);
+      invoke(['post', prUrl, '--findings', path, '--publish-min-severity', 'high']);
+      assert.equal(readFileSync(path, 'utf8'), bytes);
+      assert.deepEqual((await listComments(pr, token)).map((comment) => comment.body).sort(), expectedFindings.slice(0, 2).map((finding) => finding.body).sort());
+    }
+    const zero = await review('medium', 'high');
+    assert.equal(readArtifact(zero.runDir, 'posted.marker').attempted, 0);
+    assert.equal(readArtifact(zero.runDir, 'pr-review-findings.json').finalFindings.length, 1);
+    assert.equal((await listComments(pr, token)).length, 0);
+    audit(zero.runId, 'zero-eligible');
+    const severe = await review('high', 'critical');
+    assert.equal(readArtifact(severe.runDir, 'delivery-state.json').verifier.state, 'valid');
+    assert.equal(readArtifact(severe.runDir, 'posted.marker').attempted, 0);
+    audit(severe.runId, 'suppressed-high-verifier');
+    const detached = await review('mixed', 'high', false, true);
+    assert.equal(readArtifact(detached.runDir, 'pr-review-findings.json').finalFindings.length, 5);
+    assert.equal((await listComments(pr, token)).length, 2);
+    audit(detached.runId, 'detached');
+    return { provider, runtime: 'deterministic-copilot', case: 'publication', ok: true, failures: [], prUrl, findings: 5, posted: 2, evidenceDir };
+  } finally {
+    writeFileSync(join(evidenceDir, 'evidence.json'), JSON.stringify(evidence, null, 2));
+  }
+}
+
 // --- the matrix ------------------------------------------------------------
 
 const results = [];
 const startedAt = new Date().toISOString();
+
+if (wantCases.includes('publication') && !resetOnly) {
+  for (const provider of wantProviders) {
+    if (!PROVIDERS.includes(provider)) throw new Error(`unknown provider: ${provider}`);
+    console.log(`\n=== ${provider} / deterministic publication ===`);
+    const began = Date.now();
+    try {
+      results.push({ ...(await runPublicationCell(provider)), durationMs: Date.now() - began });
+    } catch (error) {
+      results.push({ provider, runtime: 'deterministic-copilot', case: 'publication', ok: false, failures: [safeLogValue(error.message)], durationMs: Date.now() - began });
+    }
+  }
+}
 
 for (const provider of wantProviders) {
   if (!PROVIDERS.includes(provider)) {

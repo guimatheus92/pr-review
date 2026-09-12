@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runReview } from '../src/commands/review.js';
-import { writePostedMarker } from '../src/util/posted-marker.js';
+import { readPostedMarker, writePostedMarker } from '../src/util/posted-marker.js';
 import { controlDirForRun, ERROR_FILE, RUNS_ROOT } from '../src/util/tmp.js';
 import { prepareSessionContext, resumePlannedSession } from '../src/dispatch/single-session.js';
 import {
@@ -14,11 +14,12 @@ import {
   attemptOutputPath,
   createDeliveryState,
   inspectReviewerDelivery,
+  hasSevereFindings,
   reconcileDeliveryCompletion,
   writeDeliveryState,
 } from '../src/dispatch/delivery.js';
 import { sha256File } from '../src/util/atomic-json.js';
-import type { Finding, GatherOutput, PrRef } from '../src/types.js';
+import type { ExistingComment, Finding, GatherOutput, PrRef, ReviewerOutput, Severity } from '../src/types.js';
 import type { BatchComment, PrProvider } from '../src/providers/types.js';
 import { runStatus } from '../src/commands/status.js';
 
@@ -78,7 +79,7 @@ function seedRun(reviewers: Array<{ name: string; findings: Finding[] }>): strin
 
 function seedPlannedPartialRun(
   underRunsRoot = false,
-  execution: { dryRun: boolean; publish: boolean; dedupeMode: 'strict' | 'loose' | 'off' } =
+  execution: { dryRun: boolean; publish: boolean; dedupeMode: 'strict' | 'loose' | 'off'; publishMinSeverity?: Severity; failOn?: Severity } =
     { dryRun: true, publish: false, dedupeMode: 'strict' },
   metadataState: GatherOutput['metadata']['state'] = 'open',
 ) {
@@ -143,11 +144,14 @@ function seedPlannedPartialRun(
 }
 
 /** Turn a seeded partial run into a COMPLETE one: every planned reviewer valid. */
-function completeSeededDelivery(seeded: ReturnType<typeof seedPlannedPartialRun>): void {
+function completeSeededDelivery(
+  seeded: ReturnType<typeof seedPlannedPartialRun>,
+  findings: Finding[] = [{ severity: 'MEDIUM', title: 'promoted', body: 'a preview finding worth posting', file: 'src/a.ts', line: 11 }],
+): void {
   const { plan } = seeded;
   writeFileSync(
     plan.reviewers[1]!.canonicalOutputPath,
-    JSON.stringify([{ severity: 'MEDIUM', title: 'promoted', body: 'a preview finding worth posting', file: 'src/a.ts', line: 11 }]),
+    JSON.stringify(findings),
     'utf8',
   );
   const inventory = inspectReviewerDelivery(
@@ -164,7 +168,13 @@ function completeSeededDelivery(seeded: ReturnType<typeof seedPlannedPartialRun>
   state.phase1 = 'valid';
   state.phase1Digest = sha256File(plan.phase1Path);
   state.verifier = { state: 'skipped-no-severe', phase1Digest: state.phase1Digest, attempts: 0 };
-  assembleConsolidated(plan.findingsPath, inventory.outputs, undefined);
+  let verifier: ReviewerOutput | undefined;
+  if (hasSevereFindings(inventory.outputs)) {
+    writeFileSync(plan.verifier.canonicalOutputPath!, '[]');
+    state.verifier = { state: 'valid', phase1Digest: state.phase1Digest, digest: sha256File(plan.verifier.canonicalOutputPath!), attempts: 1 };
+    verifier = { reviewerName: 'verifier', model: 'm', findings: [], rawOutput: '[]', durationMs: 0, exitCode: 0 };
+  }
+  assembleConsolidated(plan.findingsPath, inventory.outputs, verifier);
   state.consolidated = artifactState(plan.findingsPath);
   state.consolidatedDigest = sha256File(plan.findingsPath);
   reconcileDeliveryCompletion(plan, state);
@@ -175,6 +185,133 @@ function completeSeededDelivery(seeded: ReturnType<typeof seedPlannedPartialRun>
     join(controlDirForRun(seeded.dir, TEST_HOME), 'delivery-state.json'),
   );
 }
+
+const PUBLICATION_FINDINGS: Finding[] = [
+  { severity: 'CRITICAL', title: 'Credential exfiltration', body: 'Credentials leave the system.', file: 'src/a.ts', line: 11 },
+  { severity: 'HIGH', title: 'Authorization mismatch', body: 'Authorization crosses tenant boundaries.', file: 'src/a.ts', line: 25 },
+  { severity: 'MEDIUM', title: 'Precision loss', body: 'Fractional precision disappears.', file: 'src/a.ts', line: 35 },
+  { severity: 'LOW', title: 'Redundant lookup', body: 'Redundant database lookups.', file: 'src/a.ts', line: 45 },
+  { severity: 'NIT', title: 'Naming convention', body: 'Inconsistent local naming.', file: 'src/a.ts', line: 55 },
+];
+
+test('resume publication — conflicting authenticated thresholds refuse before reads or recovery, including force-post', async () => {
+  const seeded = seedPlannedPartialRun(false, { dryRun: true, publish: false, dedupeMode: 'strict', publishMinSeverity: 'HIGH' });
+  try {
+    const { provider, calls } = fakeProvider();
+    provider.fetchMetadata = async () => { assert.fail('conflict must precede provider reads'); };
+    for (const publishMinSeverity of ['CRITICAL', 'MEDIUM', 'NIT'] as const) {
+      await assert.rejects(runReview({
+        prUrl: 'u', runDir: seeded.dir, resumeRunId: 'x', homeOverride: TEST_HOME,
+        dryRun: true, publish: false, publishMinSeverity, forcePost: true, provider,
+        resumePlannedSessionFn: async () => { assert.fail('conflict must precede recovery dispatch'); },
+      }), /publish-min-severity-mismatch/);
+    }
+    assert.equal(calls.batches.length + calls.singles.length, 0);
+    assert.equal(existsSync(join(seeded.dir, 'pr-review-findings.json')), false);
+  } finally {
+    seeded.cleanup();
+  }
+});
+
+test('resume publication — partial writes retry only eligible pending findings and preserve cumulative evidence', async () => {
+  const seeded = seedPlannedPartialRun(false, { dryRun: false, publish: true, dedupeMode: 'strict', publishMinSeverity: 'HIGH' });
+  completeSeededDelivery(seeded, PUBLICATION_FINDINGS);
+  const live: ExistingComment[] = [];
+  const attempted: string[] = [];
+  let rejectHigh = true;
+  try {
+    const { provider } = fakeProvider();
+    delete provider.postBatchComments;
+    provider.fetchExistingComments = async () => live;
+    provider.postLineComment = async (_ref, finding) => {
+      attempted.push(finding.body);
+      if (finding.severity === 'HIGH' && rejectHigh) throw new Error('write rejected');
+      const id = String(live.length + 1);
+      live.push({ id, author: 'review-bot', body: finding.body, file: finding.file, line: finding.line, source: 'bot', createdAt: new Date().toISOString() });
+      return { id };
+    };
+    const options = { prUrl: 'u', runDir: seeded.dir, resumeRunId: 'x', homeOverride: TEST_HOME, publish: true, provider };
+    const partial = await runReview(options);
+    assert.equal(partial.exitCode, 2);
+    let marker = readPostedMarker(seeded.dir, TEST_HOME);
+    assert.ok(marker && marker !== 'corrupt');
+    assert.equal(marker.attempted, 2);
+    assert.equal(marker.posted, 1);
+    assert.equal(marker.planFingerprint, seeded.plan.fingerprint);
+    rejectHigh = false;
+    const recovered = await runReview(options);
+    assert.equal(recovered.exitCode, 0);
+    assert.deepEqual(attempted, [PUBLICATION_FINDINGS[0]!.body, PUBLICATION_FINDINGS[1]!.body, PUBLICATION_FINDINGS[1]!.body]);
+    assert.equal(live.length, 2);
+    assert.equal(new Set(live.map((comment) => `${comment.file}:${comment.line}:${comment.body}`)).size, 2);
+    marker = readPostedMarker(seeded.dir, TEST_HOME);
+    assert.ok(marker && marker !== 'corrupt');
+    assert.equal(marker.attempted, 2);
+    assert.equal(marker.posted, 2);
+    assert.equal(marker.confirmedKeys?.length, 2);
+    const artifact = JSON.parse(readFileSync(join(seeded.dir, 'pr-review-findings.json'), 'utf8'));
+    assert.deepEqual(artifact.finalFindings, PUBLICATION_FINDINGS);
+    assert.deepEqual(artifact.publication, { minimumSeverity: 'HIGH', eligibleCount: 2, suppressedCount: 3 });
+    assert.match(recovered.summary, /\*\*Posted:\*\* 2 \/ 2 attempted/);
+    provider.fetchExistingComments = async () => [];
+    await runReview({ ...options, forcePost: true, publishMinSeverity: 'HIGH' });
+    assert.equal(attempted.length, 3, 'stale reads and force-post do not erase authenticated confirmations');
+    assert.deepEqual(JSON.parse(readFileSync(join(seeded.dir, 'pr-review-findings.json'), 'utf8')).finalFindings, PUBLICATION_FINDINGS);
+  } finally {
+    seeded.cleanup();
+  }
+});
+
+test('resume publication — dry-run promotion honors its original threshold, including zero eligible', async () => {
+  for (const findings of [PUBLICATION_FINDINGS, [PUBLICATION_FINDINGS[2]!]]) {
+    const seeded = seedPlannedPartialRun(false, { dryRun: true, publish: false, dedupeMode: 'strict', publishMinSeverity: 'HIGH', failOn: 'MEDIUM' });
+    completeSeededDelivery(seeded, findings);
+    try {
+      const { provider, calls } = fakeProvider();
+      const options = { prUrl: 'u', runDir: seeded.dir, resumeRunId: 'x', homeOverride: TEST_HOME, provider };
+      const preview = await runReview({ ...options, dryRun: true, publish: false, publishMinSeverity: 'HIGH' });
+      assert.equal(preview.exitCode, 1);
+      assert.equal(existsSync(join(seeded.dir, 'posted.marker')), false);
+      const published = await runReview({ ...options, publish: true });
+      assert.equal(published.exitCode, 1);
+      assert.deepEqual(calls.batches.flat().map((comment) => comment.body), findings.length === 1 ? [] : PUBLICATION_FINDINGS.slice(0, 2).map((finding) => finding.body));
+      assert.deepEqual(JSON.parse(readFileSync(join(seeded.dir, 'pr-review-findings.json'), 'utf8')).finalFindings, findings);
+      assert.deepEqual(JSON.parse(readFileSync(join(seeded.dir, 'finalization.json'), 'utf8')).execution, { dryRun: false, publish: true });
+      assert.equal(JSON.parse(readFileSync(join(seeded.dir, 'dispatch-plan.json'), 'utf8')).execution.dryRun, true);
+      const marker = readPostedMarker(seeded.dir, TEST_HOME);
+      assert.ok(marker && marker !== 'corrupt');
+      assert.equal(marker.attempted, findings.length === 1 ? 0 : 2);
+      await assert.rejects(runReview({ ...options, dryRun: true, publish: false }), /mode-mismatch/);
+    } finally {
+      seeded.cleanup();
+    }
+  }
+});
+
+test('resume publication — unknown prior outcomes remain failures and force-post still cannot publish suppressed findings', async () => {
+  const seeded = seedPlannedPartialRun(false, { dryRun: false, publish: true, dedupeMode: 'strict', publishMinSeverity: 'HIGH' });
+  completeSeededDelivery(seeded, PUBLICATION_FINDINGS);
+  try {
+    writePostedMarker(seeded.dir, {
+      posted: 0, attempted: 2, verified: false, confirmedKeys: [], planFingerprint: seeded.plan.fingerprint,
+    }, TEST_HOME);
+    const { provider, calls } = fakeProvider();
+    const options = { prUrl: 'u', runDir: seeded.dir, resumeRunId: 'x', homeOverride: TEST_HOME, publish: true, provider };
+    const blocked = await runReview(options);
+    assert.equal(blocked.exitCode, 2);
+    assert.equal(calls.batches.length, 0);
+    const forced = await runReview({ ...options, forcePost: true });
+    assert.equal(forced.exitCode, 0);
+    assert.deepEqual(calls.batches.flat().map((comment) => comment.body), PUBLICATION_FINDINGS.slice(0, 2).map((finding) => finding.body));
+    writePostedMarker(seeded.dir, {
+      posted: 1, attempted: 2, verified: true, confirmedKeys: ['outside-policy'], planFingerprint: seeded.plan.fingerprint,
+    }, TEST_HOME);
+    await assert.rejects(runReview({ ...options, forcePost: true }), /posting-policy-mismatch/);
+    assert.equal(calls.batches.length, 1, 'invalid authenticated confirmation cannot authorize another write');
+  } finally {
+    seeded.cleanup();
+  }
+});
 
 function enableCodexOnSeed(seeded: ReturnType<typeof seedPlannedPartialRun>) {
   const ctx = prepareSessionContext({
@@ -343,16 +480,17 @@ const PUBLISHED = {
   source: 'human' as const,
 };
 
-test('resume — a DRY-RUN also dedupes against the live PR, not the gather snapshot', async () => {
-  // The dry-run is what a user reads before deciding to resume for real, so
-  // "1 finding to post" when the publish run would post none is the same
-  // miscount, one step earlier.
+test('resume — a DRY-RUN retains research evidence but does not offer an already-published finding again', async () => {
   const dir = seedRun(ONE);
   try {
-    const { provider } = fakeProvider();
+    const { provider, calls } = fakeProvider();
     provider.fetchExistingComments = async () => [PUBLISHED];
     const r = await runReview({ homeOverride: TEST_HOME, prUrl: 'u', resumeRunId: 'x', runDir: dir, publish: false, dryRun: true, provider });
-    assert.ok(!r.summary.includes('a real finding body'), 'the already-published finding is not offered again');
+    assert.ok(r.summary.includes('a real finding body'), 'publication progress cannot erase retained evidence');
+    assert.match(r.summary, /Already published: 1 \| Pending publication: 0/);
+    assert.equal(JSON.parse(readFileSync(join(dir, 'pr-review-findings.json'), 'utf8')).finalFindings.length, 1);
+    assert.equal(calls.batches.length + calls.singles.length, 0);
+    assert.equal(existsSync(join(dir, 'posted.marker')), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

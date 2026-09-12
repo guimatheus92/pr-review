@@ -12,6 +12,7 @@ import {
   type DispatchPlan,
 } from '../dispatch/delivery.js';
 import { atomicFileExistsSync } from '../util/atomic-json.js';
+import { readPostedMarker } from '../util/posted-marker.js';
 
 export type StatusState = 'done' | 'running' | 'interrupted' | 'failed' | 'missing';
 
@@ -134,7 +135,9 @@ function shellQuote(value: string): string {
 }
 
 function resumeCommand(plan: DispatchPlan, runId: string): string {
-  const mode = plan.execution.dryRun ? ' --dry-run' : '';
+  const marker = readPostedMarker(plan.runDir);
+  const promoted = marker && marker !== 'corrupt' && marker.planFingerprint === plan.fingerprint;
+  const mode = plan.execution.dryRun && !promoted ? ' --dry-run' : '';
   const invocation = plan.cliArtifact
     ? `${shellQuote(process.execPath)} ${shellQuote(plan.cliArtifact.path)}`
     : 'pr-review';

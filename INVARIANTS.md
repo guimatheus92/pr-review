@@ -53,9 +53,9 @@ exactly the same ID set, so a rename fails the suite immediately.
 
 ## POST — what reaches the pull request
 
-### INV-POST-01 — Every finding lands as a resolvable inline thread
+### INV-POST-01 — Every eligible finding lands as a resolvable inline thread
 
-**Always:** On a publish run every retained finding is posted as a resolvable
+**Always:** On a publish run every publication-eligible finding is posted as a resolvable
 inline review thread — GitHub review comments, Azure DevOps threads, GitLab
 discussions. Never a top-level comment. Lines outside the diff are snapped to
 the nearest valid diff line. On GitHub and GitLab a finding that cannot anchor
@@ -65,12 +65,21 @@ Azure DevOps threads post at the reported `file:line` as-is, and a finding with
 no location becomes a resolvable PR-level thread. `skipped` exists only for
 `--dry-run`.
 
+`--publish-min-severity` is an inclusive, case-insensitive, CLI-only publication
+threshold: CRITICAL, HIGH, MEDIUM, LOW, or NIT. Omitted means NIT (publish all).
+It applies only after complete delivery, verifier execution and deduplication.
+Every final finding remains in the local artifacts before publication; findings
+below the threshold are suppressed from publication, never attempted or called
+skipped. The same explicit flag on `post` filters its input without rewriting it.
+
 **Why:** A thread can be linked, replied to and resolved by the person who fixes
 it. A comment cannot. Everything the tool produces is meant to be actionable at
 a line, so anything that cannot be resolved is not a finding — it is noise the
-next run has no way to reconcile against.
+next run has no way to reconcile against. Publication volume is an operator
+decision, not permission to reduce review coverage or discard research evidence.
 
 **Enforced:** `src/commands/post.ts` (`runPost`, `reanchor`),
+`src/commands/review.ts`, `src/cli.ts`,
 `src/dispatch/line-snap.ts`, `src/providers/github.ts`,
 `src/providers/azuredevops.ts`, `src/providers/gitlab.ts`
 
@@ -104,7 +113,9 @@ review), `src/commands/post.ts` (reconciliation skips comments with no file),
 ### INV-POST-03 — Clean output
 
 **Always:** A posted comment body is the finding body and nothing else — no
-severity prefix, no bot chrome, no separator, no footer, no attribution line.
+severity prefix, no title, no bot chrome, no separator, no footer, no attribution
+line. Publication counts belong in the local summary's aggregate metadata,
+never in individual finding bodies.
 
 **Why:** The comment competes for attention with human review on the same line.
 Anything that is not the finding is a tax paid by every reader of every thread.
@@ -173,16 +184,28 @@ only thing standing between a review pass and a comment nobody planned.
 
 ### INV-POST-07 — Nothing is dropped
 
-**Always:** Every retained finding is either posted or reported as an error.
-A finding is never silently discarded, and `posted + errors === attempted`.
+**Always:** Every publication-eligible finding is either posted or reported as
+an error. A finding is never silently discarded, and on a publishing run
+`posted + errors === attempted === eligibleCount`. Suppressed findings remain
+in `finalFindings`; `eligibleCount + suppressedCount === finalFindings.length`.
+Zero eligible findings complete with zero attempted posts and full local evidence.
+
+New runs bind the publication threshold into a schema-v2 authenticated dispatch
+plan. Resume, including promotion of a complete dry run, honors that original
+threshold; an explicitly conflicting threshold fails closed. Schema-v1 runs
+retain publish-all behavior. `--force-post` bypasses posting idempotency only,
+never the threshold or delivery/authentication gates. Partial publishing resume
+reconciles and retries only eligible findings; confirmed publication progress is
+cumulative and never removes findings from the retained review evidence.
 
 **Why:** A count that does not balance hides losses in the gap. Silently
 dropping the findings that were hardest to place means the tool is quietest
 exactly where it is least reliable.
 
-**Enforced:** `src/commands/post.ts`
+**Enforced:** `src/commands/post.ts`, `src/commands/review.ts`,
+`src/dispatch/delivery.ts`, `src/util/posted-marker.ts`
 
-**Verified:** `tests/post.test.ts`
+**Verified:** `tests/post.test.ts`, `tests/resume.test.ts`, `tests/verify.test.ts`
 
 **Check:** run+pr
 
@@ -579,7 +602,10 @@ tool adds failure without adding authority.
 
 **Always:** `0` = the pipeline completed; without `--fail-on` it says nothing
 about the finding count. `1` = a finding at or above the `--fail-on` threshold
-survived. `2` = an operational failure; `error.txt` names it. A run that reaches finalization always
+survived deduplication, including findings suppressed from publication.
+`--fail-on` evaluates all `finalFindings` independently of
+`--publish-min-severity`; neither option changes what reviewers analyze.
+`2` = an operational failure; `error.txt` names it. A run that reaches finalization always
 leaves `error.txt` on exit 2 and clears it on exit 0.
 
 **Why:** CI gates on these. An exit code that sometimes means "no findings" and
@@ -602,6 +628,15 @@ installed-plugin pass), one `raw-<reviewer>.json` per pass and companion,
 `error.txt` on any failure, and `posted.marker` on any publish attempt.
 Authenticated mirrors live under `~/.pr-review/control/`. A change that stops
 writing one of these is a behaviour change.
+
+After complete delivery, `pr-review-findings.json` retains every deduplicated
+finding before any publication attempt, including suppressed findings. Its
+`publication` metadata records the canonical threshold and eligible/suppressed
+counts. The local summary retains every individual finding body and reports the
+same aggregate publication counts, including on dry runs. Resume reconstructs
+the retained set from authenticated review inputs and the original gather,
+separately from publication progress; promotion is recorded without rewriting
+the original plan. Legacy artifacts without publication metadata remain readable.
 
 **Why:** `--resume`, `status`, the operational-failure checks, `verify` and the
 eval harness all read them. They are the only record of what a run actually did.

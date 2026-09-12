@@ -83,6 +83,51 @@ function setup() {
 const run = (opts: SingleSessionOptions, ctx: SessionContext, spawn: FakeSpawn) =>
   runSingleSession(opts, ctx, spawn, [1]);
 
+test('publication threshold never suppresses Phase-1 findings or the direct verifier', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-publication-verifier-'));
+  try {
+    const gather = {
+      pr: { provider: 'github' as const, url: 'https://github.com/o/r/pull/1', owner: 'o', repo: 'r', number: 1 },
+      metadata: { title: 'Test', description: 'complete', author: 'a', headSha: 'h', baseSha: 'b', baseBranch: 'main', headBranch: 'f', labels: [], linkedItems: [], createdAt: '', updatedAt: '', isDraft: false, state: 'open' as const },
+      changedFiles: [{ path: 'a.ts', status: 'modified' as const, additions: 1, deletions: 0, patch: '@@ -1 +1 @@\n-a\n+b' }], existingComments: [], gatheredAt: '',
+    };
+    const opts: SingleSessionOptions = {
+      prUrl: gather.pr.url, gather,
+      passes: ['security', 'quality'].map((name) => ({ name, source: `/${name}.md`, body: 'review', matchedBy: 'baseline', matchedOn: [], baseline: true })),
+      indexEntries: [], stackTags: [], installedCompanions: [], skipReviewers: [],
+      outDir: dir, invokeCompanions: false, runtime: 'copilot', defaultModel: 'explicit-model',
+      execution: { dryRun: true, publish: false, dedupeMode: 'strict', publishMinSeverity: 'CRITICAL' },
+    };
+    const ctx = prepareSessionContext(opts);
+    const plan = ctx.dispatchPlan!;
+    let calls = 0;
+    const findings = [
+      { severity: 'HIGH', title: 'Authorization', body: 'An authorization boundary is missing.', file: 'a.ts', line: 1 },
+      { severity: 'LOW', title: 'Redundancy', body: 'An unnecessary lookup remains.', file: 'a.ts', line: 5 },
+    ];
+    const result = await runSingleSession(opts, ctx, async () => {
+      calls++;
+      if (calls === 1) {
+        for (const [index, reviewer] of plan.reviewers.entries()) {
+          writeFileSync(attemptOutputPath(reviewer, 1), JSON.stringify([findings[index]]));
+        }
+      } else {
+        assert.equal(calls, 2);
+        const phase1 = JSON.parse(readFileSync(plan.phase1Path, 'utf8'));
+        assert.deepEqual(phase1.reviewers.flatMap((reviewer: { findings: unknown[] }) => reviewer.findings), findings);
+        writeFileSync(verifierAttemptOutputPath(plan.verifier, 1), '[]');
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    assert.equal(calls, 2, 'HIGH must trigger the verifier even when no finding is CRITICAL');
+    assert.equal(result.deliveryState?.verifier.state, 'valid');
+    assert.equal(result.findingsUnavailable, false);
+    assert.deepEqual(result.outputs.flatMap((output) => output.findings), findings);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('isTransientOrchestratorFailure — transient signatures are retriable', () => {
   const transient = [
     'Server is temporarily limiting requests',

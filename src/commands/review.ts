@@ -24,7 +24,7 @@ import { readPostedMarker, writePostedMarker } from '../util/posted-marker.js';
 import { withRetry } from '../util/retry.js';
 import { printable, redactRuntimeSecrets, safeRuntimeDiagnostic } from '../util/text.js';
 import { resolvePr } from '../providers/index.js';
-import { dedupeAgainstExisting, dedupeWithinBatch } from '../dedupe.js';
+import { dedupeFindings } from '../dedupe.js';
 import {
   companionDispatchCount,
   companionReviewerNames,
@@ -40,7 +40,7 @@ import { skillsAllowedForCheckout } from '../plugins/trust.js';
 import { canonicalPrAuthority } from '../providers/identity.js';
 import { gitTopLevel } from '../util/git.js';
 import { discoverMcpCapabilities } from '../plugins/installed.js';
-import { recoverAtomicFileSync, sha256File } from '../util/atomic-json.js';
+import { atomicWriteJsonSync, recoverAtomicFileSync, sha256File } from '../util/atomic-json.js';
 import { acquireFinalizationLease } from '../util/finalization-lease.js';
 import {
   assertDispatchPlanMirrors,
@@ -49,6 +49,7 @@ import {
   recordCodexResult,
   reserveCodexAttempt,
   lastRuntimeAttemptDiagnostic,
+  planPublicationMinimumSeverity,
   validateDeliveryArtifacts,
   validateDispatchArtifacts,
   writeFinalizationRecord,
@@ -57,6 +58,7 @@ import {
   type DispatchPlan,
 } from '../dispatch/delivery.js';
 import { runtimeInstalledPluginRoots } from '../plugins/installed.js';
+import { compareSeverity, meetsSeverityThreshold, partitionFindingsForPublication, type PublicationMetadata } from '../util/severity.js';
 
 interface ReviewCmdOptions {
   prUrl: string;
@@ -81,6 +83,7 @@ interface ReviewCmdOptions {
   contextOnly?: boolean;
   language?: string;
   failOn?: Severity;
+  publishMinSeverity?: Severity;
   runtime?: RuntimeChoice;
   withCodex?: boolean;
   /** Use this exact run dir instead of minting a new one (set by the --detach parent). */
@@ -113,14 +116,6 @@ export interface ReviewResult {
   exitCode: 0 | 1 | 2;
 }
 
-const SEVERITY_RANK: Record<string, number> = {
-  CRITICAL: 0,
-  HIGH: 1,
-  MEDIUM: 2,
-  LOW: 3,
-  NIT: 4,
-};
-
 // MAX_FILES_GUARD / MAX_PATCH_BYTES now live in dispatch/diff-filter.ts: gather
 // asks the same guard what is worth fetching, and it cannot import this module.
 // A capability sidecar is written by a dispatched agent, so its server list is untrusted input
@@ -141,8 +136,7 @@ export function decideExitCode(
 ): 0 | 1 | 2 {
   if (findingsUnavailable) return 2;
   if (!failOn) return 0;
-  const threshold = SEVERITY_RANK[failOn] ?? 0;
-  return finalFindings.some((f) => (SEVERITY_RANK[f.severity] ?? 99) <= threshold) ? 1 : 0;
+  return finalFindings.some((finding) => meetsSeverityThreshold(finding.severity, failOn)) ? 1 : 0;
 }
 
 export function safeSummaryValue(value: unknown): string {
@@ -188,6 +182,13 @@ async function validateRecoveryPreconditions(args: {
   recoveryNeeded: boolean;
 }): Promise<{ promotingDryRunToPublish: boolean }> {
   const requested = requestedExecutionMode(args.opts);
+  const priorMarker = readPostedMarker(args.outDir, args.opts.homeOverride);
+  if (args.recoveryNeeded && priorMarker !== null) {
+    throw new Error('resume recovery refused [posted-marker-present]: reviewer recovery cannot be mixed with a prior post outcome');
+  }
+  if (requested.dryRun && priorMarker !== null) {
+    throw new Error('resume recovery refused [mode-mismatch]: a run with a prior publication outcome cannot become a dry-run');
+  }
   // Previewing with --dry-run and then posting what you saw is the point of a dry
   // run, so dry-run → publish is allowed — but ONLY on a complete delivery, which
   // keeps the real invariant ("partial findings never post") intact. The reverse
@@ -209,9 +210,6 @@ async function validateRecoveryPreconditions(args: {
       `resume recovery refused [mode-mismatch]: this run is sticky ` +
       `${args.plan.execution.dryRun ? 'dry-run' : 'publish'} and cannot change execution mode`,
     );
-  }
-  if (args.recoveryNeeded && readPostedMarker(args.outDir, args.opts.homeOverride) !== null) {
-    throw new Error('resume recovery refused [posted-marker-present]: reviewer recovery cannot be mixed with a prior post outcome');
   }
   const planFailures = validateDispatchArtifacts(args.plan);
   if (planFailures.length > 0) {
@@ -379,6 +377,8 @@ export function renderSummary(
   postResult?: { posted: number; attempted: number; skipped: number; errors: { error: string }[]; verified?: boolean },
   passRouting?: PassRoute[],
   degraded?: string[],
+  publication?: PublicationMetadata,
+  pendingPublicationCount?: number,
 ): string {
   const totalRaw = outputs.reduce((n, o) => n + o.findings.length, 0);
   const phaseOneHasSevereFinding = outputs.some(
@@ -397,6 +397,14 @@ export function renderSummary(
     `**Elapsed:** ${(elapsedMs / 1000).toFixed(1)}s`,
     `**Reviewers run:** ${reviewersRun} | **Raw findings:** ${totalRaw} | **After dedupe:** ${finalFindings.length} | **Dropped:** ${droppedCount}`,
   ];
+  if (publication) {
+    lines.push(
+      `Publication threshold: ${publication.minimumSeverity}+ | Eligible: ${publication.eligibleCount} / ${finalFindings.length} | Suppressed: ${publication.suppressedCount}`,
+    );
+    if (pendingPublicationCount !== undefined) {
+      lines.push(`Already published: ${publication.eligibleCount - pendingPublicationCount} | Pending publication: ${pendingPublicationCount}`);
+    }
+  }
   if (postResult) {
     lines.push(
       `**Posted:** ${postResult.posted} / ${postResult.attempted} attempted; ${postResult.skipped} skipped; ${postResult.errors.length} errors`,
@@ -438,7 +446,7 @@ export function renderSummary(
 
   const sorted = finalFindings
     .slice()
-    .sort((a, b) => (SEVERITY_RANK[a.severity] ?? 99) - (SEVERITY_RANK[b.severity] ?? 99));
+    .sort((left, right) => compareSeverity(left.severity, right.severity));
 
   if (sorted.length === 0) {
     lines.push(`## Findings`, ``, '_No findings after deduplication._');
@@ -511,6 +519,7 @@ export async function finalizeReview(a: {
   publish: boolean;
   dryRun?: boolean;
   failOn?: Severity;
+  publishMinSeverity?: Severity;
   /**
   * Planned delivery is incomplete. True can coexist with parseable reviewer or
   * Codex findings, but no partial output may reach dedupe/post or mint done state.
@@ -608,6 +617,14 @@ export async function finalizeReview(a: {
     : () => {};
   try {
 
+  const plan = a.deliveryState
+    ? assertDispatchPlanMirrors(join(a.outDir, 'dispatch-plan.json'), join(controlDirForRun(a.outDir, a.homeOverride), 'dispatch-plan.json'))
+    : undefined;
+  const minimumSeverity = plan ? planPublicationMinimumSeverity(plan) : a.publishMinSeverity ?? 'NIT';
+  if (a.publishMinSeverity !== undefined && a.publishMinSeverity !== minimumSeverity) {
+    throw new Error('publication refused [publish-min-severity-mismatch]: the authenticated threshold cannot change');
+  }
+
   for (const out of a.outputs) {
     try {
       const rawPath = join(a.outDir, `raw-${sanitizeForFilename(out.reviewerName)}.json`);
@@ -618,111 +635,98 @@ export async function finalizeReview(a: {
   }
 
   const rawFindings = a.outputs.flatMap((o) => o.findings);
-  const intraBatch = dedupeWithinBatch(rawFindings, a.dedupeMode);
-  // Re-read the PR's comments before deduping. On a --resume the snapshot in
-  // `gather` was taken BEFORE the original run tried to post, so anything that
-  // run managed to publish is invisible to it — which is how an interrupted
-  // run's resume posted a second copy of all 56 comments in the field.
-  //
-  // This lives here, next to the dedupe that depends on it, rather than in the
-  // caller: an invariant installed one level up is one a future caller of
-  // finalizeReview silently loses. Runs on --dry-run too — a dry-run reporting
-  // 56 findings to post when the real run would post none is the same lie, one
-  // step earlier.
-  let existingComments = a.gather.existingComments;
-  const resumedCommentCounts = new Map<string, number>();
-  let resumePostingShape = intraBatch.kept;
-  if (a.refreshExisting) {
-    const { provider } = resolvePr(a.prUrl, undefined, a.provider);
-    const ref = a.gather.pr;
-    try {
-      const refreshed = await withRetry(
-        () => provider.fetchExistingComments(ref),
-        (e) => provider.isTransientError(e),
-        'existing-comment refresh',
-      );
-      // UNION, scoped — never overwrite. Assigning the whole live list would
-      // let any comment posted after the review started suppress a finding:
-      // strict dedupe drops on 0.4 title similarity, so a few vague inline
-      // comments on the changed lines ("double-check this auth path") would
-      // silently bury the matching security findings. The only comments this
-      // refresh needs are the ones an interrupted run of THIS tool wrote, and
-      // those are byte-identical to a finding it was about to post.
-      resumePostingShape = postingShape(intraBatch.kept, a.gather.changedFiles, provider.name);
-      const pendingKeys = new Set(
-        resumePostingShape
-          .filter((finding) => finding.file && finding.line)
-          .map((finding) => commentKey(finding.file, finding.line, finding.body)),
-      );
-      const known = new Set(existingComments.map((c) => c.id));
-      const ours = refreshed.filter(
-        (comment) =>
-          !known.has(comment.id) &&
-          !!comment.file &&
-          !!comment.line &&
-          pendingKeys.has(commentKey(comment.file, comment.line, comment.body)),
-      );
-      for (const comment of ours) {
-        const key = commentKey(comment.file, comment.line, comment.body);
-        resumedCommentCounts.set(key, (resumedCommentCounts.get(key) ?? 0) + 1);
-      }
-      existingComments = [...existingComments, ...ours];
-      process.stderr.write(
-        `[review] read ${refreshed.length} comment(s) from the PR; ${ours.length} match a finding this run would post
-`,
-      );
-    } catch (err) {
-      // Fail closed when publishing. Continuing would dedupe against a snapshot
-      // known to predate a post attempt and re-post everything it published —
-      // and nothing downstream catches it: runPost reconciles only on an error
-      // path, and its window excludes comments written minutes ago. A dry-run
-      // has nothing to duplicate.
-      const why = `could not re-read the PR's comments (${(err as Error).message})`;
-      if (a.publish && !a.forcePost) {
-        throw new Error(
-          `${why} — refusing to post, because deduping against the pre-post snapshot would duplicate whatever the interrupted run already published. Retry when the API is healthy, or pass --force-post if you have checked the PR by hand.`,
-        );
-      }
-      process.stderr.write(`[review] ${why} — deduping against the gather snapshot
-`);
-    }
-  }
-
-  const resumeKept: Finding[] = [];
-  const resumeDropped: ReturnType<typeof dedupeAgainstExisting>['dropped'] = [];
-  for (let index = 0; index < intraBatch.kept.length; index++) {
-    const finding = intraBatch.kept[index]!;
-    const postingFinding = resumePostingShape[index] ?? finding;
-    const key = commentKey(postingFinding.file, postingFinding.line, postingFinding.body);
-    const count = resumedCommentCounts.get(key) ?? 0;
-    if (count > 0) {
-      resumedCommentCounts.set(key, count - 1);
-      resumeDropped.push({ finding, reason: 'exact comment from the interrupted run is already on the PR' });
-    } else {
-      resumeKept.push(finding);
-    }
-  }
-
-  const dedupedAgainstExisting = dedupeAgainstExisting(resumeKept, existingComments, a.dedupeMode);
-  const finalFindings = dedupedAgainstExisting.kept;
-  const droppedCount = intraBatch.dropped.length + resumeDropped.length + dedupedAgainstExisting.dropped.length;
+  const retained = dedupeFindings(rawFindings, a.gather.existingComments, a.dedupeMode);
+  const finalFindings = retained.kept;
+  const droppedCount = retained.dropped.length;
   if (droppedCount > 0) {
-    process.stderr.write(
-      `[review] dedupe dropped ${droppedCount} finding(s) (${intraBatch.dropped.length} intra-batch, ${resumeDropped.length} resumed, ${dedupedAgainstExisting.dropped.length} vs existing comments)\n`,
-    );
+    process.stderr.write(`[review] dedupe dropped ${droppedCount} finding(s) against the original review inputs\n`);
   }
   appendProgress(a.outDir, 'dedupe', `${finalFindings.length} kept, ${droppedCount} dropped`);
 
+  const findingsPath = join(a.outDir, 'pr-review-findings.json');
+  const findingsArtifact = {
+    reviewers: a.outputs.map((output) => ({ reviewer: output.reviewerName, findings: output.findings })),
+    finalFindings,
+    droppedCount,
+  };
+  atomicWriteJsonSync(findingsPath, findingsArtifact);
+  const { publicationEligibleFindings, suppressedByPublicationFilter, publication } =
+    partitionFindingsForPublication(finalFindings, minimumSeverity);
+  atomicWriteJsonSync(findingsPath, { ...findingsArtifact, publication });
+  process.stderr.write(
+    `[review] publication threshold ${publication.minimumSeverity}+: ${publicationEligibleFindings.length} eligible, ` +
+    `${suppressedByPublicationFilter.length} suppressed; ${finalFindings.length} retained\n`,
+  );
+
+  const marker = readPostedMarker(a.outDir, a.homeOverride);
+  const known = marker !== null && marker !== 'corrupt' ? marker : null;
+  if (known?.planFingerprint && known.planFingerprint !== plan?.fingerprint) {
+    throw new Error('publication refused [posting-plan-mismatch]: posting state belongs to another plan');
+  }
+  if (plan?.schemaVersion === 2 && known &&
+      (known.planFingerprint !== plan.fingerprint || !known.confirmedKeys || known.attempted !== publication.eligibleCount)) {
+    throw new Error('publication refused [posting-policy-mismatch]: posting state does not account for this authenticated eligible set');
+  }
+  const shaped = postingShape(publicationEligibleFindings, a.gather.changedFiles, a.gather.pr.provider);
+  const eligibleKeys = shaped.map((finding) => commentKey(finding.file, finding.line, finding.body));
+  const expectedCounts = new Map<string, number>();
+  for (const key of eligibleKeys) expectedCounts.set(key, (expectedCounts.get(key) ?? 0) + 1);
+  const confirmedCounts = new Map<string, number>();
+  const savedConfirmations = a.forcePost && plan?.schemaVersion !== 2 ? [] : known?.confirmedKeys ?? [];
+  for (const key of savedConfirmations) {
+    const count = (confirmedCounts.get(key) ?? 0) + 1;
+    if (count > (expectedCounts.get(key) ?? 0)) {
+      throw new Error('publication refused [posting-policy-mismatch]: confirmed posting is outside the retained eligible findings');
+    }
+    confirmedCounts.set(key, count);
+  }
+  if (a.refreshExisting) {
+    const { provider } = resolvePr(a.prUrl, undefined, a.provider);
+    try {
+      const refreshed = await withRetry(
+        () => provider.fetchExistingComments(a.gather.pr),
+        (error) => provider.isTransientError(error),
+        'existing-comment refresh',
+      );
+      const originalIds = new Set(a.gather.existingComments.map((comment) => comment.id));
+      const liveCounts = new Map<string, number>();
+      for (const comment of refreshed) {
+        if (originalIds.has(comment.id) || !comment.file || !comment.line) continue;
+        const key = commentKey(comment.file, comment.line, comment.body);
+        if (expectedCounts.has(key)) liveCounts.set(key, (liveCounts.get(key) ?? 0) + 1);
+      }
+      for (const [key, count] of liveCounts) {
+        confirmedCounts.set(key, Math.max(confirmedCounts.get(key) ?? 0, Math.min(count, expectedCounts.get(key)!)));
+      }
+      process.stderr.write(`[review] read ${refreshed.length} comment(s); reconciled eligible publication without changing retained findings\n`);
+    } catch (error) {
+      const why = `could not re-read the PR's comments (${(error as Error).message})`;
+      if (a.publish && !a.forcePost) {
+        throw new Error(`${why} — refusing to post against the pre-post snapshot; retry when the API is healthy, or use --force-post after checking the PR`);
+      }
+      process.stderr.write(`[review] ${why}; keeping only previously confirmed publication evidence\n`);
+    }
+  }
+  const remainingConfirmations = new Map(confirmedCounts);
+  const confirmedKeys: string[] = [];
+  const pendingPublicationFindings = publicationEligibleFindings.filter((_finding, index) => {
+    const key = eligibleKeys[index]!;
+    const count = remainingConfirmations.get(key) ?? 0;
+    if (count === 0) return true;
+    remainingConfirmations.set(key, count - 1);
+    confirmedKeys.push(key);
+    return false;
+  });
+
   let postResult: Awaited<ReturnType<typeof runPost>> | undefined;
   if (a.publish) {
-    const marker = readPostedMarker(a.outDir, a.homeOverride);
     // Refuse re-posting when we KNOW the prior post fully succeeded, when the
     // marker is corrupt, or when the prior run could not verify its writes —
     // all three are "cannot rule out a completed post", so all three fail
     // closed. A partial *verified* post falls through so resume can recover
     // the un-posted rest.
-    const known = marker !== null && marker !== 'corrupt' ? marker : null;
-    const fullyPosted = known !== null && known.attempted > 0 && known.posted >= known.attempted;
+    const fullyPosted = known !== null && known.posted >= known.attempted &&
+      (known.attempted > 0 || publicationEligibleFindings.length === 0);
     const unverified = known !== null && known.verified === false;
     if (!a.forcePost && (marker === 'corrupt' || fullyPosted || unverified)) {
       const why =
@@ -733,7 +737,21 @@ export async function finalizeReview(a: {
             : `this run already posted ${known!.posted} comment(s)`;
       process.stderr.write(`[review] ${why}; skipping post (use --force-post to override)\n`);
       appendProgress(a.outDir, 'post', 'skipped — already posted');
+      if (fullyPosted && !unverified) {
+        postResult = {
+          attempted: publicationEligibleFindings.length, posted: Math.max(known!.posted, confirmedKeys.length),
+          skipped: 0, errors: [], verified: true, confirmedKeys,
+        };
+      } else if (plan?.schemaVersion === 2) {
+        postResult = {
+          attempted: publicationEligibleFindings.length, posted: confirmedKeys.length, skipped: 0, verified: false,
+          confirmedKeys, errors: pendingPublicationFindings.map((finding) => ({ finding, error: why })),
+        };
+      }
     } else {
+      if (known?.confirmedKeys && (!a.forcePost || plan?.schemaVersion === 2) && known.posted > confirmedKeys.length) {
+        throw new Error('publication refused [posting-evidence-missing]: prior confirmed writes cannot be identified; refusing to demote or duplicate them');
+      }
       if (known && known.posted < known.attempted) {
         process.stderr.write(
           `[review] prior post was partial (${known.posted}/${known.attempted}) — re-posting the rest; findings already on the PR are skipped after the read-back\n`,
@@ -745,13 +763,15 @@ export async function finalizeReview(a: {
         {
           reviewerName: 'merged',
           model: '(single-session)',
-          findings: finalFindings,
+          findings: pendingPublicationFindings,
           rawOutput: '',
           durationMs: 0,
           exitCode: 0,
         },
       ];
-      postResult = await runPost({ prUrl: a.prUrl, outputs: wrapper, publish: true, gather: a.gather, provider: a.provider });
+      const attempt = await runPost({ prUrl: a.prUrl, outputs: wrapper, publish: true, gather: a.gather, provider: a.provider });
+      confirmedKeys.push(...attempt.confirmedKeys);
+      postResult = { ...attempt, attempted: publicationEligibleFindings.length, posted: confirmedKeys.length, confirmedKeys };
       // Unconditional: a publish attempt happened, and that fact is the guard.
       // Gating this on `posted > 0` is what left the field incident's run with
       // no marker at all, so its --resume re-posted all 56 comments.
@@ -759,6 +779,8 @@ export async function finalizeReview(a: {
         posted: postResult.posted,
         attempted: postResult.attempted,
         verified: postResult.verified,
+        ...(plan ? { planFingerprint: plan.fingerprint } : {}),
+        confirmedKeys,
       }, a.homeOverride);
       appendProgress(a.outDir, 'post', `${postResult.posted} posted${postResult.verified ? '' : ' (unverified)'}`);
     }
@@ -782,6 +804,8 @@ export async function finalizeReview(a: {
     postResult,
     a.passRouting,
     [...(a.degraded ?? []), ...operationalFailures],
+    publication,
+    a.dryRun ? pendingPublicationFindings.length : undefined,
   );
   if (hasOperationalFailure) {
     const operationalError = ['operational review failure:', ...operationalFailures.map((failure) => `- ${failure}`)].join('\n');
@@ -796,19 +820,6 @@ export async function finalizeReview(a: {
     }
   }
   writeFileSync(join(a.outDir, 'pr-review-summary.md'), summary, 'utf8');
-  writeFileSync(
-    join(a.outDir, 'pr-review-findings.json'),
-    JSON.stringify(
-      {
-        reviewers: a.outputs.map((o) => ({ reviewer: o.reviewerName, findings: o.findings })),
-        finalFindings,
-        droppedCount,
-      },
-      null,
-      2,
-    ),
-    'utf8',
-  );
   process.stderr.write(`[review] wrote summary to ${join(a.outDir, 'pr-review-summary.md')}\n`);
   if (hasOperationalFailure) {
     appendProgress(a.outDir, 'error', `${operationalFailures.length} operational failure(s)`);
@@ -827,6 +838,7 @@ export async function finalizeReview(a: {
     writeFinalizationRecord(a.outDir, a.homeOverride, {
       schemaVersion: 1,
       planFingerprint: plan.fingerprint,
+      execution: { dryRun: !!a.dryRun, publish: a.publish },
       completedAt: new Date().toISOString(),
       exitCode,
       summaryPath,
@@ -1054,6 +1066,12 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
       throw new Error('resume recovery refused [control-record-incomplete]: authoritative dispatch plan and delivery state are required');
     }
     const plan = assertDispatchPlanMirrors(planMirrorPath, authoritativePlanPath);
+    if (opts.publishMinSeverity !== undefined && opts.publishMinSeverity !== planPublicationMinimumSeverity(plan)) {
+      throw new Error(
+        `resume recovery refused [publish-min-severity-mismatch]: saved threshold ${planPublicationMinimumSeverity(plan)} ` +
+        `does not match ${opts.publishMinSeverity}; omit the flag or use the saved threshold`,
+      );
+    }
     if (!samePrIdentity(requestedRef, plan.pr) || resolve(plan.runDir) !== resolve(outDir)) {
       throw new Error('resume recovery refused [identity-mismatch]: saved plan does not belong to this PR/run directory');
     }
@@ -1148,6 +1166,7 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
       publish: promotingDryRunToPublish || plan.execution.publish,
       dryRun: promotingDryRunToPublish ? false : plan.execution.dryRun,
       failOn: plan.execution.failOn,
+      publishMinSeverity: planPublicationMinimumSeverity(plan),
       findingsUnavailable: session.findingsUnavailable,
       deliveryState: session.deliveryState,
       operationalFailures: resumedCompanionFailures(outDir, session.outputs),
@@ -1160,6 +1179,9 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     });
   }
 
+  if (opts.publishMinSeverity !== undefined && opts.publishMinSeverity !== 'NIT') {
+    throw new Error('resume refused [publish-min-severity-mismatch]: legacy runs have no authenticated publication threshold; use a fresh review or explicit post command');
+  }
   let outputs: ReviewerOutput[] | null = null;
   let loadedLegacyOutput: (typeof REVIEWER_OUTPUT_FILES)[number] | null = null;
   for (const f of REVIEWER_OUTPUT_FILES) {
@@ -1242,6 +1264,7 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     publish: !!opts.publish,
     dryRun: opts.dryRun,
     failOn: opts.failOn,
+    publishMinSeverity: 'NIT',
     findingsUnavailable: false,
     operationalFailures: resumedCompanionFailures(outDir, outputs),
     forcePost: opts.forcePost,
@@ -1628,6 +1651,7 @@ async function reviewPipeline(opts: ReviewCmdOptions, where: { outDir?: string }
       publish: !!opts.publish,
       dedupeMode: config.dedupeMode,
       failOn: opts.failOn,
+      publishMinSeverity: opts.publishMinSeverity ?? 'NIT',
     },
     configProjection: {
       defaultModel: config.defaultModel,
@@ -1832,6 +1856,7 @@ async function reviewPipeline(opts: ReviewCmdOptions, where: { outDir?: string }
     publish: !!opts.publish,
     dryRun: opts.dryRun,
     failOn: opts.failOn,
+    publishMinSeverity: opts.publishMinSeverity,
     findingsUnavailable: session.findingsUnavailable,
     deliveryState: session.deliveryState,
     operationalFailures: [...passOperationalFailures, ...companionOperationalFailures],

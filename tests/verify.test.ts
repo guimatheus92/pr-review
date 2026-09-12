@@ -17,7 +17,9 @@ import { canonicalJson, sha256, sha256File } from '../src/util/atomic-json.js';
 import { CHECKS, TEST_ONLY, loadVerifyContext, runChecks, runVerify } from '../src/commands/verify.js';
 import { NO_POSTING_DIRECTIVE } from '../src/dispatch/single-session.js';
 import type { PrProvider } from '../src/providers/types.js';
-import type { ExistingComment, Finding, PrMetadata } from '../src/types.js';
+import type { ExistingComment, Finding, PrMetadata, Severity } from '../src/types.js';
+import { partitionFindingsForPublication, SEVERITIES } from '../src/util/severity.js';
+import { commentKey } from '../src/commands/post.js';
 
 const RUN_ID = 'github__o__r__1__1970-01-01T00-00-00-000Z';
 const PR_URL = 'https://github.com/o/r/pull/1';
@@ -65,6 +67,9 @@ function stubProvider(f: Fixture): PrProvider {
 function healthyRun(over: {
   findings?: Finding[];
   dryRun?: boolean;
+  publishMinSeverity?: Severity;
+  failOn?: Severity;
+  promoted?: boolean;
   changedFilesComplete?: boolean;
   exitCode?: 0 | 1 | 2;
   errorTxt?: boolean;
@@ -88,6 +93,8 @@ function healthyRun(over: {
     { severity: 'LOW', title: 'two', body: 'second finding body', file: 'src/a.ts', line: 3 },
   ];
   const dryRun = over.dryRun ?? false;
+  const publishing = !dryRun || !!over.promoted;
+  const selected = partitionFindingsForPublication(findings, over.publishMinSeverity);
 
   const gather = {
     pr: { provider: 'github', url: PR_URL, owner: 'o', repo: 'r', number: 1 },
@@ -127,14 +134,18 @@ function healthyRun(over: {
     JSON.stringify({ plannedReviewers: [], missingReviewers: over.companionsMissing ?? [], duplicateReviewers: [] }),
     'utf8',
   );
-  writeFileSync(join(runDir, 'pr-review-findings.json'), JSON.stringify({ finalFindings: findings, droppedCount: 0 }), 'utf8');
+  writeFileSync(join(runDir, 'pr-review-findings.json'), JSON.stringify({
+    reviewers: [{ reviewer: 'pack/security', findings }],
+    finalFindings: findings, droppedCount: 0, publication: selected.publication,
+  }), 'utf8');
   writeFileSync(join(runDir, 'pr-review-summary.md'), '# PR Review Summary\n', 'utf8');
   writeFileSync(join(runDir, 'progress.ndjson'), '', 'utf8');
   const reviewerPath = join(runDir, 'raw-pack_security.json');
-  writeFileSync(reviewerPath, '[]', 'utf8');
+  writeFileSync(reviewerPath, JSON.stringify(findings), 'utf8');
   if (over.errorTxt) writeFileSync(join(runDir, ERROR_FILE), 'boom\n', 'utf8');
 
   const controlDir = controlDirForRun(runDir, home);
+  const additionalArtifacts = over.seedPlanArtifacts?.(runDir) ?? [];
   const plan = createDispatchPlan({
     runId: RUN_ID,
     runDir,
@@ -150,10 +161,13 @@ function healthyRun(over: {
     timeoutMs: 1,
     phase1Path: join(runDir, 'phase1-findings.json'),
     findingsPath: join(runDir, 'single-session-findings.json'),
-    execution: { dryRun, publish: !dryRun, dedupeMode: 'strict' },
+    execution: { dryRun, publish: !dryRun, dedupeMode: 'off', publishMinSeverity: over.publishMinSeverity, failOn: over.failOn },
     configProjection: {},
-    configFingerprint: 'test',
-    artifacts: over.seedPlanArtifacts?.(runDir) ?? [],
+    configFingerprint: sha256(canonicalJson({})),
+    artifacts: [
+      { path: join(runDir, 'pr-review-gather.json'), sha256: sha256File(join(runDir, 'pr-review-gather.json')) },
+      ...additionalArtifacts,
+    ],
     reviewers: [{
       name: 'pack/security', kind: 'pass', description: 'Review security', agentType: 'general-purpose',
       promptTemplate: '{{PR_REVIEW_OUTPUT_PATH}}', canonicalOutputPath: reviewerPath,
@@ -169,6 +183,9 @@ function healthyRun(over: {
   }
   writeDispatchPlan(plan, join(runDir, 'dispatch-plan.json'), join(controlDir, 'dispatch-plan.json'));
 
+  const consolidated = JSON.stringify({ reviewers: [{ name: 'pack/security', findings }] });
+  writeFileSync(plan.phase1Path, consolidated);
+  writeFileSync(plan.findingsPath, consolidated);
   const state: DeliveryState = {
     schemaVersion: 1,
     planFingerprint: plan.fingerprint,
@@ -179,7 +196,7 @@ function healthyRun(over: {
     missing: [],
     invalid: [],
     recoveredFindingCount: findings.length,
-    severityCounts: { CRITICAL: 0, HIGH: 1, MEDIUM: 0, LOW: 1, NIT: 0 },
+    severityCounts: Object.fromEntries(SEVERITIES.map((severity) => [severity, findings.filter((finding) => finding.severity === severity).length])),
     reviewerAttempts: { 'pack/security': 1 },
     reviewerDigests: { 'pack/security': sha256File(reviewerPath) },
     runtimeAttempts: [
@@ -198,16 +215,22 @@ function healthyRun(over: {
       },
     ],
     phase1: 'valid',
+    phase1Digest: sha256File(plan.phase1Path),
     consolidated: 'valid',
-    verifier: { state: 'not-required', attempts: 0 },
+    consolidatedDigest: sha256File(plan.findingsPath),
+    verifier: { state: 'skipped-disabled', attempts: 0 },
     codex: { state: 'disabled', attempts: 0 },
     reasonCodes: [],
   } as unknown as DeliveryState;
   over.mutateState?.(state);
   writeDeliveryState(state, join(runDir, 'delivery-state.json'), join(controlDir, 'delivery-state.json'));
 
-  if (!dryRun) {
-    writePostedMarker(runDir, { posted: findings.length, attempted: findings.length, verified: true }, home);
+  if (publishing) {
+    writePostedMarker(runDir, {
+      posted: selected.publication.eligibleCount, attempted: selected.publication.eligibleCount, verified: true,
+      planFingerprint: plan.fingerprint,
+      confirmedKeys: selected.publicationEligibleFindings.map((finding) => commentKey(finding.file, finding.line, finding.body)),
+    }, home);
   }
 
   const authoritative = readAuthoritativeDispatchPlan(join(controlDir, 'dispatch-plan.json'));
@@ -216,6 +239,7 @@ function healthyRun(over: {
   writeFinalizationRecord(runDir, home, {
     schemaVersion: 1,
     planFingerprint: authoritative.fingerprint,
+    execution: { dryRun: !publishing, publish: publishing },
     completedAt: '2024-01-01T00:00:30.000Z',
     exitCode: over.exitCode ?? 0,
     summaryPath,
@@ -227,7 +251,7 @@ function healthyRun(over: {
   return {
     home,
     runDir,
-    comments: dryRun ? [] : findings.map((f) => comment({ body: f.body, file: f.file, line: f.line })),
+    comments: publishing ? selected.publicationEligibleFindings.map((finding) => comment({ body: finding.body, file: finding.file, line: finding.line })) : [],
     metadata: { ...gather.metadata, headSha: over.headSha ?? 'head1234' } as unknown as PrMetadata,
     cleanup: () => rmSync(home, { recursive: true, force: true }),
   };
@@ -248,6 +272,124 @@ function row(rows: { id: string; status: string; evidence: string }[], id: strin
   assert.ok(found, `no row for ${id}`);
   return found;
 }
+
+function resignFindingsArtifact(fixture: Fixture): void {
+  const record = JSON.parse(readFileSync(join(fixture.runDir, 'finalization.json'), 'utf8'));
+  record.findingsDigest = sha256File(join(fixture.runDir, 'pr-review-findings.json'));
+  writeFinalizationRecord(fixture.runDir, fixture.home, record);
+}
+
+test('verify publication — filtered and promoted runs retain full evidence and expect only eligible threads', async () => {
+  for (const promoted of [false, true]) {
+    const fixture = healthyRun({ publishMinSeverity: 'HIGH', dryRun: promoted, promoted });
+    try {
+      assert.equal(fixture.comments.length, 1);
+      const rows = await rowsFor(fixture);
+      assert.deepEqual(rows.filter((result) => result.status === 'fail'), []);
+      for (const id of ['INV-POST-01', 'INV-POST-07', 'INV-OUT-02']) assert.equal(row(rows, id).status, 'pass');
+      const artifact = JSON.parse(readFileSync(join(fixture.runDir, 'pr-review-findings.json'), 'utf8'));
+      assert.equal(artifact.finalFindings.length, 2);
+      assert.deepEqual(artifact.publication, { minimumSeverity: 'HIGH', eligibleCount: 1, suppressedCount: 1 });
+    } finally {
+      fixture.cleanup();
+    }
+  }
+});
+
+test('verify publication — zero eligible is audited and a suppressed write fails even without a posting identity', async () => {
+  const fixture = healthyRun({ publishMinSeverity: 'CRITICAL' });
+  try {
+    const rows = await rowsFor(fixture);
+    assert.equal(row(rows, 'INV-POST-01').status, 'pass');
+    assert.equal(row(rows, 'INV-POST-07').status, 'pass');
+    fixture.comments.push(comment({ body: 'second finding body', file: 'src/a.ts', line: 3, author: 'another-identity' }));
+    const violation = row(await rowsFor(fixture), 'INV-POST-07');
+    assert.equal(violation.status, 'fail');
+    assert.match(violation.evidence, /suppressed finding/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('verify publication — a missing eligible finding still fails the inline-thread invariant', async () => {
+  const fixture = healthyRun({ publishMinSeverity: 'HIGH' });
+  try {
+    fixture.comments = [];
+    assert.equal(row(await rowsFor(fixture), 'INV-POST-01').status, 'fail');
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('verify publication — pre-existing suppressed comments are not attributed as new unplanned writes', async () => {
+  const fixture = healthyRun({ publishMinSeverity: 'HIGH', seedPlanArtifacts: (runDir) => {
+    const path = join(runDir, 'pr-review-gather.json');
+    const gather = JSON.parse(readFileSync(path, 'utf8'));
+    gather.existingComments = [comment({ id: 'original-low', body: 'second finding body', file: 'src/a.ts', line: 3 })];
+    writeFileSync(path, JSON.stringify(gather));
+    return [{ path, sha256: sha256File(path) }];
+  } });
+  try {
+    fixture.comments.push(comment({ id: 'original-low', body: 'second finding body', file: 'src/a.ts', line: 3 }));
+    const rows = await rowsFor(fixture);
+    assert.equal(row(rows, 'INV-POST-01').status, 'pass');
+    assert.equal(row(rows, 'INV-POST-06').status, 'pass');
+    assert.equal(row(rows, 'INV-POST-07').status, 'pass');
+    fixture.comments.push(comment({ id: 'new-low', body: 'second finding body', file: 'src/a.ts', line: 3 }));
+    assert.equal(row(await rowsFor(fixture), 'INV-POST-06').status, 'fail');
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('verify publication — metadata cannot override authenticated policy even when finalization is signed', async () => {
+  const fixture = healthyRun({ publishMinSeverity: 'HIGH' });
+  try {
+    const path = join(fixture.runDir, 'pr-review-findings.json');
+    const artifact = JSON.parse(readFileSync(path, 'utf8'));
+    artifact.publication = { minimumSeverity: 'NIT', eligibleCount: 2, suppressedCount: 0 };
+    writeFileSync(path, JSON.stringify(artifact));
+    resignFindingsArtifact(fixture);
+    const rows = await rowsFor(fixture);
+    assert.equal(row(rows, 'INV-OUT-02').status, 'fail');
+    assert.match(row(rows, 'INV-OUT-02').evidence, /publication metadata/);
+    assert.equal(row(rows, 'INV-POST-07').status, 'fail');
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('verify publication — authenticated final artifacts cannot silently lose suppressed findings', async () => {
+  const fixture = healthyRun({ publishMinSeverity: 'HIGH' });
+  try {
+    const path = join(fixture.runDir, 'pr-review-findings.json');
+    const artifact = JSON.parse(readFileSync(path, 'utf8'));
+    artifact.finalFindings.pop();
+    artifact.publication.suppressedCount = 0;
+    writeFileSync(path, JSON.stringify(artifact));
+    resignFindingsArtifact(fixture);
+    const result = row(await rowsFor(fixture), 'INV-OUT-02');
+    assert.equal(result.status, 'fail');
+    assert.match(result.evidence, /complete deduplicated review/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('verify publication — fail-on is graded against suppressed findings as well', async () => {
+  for (const exitCode of [0, 1] as const) {
+    const fixture = healthyRun({
+      findings: [{ severity: 'MEDIUM', title: 'Precision', body: 'Fractional values lose precision.', file: 'src/a.ts', line: 2 }],
+      publishMinSeverity: 'HIGH', failOn: 'MEDIUM', exitCode,
+    });
+    try {
+      assert.equal(fixture.comments.length, 0);
+      assert.equal(row(await rowsFor(fixture), 'INV-OUT-01').status, exitCode === 1 ? 'pass' : 'fail');
+    } finally {
+      fixture.cleanup();
+    }
+  }
+});
 
 test('verify — every registered invariant produces exactly one row, always', async () => {
   const f = healthyRun();

@@ -13,6 +13,7 @@ import {
   type DeliveryState,
 } from '../src/dispatch/delivery.js';
 import { sha256File } from '../src/util/atomic-json.js';
+import { writePostedMarker } from '../src/util/posted-marker.js';
 
 // status resolves run-id → RUNS_ROOT/<id>; seed test dirs there and clean up.
 function seed(id: string): string {
@@ -88,6 +89,7 @@ function seedFinalizedAuthority(
   writeFinalizationRecord(dir, undefined, {
     schemaVersion: 1,
     planFingerprint: plan.fingerprint,
+    execution: { dryRun: true, publish: false },
     completedAt: new Date(0).toISOString(),
     exitCode,
     summaryPath,
@@ -101,6 +103,23 @@ function seedFinalizedAuthority(
 function idFromDir(dir: string): string {
   return dir.split(/[\\/]/).pop()!;
 }
+
+test('runStatus — a promoted zero-eligible run never advertises a dry-run demotion', () => {
+  const id = 'status-publication-promotion';
+  const dir = seed(id);
+  const controlDir = seedRecoveryAuthority(dir, deliveryState('complete'));
+  try {
+    const plan = readAuthoritativeDispatchPlan(join(controlDir, 'dispatch-plan.json'));
+    writePostedMarker(dir, { posted: 0, attempted: 0, verified: true, confirmedKeys: [], planFingerprint: plan.fingerprint });
+    const result = runStatus(id);
+    assert.equal(result.state, 'interrupted');
+    assert.match(result.text, /--resume/);
+    assert.doesNotMatch(result.text, /--dry-run/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(controlDir, { recursive: true, force: true });
+  }
+});
 
 test('runStatus — done when the summary is on disk (text IS the summary)', () => {
   const id = 'status-test-done';

@@ -10,8 +10,84 @@ import { readProgress } from '../src/util/progress.js';
 import type { Finding, PrRef, ReviewerOutput } from '../src/types.js';
 import type { BatchComment, PrProvider } from '../src/providers/types.js';
 import type { DeliveryState } from '../src/dispatch/delivery.js';
+import { readPostedMarker } from '../src/util/posted-marker.js';
 
 const PATCH = ['@@ -10,4 +10,5 @@', ' c10', '-old11', '+new11', '+new12', ' c13'].join('\n');
+
+test('finalizeReview — publication filters after dedupe and full persistence, including dry-run evidence', async () => {
+  const retained: Finding[] = [
+    { severity: 'CRITICAL', title: 'Credential exfiltration', body: 'Credentials cross the trust boundary.', file: 'src/a.ts', line: 11 },
+    { severity: 'HIGH', title: 'Authorization mismatch', body: 'Authorization permits another tenant.', file: 'src/a.ts', line: 25 },
+    { severity: 'MEDIUM', title: 'Precision lost', body: 'Fractional precision disappears.', file: 'src/a.ts', line: 35 },
+    { severity: 'LOW', title: 'Redundant lookup', body: 'Repeated lookups waste resources.', file: 'src/a.ts', line: 45 },
+    { severity: 'NIT', title: 'Naming convention', body: 'Naming differs from neighboring declarations.', file: 'src/a.ts', line: 55 },
+  ];
+  const raw = [...retained, { ...retained[3]!, severity: 'HIGH' as const }];
+  for (const dryRun of [false, true]) {
+    const dir = mkdtempSync(join(tmpdir(), 'pr-publication-finalize-'));
+    const home = mkdtempSync(join(tmpdir(), 'pr-publication-home-'));
+    try {
+      const { provider, calls } = fakeProvider();
+      provider.postBatchComments = async (_ref, _sha, comments) => {
+        const persisted = JSON.parse(readFileSync(join(dir, 'pr-review-findings.json'), 'utf8'));
+        assert.deepEqual(persisted.finalFindings, retained, 'all findings must already be on disk at the write boundary');
+        assert.deepEqual(persisted.publication, { minimumSeverity: 'HIGH', eligibleCount: 2, suppressedCount: 3 });
+        assert.deepEqual(comments.map((comment) => comment.body), retained.slice(0, 2).map((finding) => finding.body));
+        calls.batches.push(comments);
+        return { posted: comments.length };
+      };
+      const result = await finalizeReview({
+        prUrl: 'u', outDir: dir, gather: gatherFixture(),
+        outputs: [{ reviewerName: 'mixed', model: 'm', findings: raw, rawOutput: '', durationMs: 0, exitCode: 0 }],
+        dedupeMode: 'strict', publish: !dryRun, dryRun, publishMinSeverity: 'HIGH',
+        findingsUnavailable: false, overallStart: Date.now(), provider, homeOverride: home,
+      });
+      assert.equal(result.exitCode, 0);
+      assert.equal(calls.batches.length, dryRun ? 0 : 1);
+      const persisted = JSON.parse(readFileSync(join(dir, 'pr-review-findings.json'), 'utf8'));
+      assert.deepEqual(persisted.finalFindings, retained);
+      assert.deepEqual(persisted.reviewers[0].findings, raw);
+      assert.equal(persisted.droppedCount, 1, 'LOW-first duplicate must win before HIGH+ filtering');
+      assert.match(result.summary, /Publication threshold: HIGH\+ \| Eligible: 2 \/ 5 \| Suppressed: 3/);
+      for (const finding of retained) assert.ok(result.summary.includes(finding.body));
+      const bodies = result.summary.split('## Findings')[1]!;
+      for (const finding of retained) assert.ok(!bodies.includes(finding.title));
+      assert.equal(existsSync(join(dir, 'posted.marker')), !dryRun);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+});
+
+test('finalizeReview — zero eligible is zero attempted, independently of fail-on and force-post', async () => {
+  for (const failOn of [undefined, 'MEDIUM'] as const) {
+    const dir = mkdtempSync(join(tmpdir(), 'pr-publication-zero-'));
+    const home = mkdtempSync(join(tmpdir(), 'pr-publication-home-'));
+    try {
+      const { provider, calls } = fakeProvider();
+      provider.postLineComment = async () => { assert.fail('zero eligible cannot write'); };
+      const finding: Finding = { severity: 'MEDIUM', title: 'Precision', body: 'Keep this research evidence.', file: 'src/a.ts', line: 11 };
+      const result = await finalizeReview({
+        prUrl: 'u', outDir: dir, gather: gatherFixture(),
+        outputs: [{ reviewerName: 'one', model: 'm', findings: [finding], rawOutput: '', durationMs: 0, exitCode: 0 }],
+        dedupeMode: 'strict', publish: true, publishMinSeverity: 'HIGH', failOn, forcePost: true,
+        findingsUnavailable: false, overallStart: Date.now(), provider, homeOverride: home,
+      });
+      assert.equal(result.exitCode, failOn ? 1 : 0);
+      assert.equal(calls.batches.length, 0);
+      const marker = readPostedMarker(dir, home);
+      assert.ok(marker && marker !== 'corrupt');
+      assert.equal(marker.attempted, 0);
+      assert.equal(marker.posted, 0);
+      assert.equal(marker.verified, true);
+      assert.deepEqual(JSON.parse(readFileSync(join(dir, 'pr-review-findings.json'), 'utf8')).finalFindings, [finding]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+});
 
 function gatherFixture() {
   return {

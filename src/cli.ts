@@ -9,7 +9,8 @@ import { pluginsList, pluginsDoctor } from './commands/plugins.js';
 import { showConfig } from './commands/config.js';
 import { readFileSync } from 'node:fs';
 import { RUNTIME_CHOICES, type RuntimeChoice } from './dispatch/runtime.js';
-import type { GatherOutput, ReviewerOutput, Severity } from './types.js';
+import type { GatherOutput, ReviewerOutput } from './types.js';
+import { parseSeverity, partitionFindingsForPublication } from './util/severity.js';
 
 // Injected by scripts/bundle.mjs from package.json; dev runs via tsx see the fallback.
 declare const __PR_REVIEW_VERSION__: string | undefined;
@@ -97,6 +98,7 @@ program
   .option('--context-only', 'Prepare pr-context.md + the pass files, print the stack + pass table, and exit', false)
   .option('--lang <code>', 'Language for finding titles/bodies (e.g. pt-BR, es)')
   .option('--fail-on <severity>', 'Exit 1 when any finding at/above this severity survives dedupe (critical|high|medium|low|nit)')
+  .option('--publish-min-severity <severity>', 'Publish only findings at/above this severity; keep all findings locally (critical|high|medium|low|nit; default: nit)')
   .option('--runtime <name>', 'Agent CLI hosting the session: copilot | claude | auto (probe PATH)', undefined)
   .option('--no-codex', 'Never run the Codex second-opinion reviewer, even when the codex CLI is installed')
   .option('--resume <run-id>', 'Resume a prior run: reuse its reviewer outputs on disk, skip dispatch, then dedupe + post')
@@ -128,6 +130,7 @@ program
         contextOnly: boolean;
         lang?: string;
         failOn?: string;
+        publishMinSeverity?: string;
         runtime?: string;
         codex: boolean;
         resume?: string;
@@ -143,16 +146,8 @@ program
           console.error(`--runtime must be one of: ${RUNTIME_CHOICES.join(', ')}`);
           process.exit(2);
         }
-        let failOn: Severity | undefined;
-        if (opts.failOn) {
-          const norm = opts.failOn.toUpperCase();
-          const allowed: Severity[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'NIT'];
-          if (!(allowed as string[]).includes(norm)) {
-            console.error(`--fail-on must be one of: ${allowed.join(', ').toLowerCase()}`);
-            process.exit(2);
-          }
-          failOn = norm as Severity;
-        }
+        const failOn = parseSeverity(opts.failOn, '--fail-on');
+        const publishMinSeverity = parseSeverity(opts.publishMinSeverity, '--publish-min-severity');
         // Background mode: spawn a detached child that runs the review, and
         // return a run-id the caller can poll. Resume/context-only are already
         // fast/foreground, so --detach is a no-op for them.
@@ -188,6 +183,7 @@ program
           contextOnly: opts.contextOnly,
           language: opts.lang,
           failOn,
+          publishMinSeverity,
           runtime: opts.runtime as RuntimeChoice | undefined,
           withCodex: opts.codex ? undefined : false,
           resumeRunId: opts.resume,
@@ -220,10 +216,12 @@ program
   .command('post <pr-url>')
   .description('Post pre-computed findings (from a JSON file) as line comments')
   .requiredOption('--findings <path>', 'Path to a findings.json file produced by `review`')
+  .option('--publish-min-severity <severity>', 'Publish only findings at/above this severity; do not change the input file (critical|high|medium|low|nit; default: nit)')
   .option('--dry-run', 'Show what would be posted without posting (posting is the default)', false)
   .option('--publish', '(deprecated: posting is now the default; use --dry-run to preview)', false)
-  .action(async (prUrl: string, opts: { findings: string; dryRun: boolean; publish: boolean }) => {
+  .action(async (prUrl: string, opts: { findings: string; dryRun: boolean; publish: boolean; publishMinSeverity?: string }) => {
     try {
+      const minimumSeverity = parseSeverity(opts.publishMinSeverity, '--publish-min-severity');
       const raw = JSON.parse(readFileSync(opts.findings, 'utf8')) as { reviewers?: Array<{ reviewer: string; model: string; findings: ReviewerOutput['findings'] }>; finalFindings?: ReviewerOutput['findings'] } | Array<{ reviewer: string; model: string; findings: ReviewerOutput['findings'] }>;
       let outputs: ReviewerOutput[];
       if (Array.isArray(raw)) {
@@ -256,6 +254,17 @@ program
           exitCode: 0,
         }));
       }
+      const { publicationEligibleFindings, publication } = partitionFindingsForPublication(
+        outputs.flatMap((output) => output.findings), minimumSeverity,
+      );
+      outputs = [{
+        reviewerName: 'merged', model: '(multi)', findings: publicationEligibleFindings,
+        rawOutput: '', durationMs: 0, exitCode: 0,
+      }];
+      process.stderr.write(
+        `[post] publication threshold ${publication.minimumSeverity}+: ${publication.eligibleCount} eligible, ` +
+        `${publication.suppressedCount} suppressed; input artifact unchanged\n`,
+      );
       // Line snapping needs the diff; without it, findings citing lines
       // outside the diff 422 on the batch and burn retries per comment. Hence
       // patchesRequired: this command is not reviewing the PR, so the

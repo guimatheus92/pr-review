@@ -30,6 +30,7 @@ import { parse as parseYaml } from 'yaml';
 import { matchExpectedFindings, safeLogValue, stackExpectationFailures } from './eval-assertions.mjs';
 import { credentialEnv, credentialedGitUrl, listComments, parsePrUrl, resetPr, resolveToken } from './acceptance-reset.mjs';
 import { parseSeverity } from '../dist/util/severity.js';
+import { redactRuntimeSecrets } from '../dist/util/text.js';
 import { publicationFixtureFindings } from '../evals/acceptance/publication-runtime.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -730,7 +731,17 @@ async function runPublicationCell(provider) {
       stdout = String(error.stdout ?? '');
       stderr = String(error.stderr ?? '');
     }
-    evidence.commands.push({ args: [executable, ...args], exitCode, stdout, stderr });
+    // The child runs with a live provider PAT in its environment, and this file is
+    // kept on disk for inspection long after the run. Nothing echoes the token today,
+    // but "today" is not a guarantee an artifact should rest on — one provider error
+    // that quotes its own request would write the credential here permanently. Same
+    // redactor the runtime failure artifacts already use.
+    evidence.commands.push({
+      args: [executable, ...args].map(redactRuntimeSecrets),
+      exitCode,
+      stdout: redactRuntimeSecrets(stdout),
+      stderr: redactRuntimeSecrets(stderr),
+    });
     if (expectedExit === null) assert.notEqual(exitCode, 0, 'the older CLI must refuse a schema-v2 plan');
     else assert.equal(exitCode, expectedExit, `publication command exited ${exitCode}, expected ${expectedExit}: ${safeLogValue(stderr)}`);
     return { stdout, stderr };

@@ -89,3 +89,30 @@ export function matchExpectedFindings(patterns = [], findings = [], distinct = f
 export function safeLogValue(value) {
   return JSON.stringify(String(value ?? ''));
 }
+
+/**
+ * The two defects planted in the acceptance fixture, and how a finding ACCUSES
+ * the control handler of one.
+ *
+ * Matched against the TITLE only. The title is the accusation; the body is where
+ * the reasoning lives, and reasoning legitimately names the other rule in order to
+ * rule it OUT — "a separate defect from the SQL-helper issue: greetHandler already
+ * uses the parameterised q(), so fixing ACC-SQL-001 does not fix this" is DEFENDING
+ * the control. Matching the body counted that as an attack and failed the cell.
+ *
+ * Four correct findings about the control have now failed this assertion;
+ * evals/acceptance/expected.yaml records the first three. The check discriminates
+ * by WHERE the text sits, never by parsing prose for contrast — the same structural
+ * instinct that already excludes the verifier, which quotes what it adjudicates.
+ */
+export const PLANTED_DEFECTS = [
+  ['SQL injection', /sql injection|ACC-SQL-001/i],
+  ['the missing audit call', /ACC-LOG-002/i],
+];
+
+/** The planted defect a finding accuses the control of, or undefined. */
+export function accusedPlantedDefect(finding, planted = PLANTED_DEFECTS) {
+  const title = String(finding?.title ?? '');
+  for (const [what, re] of planted) if (re.test(title)) return what;
+  return undefined;
+}

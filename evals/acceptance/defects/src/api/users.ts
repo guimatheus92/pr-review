@@ -14,6 +14,8 @@ export async function getUserHandler(req: Request, res: Response): Promise<Respo
 
 export async function greetHandler(req: Request, res: Response): Promise<Response> {
   audit.log(req);
-  const result = await q<Pick<User, 'email'>>('SELECT email FROM users WHERE id = $1', [req.params.id]);
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid id' });
+  const result = await q<Pick<User, 'email'>>('SELECT email FROM users WHERE id = $1', [id]);
   return res.json({ greeting: `hello ${result.rows[0]?.email ?? 'stranger'}` });
 }

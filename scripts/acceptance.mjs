@@ -27,7 +27,7 @@ import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
-import { matchExpectedFindings, safeLogValue, stackExpectationFailures } from './eval-assertions.mjs';
+import { accusedPlantedDefect, matchExpectedFindings, safeLogValue, stackExpectationFailures } from './eval-assertions.mjs';
 import { credentialEnv, credentialedGitUrl, listComments, parsePrUrl, resetPr, resolveToken } from './acceptance-reset.mjs';
 import { parseSeverity } from '../dist/util/severity.js';
 import { redactRuntimeSecrets } from '../dist/util/text.js';
@@ -239,11 +239,6 @@ async function runtimeBlockedReason(runtime) {
  * stays because the control has none and no correct finding about it would say
  * otherwise.
  */
-const PLANTED_DEFECTS = [
-  ['SQL injection', /sql injection|ACC-SQL-001/i],
-  ['the missing audit call', /ACC-LOG-002/i],
-];
-
 function controlFalsePositives(findings, runDir) {
   // The verifier ADJUDICATES other findings, so it quotes them — and a quoted
   // accusation carries the rule id into a finding whose whole point is to
@@ -278,10 +273,9 @@ function controlFalsePositives(findings, runDir) {
     if (quoted.has(`${f.file}:${f.line}:${f.title}`)) continue;
     const line = Number(f.line);
     if (!Number.isInteger(line) || line < start + 1 || line > end + 1) continue;
-    for (const [what, re] of PLANTED_DEFECTS) {
-      if (re.test(`${f.title ?? ''}\n${f.body ?? ''}`)) {
-        out.push(`false positive on the control: ${what} reported at ${f.file}:${line} (greetHandler, lines ${start + 1}-${end + 1}) — ${safeLogValue(String(f.title ?? '').slice(0, 120))}`);
-      }
+    const what = accusedPlantedDefect(f);
+    if (what) {
+      out.push(`false positive on the control: ${what} reported at ${f.file}:${line} (greetHandler, lines ${start + 1}-${end + 1}) — ${safeLogValue(String(f.title ?? '').slice(0, 120))}`);
     }
   }
   return out;

@@ -4,7 +4,7 @@
 
 <h1 align="center">pr-review</h1>
 
-<p align="center"><em>Every finding lands as a resolvable inline thread on the PR — GitHub, Azure DevOps and GitLab, from Copilot CLI or Claude Code.</em></p>
+<p align="center"><em>Every finding is retained; eligible findings land as resolvable inline threads — GitHub, Azure DevOps and GitLab, from Copilot CLI or Claude Code.</em></p>
 
 <p align="center">
   <a href="https://github.com/guimatheus92/pr-review/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/guimatheus92/pr-review/ci.yml?branch=main&label=CI&logo=githubactions&logoColor=white&labelColor=1e1e2e&color=22d3ee" alt="CI" /></a>
@@ -18,7 +18,7 @@
   <img src="https://img.shields.io/badge/reviews-GitHub%20%C2%B7%20Azure%20DevOps%20%C2%B7%20GitLab-22d3ee?labelColor=1e1e2e" alt="reviews GitHub, Azure DevOps and GitLab pull requests" />
 </p>
 
-**pr-review** is a plugin for [Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/plugins-creating) **or** Claude Code that reviews a pull request with parallel review passes — each one a skill drawn from synced skill packs or your own repo — inside a single agent session, and posts **every** finding back to the PR as a resolvable inline review comment: never a top-level comment, nothing dropped. A thin Node CLI does the deterministic plumbing (gather, dedupe, post); the agents only review. When the `codex` CLI is installed, a Codex second-opinion reviewer runs alongside automatically (`--no-codex` opts out).
+**pr-review** is a plugin for [Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/plugins-creating) **or** Claude Code that reviews a pull request with parallel review passes — each one a skill drawn from synced skill packs or your own repo — inside a single agent session, retains **every** deduplicated finding locally, and posts every publication-eligible finding as a resolvable inline review comment: never a top-level comment. All findings are eligible by default. A thin Node CLI does the deterministic plumbing (gather, dedupe, post); the agents only review. When the `codex` CLI is installed, a Codex second-opinion reviewer runs alongside automatically (`--no-codex` opts out).
 
 ```text
 /pr-review https://github.com/org/repo/pull/123
@@ -27,7 +27,7 @@
 
 ## Highlights
 
-- **Inline-only, nothing dropped.** Findings post as GitHub review comments, Azure DevOps threads or GitLab discussions — never a top-level comment. Lines outside the diff are snapped to it. See [posting guarantees](#posting-guarantees).
+- **Full retention, eligible-only publication.** Every deduplicated finding remains in local evidence. Eligible findings post as GitHub review comments, Azure DevOps threads or GitLab discussions — never a top-level comment. See [publication controls](#publication-controls) and [posting guarantees](#posting-guarantees).
 - **Passes, not built-in reviewers.** Every pass is one skill applied by a generic agent. Review knowledge lives in versioned [skill packs](#review-passes--skill-packs) (`awesome-copilot`, `owasp`, …) and in your repo's own skill dirs.
 - **Your rules in every pass.** Matched `.claude/skills`, `.github/instructions`, `.agents/skills`… files become authoritative project rules for every pass — no cap, never truncated. See [add your own rules](#add-your-own-rules).
 - **Stack-aware routing.** GitHub Linguist languages plus manifest dependencies rank passes by evidence tier. Preview the selection with `--context-only`.
@@ -52,9 +52,10 @@ flowchart TD
     C --> N
     N -- still incomplete --> E2["exit 2 — partial findings never post<br/>(--resume makes the bounded final attempt)"]
     N -- complete --> V["direct verifier session<br/>(only when Phase 1 has CRITICAL/HIGH findings)"]
-    V --> DD["dedupe: intra-batch + existing PR comments"]
-    DD -- "--dry-run" --> SUM["print the complete summary"]
-    DD -- publish --> POST["post inline: GitHub review · ADO threads · GitLab discussions"]
+    V --> DD["dedupe all findings against original comments<br/>persist every final finding"]
+    DD --> EL["partition publication eligibility<br/>authenticated --publish-min-severity"]
+    EL -- "--dry-run" --> SUM["print every retained finding + eligibility counts"]
+    EL -- publish --> POST["post eligible pending findings only<br/>GitHub review · ADO threads · GitLab discussions"]
     SUM --> EX["exit 0 · 1 (findings ≥ --fail-on) · 2"]
     POST --> EX
 ```
@@ -78,6 +79,7 @@ Every run reports which skills it used — a progress brief at dispatch (`N pass
 
 - [Quick start](#quick-start)
 - [Usage](#usage)
+- [Publication controls](#publication-controls)
 - [Posting guarantees](#posting-guarantees)
 - [Review passes & skill packs](#review-passes--skill-packs)
 - [Add your own rules](#add-your-own-rules)
@@ -218,12 +220,50 @@ hosts:
 
 **Exit codes:** `0` complete with no finding at/above `--fail-on`, `1` findings at/above `--fail-on`, `2` incomplete delivery or another operational failure. Partial findings never post. Without `--fail-on`, retained findings do not change the process status: exit 0 means the pipeline completed, not that the finding count is zero — configure `--fail-on` when the exit code must gate CI.
 
+## Publication controls
+
+`--publish-min-severity <severity>` controls human-visible publication volume;
+`--fail-on <severity>` controls pipeline status. Neither changes what reviewers
+analyze. Complete delivery, the unchanged verifier, full deduplication, and
+persistence of every final finding precede publication filtering.
+
+| Publication threshold (case-insensitive) | Eligible findings |
+|---|---|
+| `critical` | CRITICAL |
+| `high` | CRITICAL, HIGH |
+| `medium` | CRITICAL, HIGH, MEDIUM |
+| `low` | Everything except NIT |
+| `nit` or omitted | Everything |
+
+```bash
+pr-review review "$PR_URL" --dry-run --publish-min-severity high
+pr-review review "$PR_URL" --publish-min-severity high --fail-on medium
+pr-review post "$PR_URL" --findings findings.json --publish-min-severity high
+```
+
+The first command is advisory and writes no comments. The second publishes HIGH+
+while a MEDIUM finding still produces exit 1. All retained findings remain in
+`pr-review-findings.json` and the body-only local summary for reporting, research,
+and Hackathon adjudication. Suppressed findings are not skipped or dropped.
+
+The summary reports `Publication threshold: HIGH+ | Eligible: 3 / 11 | Suppressed: 8`.
+The JSON adds `publication: { minimumSeverity: "HIGH", eligibleCount: 3, suppressedCount: 8 }`
+without changing `finalFindings`. Zero eligible findings record zero attempted
+posts; `--fail-on` still evaluates the full retained set.
+
+Both flags are CLI-only. New schema-v2 plans authenticate the threshold and resume
+inherits it, including complete dry-run promotion. Explicit conflicts fail closed,
+even with `--force-post`. Older v1 runs remain publish-all and old binaries refuse
+v2 plans. Standalone `post` preserves its input bytes and uses only its explicit
+flag, never an implicit policy from artifact metadata. Omitted means publish all.
+
 ## Posting guarantees
 
-On a publish run (the default), every finding lands as a resolvable **inline** review thread — so each one can be discussed and resolved in place:
+On a publish run (the default), every publication-eligible finding lands as a resolvable **inline** review thread — so each one can be discussed and resolved in place:
 
 - **Never top-level.** GitHub findings post as review comments (one batched review; if the batch fails, the PR is read back and the missing comments are posted one by one). Azure DevOps findings post as threads; GitLab findings post as inline discussions. There is no top-level issue-comment fallback.
-- **Nothing dropped.** Lines outside the diff are snapped to the nearest valid diff line. On GitHub and GitLab, findings that can't anchor where they point (file outside the diff, or no location) are re-anchored to the first valid diff line, keeping the original `file:line` in the comment body. On Azure DevOps, threads are posted at the reported `file:line` as-is (ADO threads are not limited to diff lines), and a finding with no location at all lands as a resolvable PR-level thread; a thread ADO rejects is reported as an error in the summary.
+- **Nothing silently dropped.** Suppressed findings stay in local artifacts. Eligible findings outside the diff are snapped to the nearest valid diff line. On GitHub and GitLab, findings that can't anchor where they point (file outside the diff, or no location) are re-anchored to the first valid diff line, keeping the original `file:line` in the comment body. On Azure DevOps, threads are posted at the reported `file:line` as-is (ADO threads are not limited to diff lines), and a finding with no location at all lands as a resolvable PR-level thread; a thread ADO rejects is reported as an error in the summary.
+- **Body-only comments.** No severity prefix, title, footer, attribution, or bot chrome. Publication counts belong only in local aggregate metadata.
 - **Skipping only in `--dry-run`.** A failed write is retried only after the PR has been read back — a failed write is not proof that nothing was written — and anything that still fails is reported as an error in the summary, never silently dropped.
 - **No summary comment, ever.** The review does not post a verdict, a recap, or a "### Code review" banner when it finishes. The end-of-run summary is a local file (`pr-review-summary.md` in the run directory), never a comment on the PR.
 - **Never reviewed on a partial file list.** The provider's changed-file list is checked against the provider's own count and its truncation flag. On a mismatch pr-review completes the list from your checkout, or fails before caching anything — it never reviews a diff it cannot prove is whole.
@@ -348,6 +388,8 @@ pr-review review <pr-url> [flags]            # full pipeline
 #                           or bare skill name; also: verifier, codex)
 #   --lang <code>           output language for findings (yaml: language, env: PR_REVIEW_LANG)
 #   --fail-on <severity>    critical|high|medium|low|nit → exit 1 on surviving findings
+#   --publish-min-severity <severity>  publish this severity and above;
+#                           retain all findings locally (default: nit; CLI-only)
 #   --runtime <name>        copilot|claude|auto — which agent CLI hosts the session
 #                           (yaml: runtime, env: PR_REVIEW_RUNTIME; default auto)
 #   --default-model <id>    model requested from that runtime (yaml: default_model,
@@ -378,7 +420,7 @@ pr-review verify [run-id] [--pr <url>]       # audit a finished run against INVA
 #   --offline               skip the live PR read-back; rows that need it report SKIP (exit stays 0)
 #   --json                  emit the rows as JSON for CI
 pr-review gather <pr-url> [--out <path>]     # fetch + cache metadata only
-pr-review post <pr-url> --findings <path>    # post pre-computed findings
+pr-review post <pr-url> --findings <path> [--publish-min-severity <severity>]
 pr-review packs list|sync|add <source>|suggest <tags...|pr-url>   # manage skill packs
 pr-review init [--with-config] [--force]     # scaffold a starter team-rules skill + optional .pr-review.yaml
 pr-review configure [path] [--force]         # write ~/.pr-review/config.yaml

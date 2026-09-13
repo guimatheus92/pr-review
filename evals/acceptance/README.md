@@ -172,6 +172,42 @@ npm run acceptance -- --dry-run    # no posting; the posting rows report SKIP
 npm run acceptance -- --reset-only # clean the fixture PRs and stop
 ```
 
+### Publication policy proof
+
+```bash
+npm run build
+npm run acceptance -- --case publication --runtime copilot
+npm run acceptance -- --runtime copilot --publish-min-severity high
+npm run acceptance -- --runtime claude --publish-min-severity high
+```
+
+The `publication` case uses a deterministic attempt-writing runtime, not an LLM,
+but drives the real bundle and real provider writes/read-backs on all three
+existing fixture PRs. It is separate from the ordinary provider/runtime matrix.
+The selected runtime chooses which existing fixture PRs it uses; the stub itself
+exercises the Copilot dispatch protocol and needs only Node. Nothing is reseeded.
+
+It proves six raw findings become five retained findings (including a LOW-first,
+HIGH-second duplicate), while only CRITICAL/HIGH are published. It also exercises
+complete dry-run promotion, conflicting resume thresholds, `--force-post`, all
+three precomputed input shapes, zero eligible findings, a suppressed HIGH still
+triggering the verifier, and detached execution. Input files remain byte-identical.
+Every completed review is audited with `verify`; results and exact commands are
+saved under the reported `publication-<provider>` evidence directories before
+the next scenario resets the PR. The final scenario's comments remain for inspection.
+
+Optional `--baseline-cli <old-bundle>` proves a pre-v2 binary refuses a new
+authenticated plan instead of ignoring its threshold. Keep that old bundle
+outside the checkout before rebuilding. Do not run two cases against the same
+fixture PR concurrently. `--dry-run` is deliberately refused for this case:
+it cannot prove publication. Missing credentials or denied fixture access leave
+the live proof incomplete; an offline fixture is not a replacement.
+
+The ordinary matrix's optional `--publish-min-severity` uses the shared severity
+parser and forwards the flag to the real runtime review. Review-quality assertions
+still inspect every retained finding, while `verify` grades the eligible posting
+set. Without the flag, the ordinary matrix preserves publish-all behavior.
+
 ## Where the credentials live
 
 Three places, in this precedence order:

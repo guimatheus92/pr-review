@@ -47,6 +47,31 @@ Under Claude Code the plugin command is `/pr-review:pr-review <url>`; since the 
 
 Posting line comments back to the PR is the default. Add `--dry-run` to preview findings without posting.
 
+`--publish-min-severity high` publishes only CRITICAL/HIGH findings, without
+reducing analysis or removing any deduplicated finding from local evidence.
+Allowed values are case-insensitive `critical|high|medium|low|nit`, inclusive;
+omitting the flag is equivalent to `nit`. `--fail-on` is independent.
+
+```bash
+pr-review review "$PR_URL" --dry-run --publish-min-severity high
+pr-review review "$PR_URL" --publish-min-severity high --fail-on medium
+pr-review post "$PR_URL" --findings findings.json --publish-min-severity high
+```
+
+The first command is advisory and posts nothing. The second publishes HIGH+ but
+a retained MEDIUM still produces exit 1. Every finding remains in JSON and the
+body-only summary for reporting and Hackathon adjudication. Aggregate publication
+counts distinguish eligible findings from suppressed ones; suppression is never
+called skipped. Standalone `post` preserves its input bytes and does not use its
+metadata as an implicit policy. Both severity flags are CLI-only.
+
+New schema-v2 plans authenticate the threshold. Resume inherits it, including
+promotion of a complete dry run, and rejects explicit conflicts even with
+`--force-post`. Partial publishing retries only eligible pending findings;
+published findings stay in the full retained artifact and progress is cumulative.
+Older v1 runs remain publish-all, and older binaries refuse v2 plans. Use a new
+review or explicit standalone `post` for a different publication threshold.
+
 ## What it does
 
 1. Detects the provider from the URL (GitHub, Azure DevOps, or GitLab)
@@ -55,7 +80,7 @@ Posting line comments back to the PR is the default. Add `--dry-run` to preview 
 4. Prepares the run dir: `pr-context.md` (with a `## Stack` section and a pointer to the on-demand index) plus one `pass-<name>.md` per pass. When selection leaves shared project context, it is written whole to `skills-project.md`; otherwise a budgeted `skills-all.md` union provides fallback context to Codex, companions, and the verifier. Recognized companion review criteria are copied into hash-bound `companion-brief-*.md` files; every companion runs as a generic task over those files and the same materialized PR context. In the no-pack fallback, up to ten project skills become passes and only overflow remains shared context. Overflow, unmatched, and index-mode pack skills are materialized in the run dir and listed in `skills-index.md`, so confined passes can read them on demand
 5. Spawns one dispatch-only agent session. Reviewers write attempt-scoped exact JSON; under Copilot, a uniquely identified successful structured task result may fill only an absent attempt file. Node validates/promotes outputs and, when needed, runs one automatic recovery for only missing/invalid reviewers. Copilot Auto selective reviewer redispatch reuses the root Auto route captured before the initial task batch
 6. After complete Phase 1, Node conditionally runs a direct verifier for CRITICAL/HIGH findings and accounts for the optional parallel Codex sibling
-7. Only complete delivery reaches dedupe and inline posting. Partial delivery exits 2 without posting; `--dry-run` prints the complete summary instead
+7. Only complete delivery reaches full dedupe and artifact persistence, then publication filtering and eligible-only posting. Partial delivery exits 2 without posting; `--dry-run` prints all retained findings plus eligibility counts
 
 The run also reports which skills it used: a progress brief at dispatch (`N pass(es) · M project rule(s) · K on-demand`, on stderr / `detached.log` and the live `status` feed) and a `## Skills` section in the final summary — a totals line (`**Passes:** N · **Project rules (in every pass):** M · **On-demand (index):** K`) plus a `| Pass | Matched by |` table and the project rules listed by name. Index (on-demand) skills are counted, not listed by name.
 
@@ -80,6 +105,7 @@ Most review knowledge comes from skill packs (git repos under `~/.pr-review/pack
 | `--resume <run-id>` | Reuse authenticated complete output or make the final targeted attempt for incomplete schema-v1 coverage; drop `--dry-run` on a complete run to post what it previewed |
 | `--lang <code>` | Language for finding titles/bodies (default `en`) |
 | `--fail-on <severity>` | Exit 1 if findings at/above this severity survive dedupe (`critical`\|`high`\|`medium`\|`low`\|`nit`) |
+| `--publish-min-severity <severity>` | Publish this severity and above; retain all findings locally (same values; default `nit`; CLI-only) |
 | `--skip <names>` | Comma-separated pass names to skip — full (`awesome-copilot/go`) or bare suffix (`go`); also `verifier`, `codex` |
 | `--no-cache` | Bypass the gather cache |
 | `--skill <file>` | Include a specific .md file (inside the checkout) while preserving its `applyTo`/`paths` scope |

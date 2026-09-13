@@ -10,6 +10,7 @@ the full guide, kept short so this index stays cheap to load.
 | If asked about… | Read |
 |---|---|
 | Quickstart: install, authenticate, daily usage, common flags | [reference/pr-review-usage.md](reference/pr-review-usage.md) |
+| Publication volume vs pipeline status: `--publish-min-severity`, `--fail-on`, dry-run evidence and sticky resume | [reference/pr-review-usage.md](reference/pr-review-usage.md), [reference/ci-integration.md](reference/ci-integration.md) |
 | Configuration: 5-level merge, YAML, env vars, models, extra paths | [reference/configuration.md](reference/configuration.md) |
 | Review passes & skills: skill packs, how passes are selected, frontmatter, the on-demand index | [reference/reviewers-vs-skills.md](reference/reviewers-vs-skills.md) |
 | Managing skills & packs: add your own, `packs sync`/`add`/`suggest`, override, disable, list what's loaded | [reference/adding-your-own-md.md](reference/adding-your-own-md.md) |

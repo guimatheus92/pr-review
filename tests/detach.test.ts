@@ -28,12 +28,13 @@ test('detachReview — strips --detach, appends --run-dir, spawns detached+unref
   }) as unknown as typeof import('node:child_process').spawn;
 
   const url = 'https://github.com/o/r/pull/7';
-  const { runId, outDir } = detachReview(url, ['review', url, '--dry-run', '--detach'], fakeSpawn);
+  const { runId, outDir } = detachReview(url, ['review', url, '--dry-run', '--publish-min-severity', 'hIgH', '--detach'], fakeSpawn);
   try {
     assert.equal(calls.length, 1);
     const { args, opts } = calls[0]!;
     assert.ok(!args.includes('--detach'), '--detach stripped from child argv');
     assert.ok(args.includes('--dry-run'), 'user flags preserved');
+    assert.equal(args[args.indexOf('--publish-min-severity') + 1], 'hIgH', 'publication policy reaches the child unchanged');
     assert.deepEqual(args.slice(-2), ['--run-dir', outDir], 'run-dir appended, shared with parent');
     assert.equal(opts.detached, true);
     assert.equal(opts.windowsHide, true);

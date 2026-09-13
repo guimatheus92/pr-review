@@ -16,6 +16,19 @@ Note: env vars override YAML config (this changed — previously env was the wea
 
 Use `pr-review config show` to see the effective merged config and where each setting came from.
 
+## Severity flags are CLI-only
+
+`--publish-min-severity` and `--fail-on` are explicit invocation options, not
+configuration keys. There is no `publish_min_severity` YAML key or
+`PR_REVIEW_PUBLISH_MIN_SEVERITY` environment setting, including in personal
+configuration. A repository cannot silently set the publication threshold.
+
+The publication flag controls human-visible comments; fail-on controls pipeline
+status. Neither changes analysis coverage. The publication threshold is saved in
+the authenticated schema-v2 run plan (NIT when omitted), so resume inherits the
+original policy rather than current configuration. An explicitly conflicting
+resume flag is refused, even with `--force-post`; v1 runs remain publish-all.
+
 ## Setup commands
 
 ```bash

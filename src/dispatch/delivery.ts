@@ -6,8 +6,9 @@ import { atomicFileExistsSync, atomicWriteFileSync, atomicWriteJsonSync, canonic
 import type { Runtime } from './runtime.js';
 import { readAuthenticatedJsonSync, writeAuthenticatedJsonSync } from '../util/control-auth.js';
 import { controlDirForRun } from '../util/tmp.js';
+import { isSeverity } from '../util/severity.js';
 
-export const DISPATCH_PLAN_SCHEMA_VERSION = 1;
+export const DISPATCH_PLAN_SCHEMA_VERSION = 2;
 export const DELIVERY_STATE_SCHEMA_VERSION = 1;
 export const OUTPUT_PATH_TOKEN = '{{PR_REVIEW_OUTPUT_PATH}}';
 
@@ -41,8 +42,14 @@ export interface DispatchPlanArtifact {
   sha256: string;
 }
 
-export interface DispatchPlan {
-  schemaVersion: typeof DISPATCH_PLAN_SCHEMA_VERSION;
+export interface DispatchExecution {
+  dryRun: boolean;
+  publish: boolean;
+  dedupeMode: 'strict' | 'loose' | 'off';
+  failOn?: Severity;
+}
+
+interface DispatchPlanBase {
   fingerprint: string;
   runId: string;
   runDir: string;
@@ -59,12 +66,6 @@ export interface DispatchPlan {
   timeoutMs: number;
   phase1Path: string;
   findingsPath: string;
-  execution: {
-    dryRun: boolean;
-    publish: boolean;
-    dedupeMode: 'strict' | 'loose' | 'off';
-    failOn?: Severity;
-  };
   configProjection: unknown;
   configFingerprint: string;
   cliArtifact?: DispatchPlanArtifact;
@@ -78,6 +79,15 @@ export interface DispatchPlan {
     attemptsDir: string;
     maxAttempts: number;
   };
+}
+
+export type DispatchPlan = DispatchPlanBase & (
+  | { schemaVersion: 1; execution: DispatchExecution & { publishMinSeverity?: never } }
+  | { schemaVersion: 2; execution: DispatchExecution & { publishMinSeverity: Severity } }
+);
+
+export function planPublicationMinimumSeverity(plan: DispatchPlan): Severity {
+  return plan.schemaVersion === 1 ? 'NIT' : plan.execution.publishMinSeverity;
 }
 
 export interface RuntimeAttemptState {
@@ -182,7 +192,9 @@ export interface PromotionResult {
   error?: string;
 }
 
-type DispatchPlanDraft = Omit<DispatchPlan, 'schemaVersion' | 'fingerprint'>;
+type DispatchPlanDraft = Omit<DispatchPlanBase, 'fingerprint'> & {
+  execution: DispatchExecution & { publishMinSeverity?: Severity };
+};
 
 const SEVERITIES: readonly Severity[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'NIT'];
 const EMPTY_SEVERITY_COUNTS = (): Record<Severity, number> => ({
@@ -240,14 +252,27 @@ function parseFindingArray(rawOutput: string): Finding[] {
 }
 
 export function createDispatchPlan(draft: DispatchPlanDraft): DispatchPlan {
-  const core: Omit<DispatchPlan, 'fingerprint'> = { schemaVersion: DISPATCH_PLAN_SCHEMA_VERSION, ...draft };
+  const publishMinSeverity = draft.execution.publishMinSeverity ?? 'NIT';
+  if (!isSeverity(publishMinSeverity)) throw new Error('invalid publication minimum severity');
+  const core = {
+    ...draft,
+    schemaVersion: DISPATCH_PLAN_SCHEMA_VERSION,
+    execution: { ...draft.execution, publishMinSeverity },
+  } as const;
   return { ...core, fingerprint: sha256(canonicalJson(core)) };
 }
 
 function dispatchPlanShaped(value: unknown): value is DispatchPlan {
   if (!value || typeof value !== 'object') return false;
   const plan = value as Partial<DispatchPlan>;
-  return plan.schemaVersion === DISPATCH_PLAN_SCHEMA_VERSION &&
+  const execution = plan.execution;
+  if (!execution || typeof execution.dryRun !== 'boolean' || typeof execution.publish !== 'boolean' ||
+      !['strict', 'loose', 'off'].includes(execution.dedupeMode) ||
+      (execution.failOn !== undefined && !isSeverity(execution.failOn))) return false;
+  const supportedPolicy = plan.schemaVersion === 1
+    ? !Object.prototype.hasOwnProperty.call(execution, 'publishMinSeverity')
+    : plan.schemaVersion === DISPATCH_PLAN_SCHEMA_VERSION && isSeverity(execution.publishMinSeverity);
+  return supportedPolicy &&
     typeof plan.fingerprint === 'string' &&
     typeof plan.runId === 'string' &&
     typeof plan.runDir === 'string' &&
@@ -727,6 +752,7 @@ export function validateDeliveryArtifacts(plan: DispatchPlan, state: DeliverySta
 export interface FinalizationRecord {
   schemaVersion: 1;
   planFingerprint: string;
+  execution?: { dryRun: boolean; publish: boolean };
   completedAt: string;
   exitCode: 0 | 1 | 2;
   summaryPath: string;
@@ -755,6 +781,12 @@ export function readAuthoritativeFinalization(
     const record = readAuthenticatedJsonSync<FinalizationRecord>(path);
     if (record.schemaVersion !== 1 || record.planFingerprint !== plan.fingerprint) {
       throw new Error('finalization record does not match the dispatch plan');
+    }
+    if (plan.schemaVersion === 2 &&
+        (!record.execution || typeof record.execution.dryRun !== 'boolean' || typeof record.execution.publish !== 'boolean' ||
+          (record.execution.dryRun && record.execution.publish) ||
+          (plan.execution.publish && !record.execution.publish))) {
+      throw new Error('finalization execution mode does not match the dispatch plan');
     }
     if (!isPathInside(plan.runDir, record.summaryPath) || !isPathInside(plan.runDir, record.findingsPath)) {
       throw new Error('finalization record contains a path outside its run directory');

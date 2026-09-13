@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import {
+  accusedPlantedDefect,
   hasEvalAssertions,
   matchExpectedFindings,
   requiredEvalArtifacts,
@@ -131,4 +132,33 @@ test('stackExpectationFailures — expected values cannot inject log lines', () 
     'dependency missing "package\\r\\nforged"',
   ]);
   assert.ok(failures.every((failure) => failure.split(/\r?\n/).length === 1));
+});
+// Titles copied from real acceptance runs. The control assertion exists to catch a
+// reviewer crying wolf on correct code; it must not fire on a correct finding that
+// names the planted rule in order to rule it OUT. Four such findings have failed it
+// — evals/acceptance/expected.yaml records the first three.
+test('accusedPlantedDefect — a contrastive body is not an accusation; a title is', () => {
+  const contrastiveBody =
+    'User.id is declared as number but req.params.id is a string. This is a separate ' +
+    'defect from the SQL-helper issue: greetHandler already uses the parameterised q(), ' +
+    'so fixing ACC-SQL-001 does not fix this. ACC-LOG-002 is likewise unrelated.';
+
+  for (const title of [
+    'req.params.id is never parsed into the numeric id the User type declares',
+    "Route param `id` is never parsed or validated against `User['id']: number`",
+  ]) {
+    assert.equal(
+      accusedPlantedDefect({ title, body: contrastiveBody }),
+      undefined,
+      `a correct finding titled "${title}" must not read as an accusation`,
+    );
+  }
+
+  // The other direction, which is what the assertion is FOR: gutting it would be a
+  // silent regression, because a check that never fires looks exactly like a pass.
+  assert.equal(accusedPlantedDefect({ title: 'SQL injection in greetHandler', body: '' }), 'SQL injection');
+  assert.equal(accusedPlantedDefect({ title: 'Violates ACC-SQL-001', body: '' }), 'SQL injection');
+  assert.equal(accusedPlantedDefect({ title: 'ACC-LOG-002: audit call missing', body: '' }), 'the missing audit call');
+  assert.equal(accusedPlantedDefect({ title: 'sql INJECTION here', body: '' }), 'SQL injection');
+  assert.equal(accusedPlantedDefect({}), undefined);
 });

@@ -8,6 +8,10 @@ import {
   assemblePhase1,
   createDeliveryState,
   createDispatchPlan,
+  readDispatchPlan,
+  readAuthoritativeDispatchPlan,
+  writeDispatchPlan,
+  planPublicationMinimumSeverity,
   hasSevereFindings,
   inspectReviewerDelivery,
   promoteReviewerAttempt,
@@ -18,7 +22,7 @@ import {
   writeDeliveryState,
 } from '../src/dispatch/delivery.js';
 import type { ReviewerOutput } from '../src/types.js';
-import { sha256File } from '../src/util/atomic-json.js';
+import { canonicalJson, sha256, sha256File } from '../src/util/atomic-json.js';
 
 function finding(severity = 'MEDIUM') {
   return { severity, title: 'title', body: 'body', file: 'src/a.ts', line: 1 };
@@ -159,6 +163,64 @@ test('promoteReviewerAttempt — rejects a canonical sidecar without a valid pro
     const result = promoteReviewerAttempt(reviewer, 1, 'model', 0);
     assert.equal(result.status, 'collision');
     assert.match(result.error ?? '', /without a valid attempt-scoped artifact/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('dispatch plan v2 authenticates publication policy; v1 remains publish-all without rewriting its fingerprint', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-review-publication-plan-'));
+  try {
+    const plan = createDispatchPlan({
+      runId: 'run', runDir: dir, createdAt: new Date(0).toISOString(),
+      pr: { provider: 'github', url: 'u', owner: 'o', repo: 'r', number: 1 },
+      metadata: { headSha: 'h', baseSha: 'b', headBranch: 'f', baseBranch: 'main', state: 'open', isDraft: false },
+      runtime: 'copilot', runtimeBinary: 'copilot', disabledMcpServers: [], model: 'm', timeoutMs: 1,
+      phase1Path: join(dir, 'phase1.json'), findingsPath: join(dir, 'findings.json'),
+      execution: { dryRun: true, publish: false, dedupeMode: 'strict', publishMinSeverity: 'HIGH' },
+      configProjection: {}, configFingerprint: sha256(canonicalJson({})), artifacts: [], reviewers: [],
+      verifier: { enabled: false, maxAttempts: 2 },
+      codex: { enabled: false, contextPath: join(dir, 'context.md'), attemptsDir: join(dir, 'codex'), maxAttempts: 2 },
+    });
+    const mirror = join(dir, 'dispatch-plan.json');
+    const authority = join(dir, 'control', 'run', 'dispatch-plan.json');
+    writeDispatchPlan(plan, mirror, authority);
+    assert.equal(plan.schemaVersion, 2);
+    assert.equal(planPublicationMinimumSeverity(readAuthoritativeDispatchPlan(authority)), 'HIGH');
+    assert.equal(planPublicationMinimumSeverity(createDispatchPlan({ ...plan, execution: {
+      dryRun: true, publish: false, dedupeMode: 'strict',
+    } })), 'NIT');
+
+    const unsigned = JSON.parse(readFileSync(mirror, 'utf8'));
+    delete unsigned.execution.publishMinSeverity;
+    const rehash = () => {
+      const { fingerprint: _fingerprint, ...core } = unsigned;
+      unsigned.fingerprint = sha256(canonicalJson(core));
+      writeFileSync(mirror, JSON.stringify(unsigned));
+    };
+    rehash();
+    assert.throws(() => readDispatchPlan(mirror), /unsupported or malformed/);
+    unsigned.execution.publishMinSeverity = 'urgent';
+    rehash();
+    assert.throws(() => readDispatchPlan(mirror), /unsupported or malformed/);
+
+    unsigned.schemaVersion = 1;
+    delete unsigned.execution.publishMinSeverity;
+    rehash();
+    const legacyBytes = readFileSync(mirror, 'utf8');
+    const legacy = readDispatchPlan(mirror);
+    assert.equal(planPublicationMinimumSeverity(legacy), 'NIT');
+    assert.equal(legacy.fingerprint, unsigned.fingerprint);
+    assert.equal(readFileSync(mirror, 'utf8'), legacyBytes);
+    unsigned.execution.publishMinSeverity = 'HIGH';
+    rehash();
+    assert.throws(() => readDispatchPlan(mirror), /unsupported or malformed/);
+
+    const envelope = JSON.parse(readFileSync(authority, 'utf8'));
+    const tampered = JSON.stringify(envelope).replace('HIGH', 'NIT');
+    assert.notEqual(tampered, JSON.stringify(envelope));
+    writeFileSync(authority, tampered);
+    assert.throws(() => readAuthoritativeDispatchPlan(authority), /authenticat|signature|integrity/i);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

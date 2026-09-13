@@ -75,6 +75,34 @@ const TOOLKIT_AGENTS = [
   'type-design-analyzer',
 ];
 
+test('publication policy changes only the execution plan, never reviewer or verifier prompts or coverage', () => {
+  const contexts: unknown[] = [];
+  for (const publishMinSeverity of ['NIT', 'CRITICAL'] as const) {
+    const outDir = mkdtempSync(join(tmpdir(), 'pr-publication-context-'));
+    try {
+      const ctx = prepareSessionContext({
+        ...baseOpts(outDir, ['src/main.ts'], [pass('pack/security'), pass('pack/quality')]),
+        persistRecoveryControl: false,
+        execution: { dryRun: true, publish: false, dedupeMode: 'strict', publishMinSeverity },
+      });
+      const plan = ctx.dispatchPlan!;
+      assert.equal(plan.execution.publishMinSeverity, publishMinSeverity);
+      const normalize = (text: string) => text.split(outDir).join('<run>');
+      const prompts = [
+        ...plan.reviewers.map((reviewer) => normalize(reviewer.promptTemplate)),
+        normalize(plan.verifier.promptTemplate!),
+        normalize(readFileSync(ctx.contextPath, 'utf8')),
+        ...Object.values(ctx.skillsFiles).map((path) => normalize(readFileSync(path, 'utf8'))),
+      ];
+      for (const prompt of prompts) assert.doesNotMatch(prompt, /publishMinSeverity|publish-min-severity|publication threshold/);
+      contexts.push({ names: plan.reviewers.map((reviewer) => reviewer.name), verifier: plan.verifier.enabled, prompts });
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
+  }
+  assert.deepEqual(contexts[0], contexts[1]);
+});
+
 function seedCompanionSources(): { sources: CompanionPluginSource[]; cleanup(): void } {
   const root = mkdtempSync(join(tmpdir(), 'pr-review-companion-sources-'));
   const toolkit = join(root, 'pr-review-toolkit');

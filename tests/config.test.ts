@@ -5,6 +5,26 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig, autodiscoveryPaths } from '../src/config.js';
 
+test('publication policy is CLI-only and cannot be set by YAML or environment variables', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'pr-publication-config-'));
+  const home = mkdtempSync(join(tmpdir(), 'pr-publication-home-'));
+  const prior = process.env.PR_REVIEW_PUBLISH_MIN_SEVERITY;
+  try {
+    mkdirSync(join(home, '.pr-review'), { recursive: true });
+    writeFileSync(join(home, '.pr-review', 'config.yaml'), 'publish_min_severity: critical\n');
+    writeFileSync(join(cwd, '.pr-review.yaml'), 'publish_min_severity: critical\n');
+    process.env.PR_REVIEW_PUBLISH_MIN_SEVERITY = 'CRITICAL';
+    const { config } = loadConfig({ cwd, homeOverride: home });
+    assert.equal('publishMinSeverity' in config, false);
+    assert.equal('publish_min_severity' in config, false);
+  } finally {
+    if (prior === undefined) delete process.env.PR_REVIEW_PUBLISH_MIN_SEVERITY;
+    else process.env.PR_REVIEW_PUBLISH_MIN_SEVERITY = prior;
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('loadConfig — defaults when no files or flags', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'pr-review-cfg-'));
   const home = mkdtempSync(join(tmpdir(), 'pr-review-home-'));

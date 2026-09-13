@@ -59,6 +59,44 @@ test('readPostedMarker — unparseable or misshapen → "corrupt" (fail-closed s
   }
 });
 
+// 0.15.0 hardened `markerShaped` from two typeof checks into a full shape contract,
+// and shipped it with no test. The function is private, so this grades it through
+// `readPostedMarker`, whose 'corrupt' return IS the observable behaviour — a marker
+// that fails the shape must fail closed, never read as 'nothing was posted', which
+// is the inference that reposts a whole review (INV-POST-04).
+test('readPostedMarker — every hardened shape rule fails closed, not open', () => {
+  const d = tmp();
+  try {
+    const reject: Array<[string, Record<string, unknown>]> = [
+      ['posted is not an integer', { posted: 1.5, attempted: 2 }],
+      ['posted is negative', { posted: -1, attempted: 2 }],
+      ['attempted is below posted', { posted: 5, attempted: 4 }],
+      ['verified is not a boolean', { posted: 1, attempted: 1, verified: 'yes' }],
+      ['planFingerprint is not a string', { posted: 1, attempted: 1, planFingerprint: 7 }],
+      ['confirmedKeys is not an array', { posted: 1, attempted: 1, confirmedKeys: 'a' }],
+      ['confirmedKeys holds a non-string', { posted: 1, attempted: 1, confirmedKeys: [1] }],
+      ['confirmedKeys count disagrees with posted', { posted: 2, attempted: 2, confirmedKeys: ['a'] }],
+    ];
+    for (const [why, marker] of reject) {
+      writeFileSync(join(d, 'posted.marker'), JSON.stringify(marker), 'utf8');
+      assert.equal(readPostedMarker(d, d), 'corrupt', why);
+    }
+
+    // The mirror image: a marker that satisfies every rule must still round-trip,
+    // or the hardening would read every real marker as corrupt and block resume.
+    const accept: Record<string, unknown> = {
+      posted: 2, attempted: 3, verified: true, planFingerprint: 'abc', confirmedKeys: ['k1', 'k2'],
+    };
+    writeFileSync(join(d, 'posted.marker'), JSON.stringify(accept), 'utf8');
+    const read = readPostedMarker(d, d);
+    assert.notEqual(read, 'corrupt');
+    assert.notEqual(read, null);
+    assert.deepEqual((read as { confirmedKeys?: string[] }).confirmedKeys, ['k1', 'k2']);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
 test('readPostedMarker — schema-v1 authority wins over a forged diagnostic mirror', () => {
   const d = tmp();
   try {

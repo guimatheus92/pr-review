@@ -10,7 +10,7 @@ The tool runs in CI the same way it runs locally: install an agent runtime (Copi
 
 | Exit code | Meaning |
 |---|---|
-| `0` | Clean — no findings at/above the threshold |
+| `0` | Pipeline completed; no retained findings meet a configured `--fail-on` threshold (without it, findings do not change the exit code) |
 | `1` | Findings at/above the `--fail-on` severity survived dedupe |
 | `2` | Incomplete reviewer/verifier/Codex delivery or another operational failure; partial findings were not posted |
 
@@ -21,6 +21,29 @@ pr-review review "$PR_URL" --fail-on high
 ```
 
 The step fails (exit 1) when any CRITICAL or HIGH finding survives dedupe.
+
+Publication volume is separate from CI status:
+
+```bash
+# Advisory run: no PR writes; preserve the complete evidence for adjudication.
+pr-review review "$PR_URL" --dry-run --publish-min-severity high
+# Publish CRITICAL/HIGH comments; MEDIUM still fails this pipeline.
+pr-review review "$PR_URL" --publish-min-severity high --fail-on medium
+```
+
+Both flags are CLI-only and case-insensitive. The inclusive publication values
+are `critical|high|medium|low|nit`; omitted means `nit` (publish all). Neither flag
+changes what reviewers analyze, which passes run, or verifier input. Archive the
+full `pr-review-findings.json` and `pr-review-summary.md` for reports and Hackathon
+adjudication, not just posted comments: suppressed findings remain in both, and
+JSON `publication` metadata plus a summary totals line explain the difference.
+No severity labels or other chrome are added to individual comments.
+
+Zero eligible findings is a successful zero-write publication, unless full-set
+`--fail-on` returns 1 or an operational failure returns 2. Resume and complete
+dry-run promotion honor the original authenticated threshold; an explicitly
+conflicting flag fails closed. `--force-post` cannot override that threshold.
+Keep cumulative posting progress separate from the complete retained evidence.
 
 **Always configure `--fail-on` when the exit code gates a merge.** Without it, exit 0 means the pipeline completed — findings may still have been retained and posted, and the CLI says how many. Only `--fail-on` turns a finding into a non-zero status.
 

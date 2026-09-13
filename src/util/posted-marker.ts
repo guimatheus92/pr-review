@@ -26,6 +26,8 @@ export interface PostedMarker {
   attempted: number;
   /** Absent on markers written before 0.6.1; treated as verified. */
   verified?: boolean;
+  planFingerprint?: string;
+  confirmedKeys?: string[];
 }
 
 const MARKER_FILE = 'posted.marker';
@@ -38,7 +40,13 @@ const MARKER_FILE = 'posted.marker';
  */
 function markerShaped(value: unknown): value is PostedMarker {
   const marker = value as Partial<PostedMarker> | null;
-  return !!marker && typeof marker.posted === 'number' && typeof marker.attempted === 'number';
+  return !!marker && Number.isSafeInteger(marker.posted) && Number.isSafeInteger(marker.attempted) &&
+    marker.posted! >= 0 && marker.attempted! >= marker.posted! &&
+    (marker.verified === undefined || typeof marker.verified === 'boolean') &&
+    (marker.planFingerprint === undefined || typeof marker.planFingerprint === 'string') &&
+    (marker.confirmedKeys === undefined ||
+      (Array.isArray(marker.confirmedKeys) && marker.confirmedKeys.every((key) => typeof key === 'string') &&
+        marker.confirmedKeys.length === marker.posted));
 }
 
 export function readPostedMarker(outDir: string, homeOverride?: string): PostedMarker | 'corrupt' | null {

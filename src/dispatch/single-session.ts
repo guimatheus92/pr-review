@@ -108,6 +108,7 @@ export interface SingleSessionOptions {
     publish: boolean;
     dedupeMode: 'strict' | 'loose' | 'off';
     failOn?: Severity;
+    publishMinSeverity?: Severity;
   };
   /** False for previews; no-dispatch contexts must not create recoverable schema-v1 control. */
   persistRecoveryControl?: boolean;

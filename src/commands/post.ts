@@ -18,6 +18,7 @@ export interface PostResult {
   attempted: number;
   posted: number;
   skipped: number;
+  confirmedKeys: string[];
   errors: { finding: Finding; error: string }[];
   /**
    * False when at least one write's outcome could not be checked against the
@@ -437,13 +438,15 @@ export async function runPost(opts: PostOptions): Promise<PostResult> {
   const ref = opts.gather?.pr ?? parsedRef;
 
   const allFindings: Finding[] = opts.outputs.flatMap((o) => o.findings);
-  const result: PostResult = { attempted: 0, posted: 0, skipped: 0, errors: [], verified: true };
+  const result: PostResult = { attempted: 0, posted: 0, skipped: 0, confirmedKeys: [], errors: [], verified: true };
 
   if (!opts.publish) {
     result.skipped = allFindings.length;
     process.stderr.write(`[post] dry-run: would have posted ${allFindings.length} comment(s)\n`);
     return result;
   }
+
+  if (allFindings.length === 0) return result;
 
   // Snap reviewer-supplied lines to the nearest valid diff line so inline
   // comments do not 422 the batch review. On GitHub and GitLab, findings that
@@ -525,6 +528,8 @@ export async function runPost(opts: PostOptions): Promise<PostResult> {
     }
   }
 
+  const errored = new Set(result.errors.map((entry) => entry.finding));
+  result.confirmedKeys = findings.filter((finding) => !errored.has(finding)).map(findingKey);
   for (const e of result.errors) {
     process.stderr.write(`[post] not posted — ${e.finding.file ?? '(no file)'}:${e.finding.line ?? '?'}: ${e.error}\n`);
   }

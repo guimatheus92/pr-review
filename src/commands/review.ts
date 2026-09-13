@@ -749,6 +749,15 @@ export async function finalizeReview(a: {
         };
       }
     } else {
+      // Defence in depth, unreachable by construction today — deliberately kept.
+      // `markerShaped` refuses any marker whose `confirmedKeys.length !== posted`
+      // (both the authenticated authority and the mirror go through it), and every
+      // saved confirmation that survives the eligible-set check above is consumed
+      // into `confirmedKeys`. So `posted > confirmedKeys.length` cannot hold while
+      // that equality does. It is the equality that makes this dead, not the
+      // reasoning below — `tests/posted-marker.test.ts` pins it, so if it is ever
+      // relaxed this guard becomes live again instead of the silent demote-or-
+      // duplicate it exists to prevent.
       if (known?.confirmedKeys && (!a.forcePost || plan?.schemaVersion === 2) && known.posted > confirmedKeys.length) {
         throw new Error('publication refused [posting-evidence-missing]: prior confirmed writes cannot be identified; refusing to demote or duplicate them');
       }

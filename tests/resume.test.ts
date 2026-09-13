@@ -288,6 +288,49 @@ test('resume publication — dry-run promotion honors its original threshold, in
   }
 });
 
+// Two fail-closed publication guards shipped in 0.15.0 with no test reaching them.
+// Both exist to stop the same class of damage INV-POST-04 is built around: acting on
+// posting state that does not describe THIS run, which either reposts findings that
+// already landed or silently demotes ones that did.
+test('publication refuses posting state authenticated for a different plan', async () => {
+  const seeded = seedPlannedPartialRun(false, { dryRun: false, publish: true, dedupeMode: 'strict', publishMinSeverity: 'HIGH' });
+  completeSeededDelivery(seeded, PUBLICATION_FINDINGS);
+  try {
+    writePostedMarker(seeded.dir, {
+      posted: 1, attempted: 2, verified: true, confirmedKeys: ['k'], planFingerprint: 'a-different-plan',
+    }, TEST_HOME);
+    const { provider, calls } = fakeProvider();
+    const options = { prUrl: 'u', runDir: seeded.dir, resumeRunId: 'x', homeOverride: TEST_HOME, publish: true, provider };
+    await assert.rejects(runReview(options), /posting-plan-mismatch/);
+    // force-post overrides posting idempotency, never plan identity.
+    await assert.rejects(runReview({ ...options, forcePost: true }), /posting-plan-mismatch/);
+    assert.equal(calls.batches.length, 0, 'a foreign plan fingerprint authorizes no write at all');
+  } finally {
+    seeded.cleanup();
+  }
+});
+
+test('publication refuses confirmations that name nothing in the eligible set, without force-post', async () => {
+  const seeded = seedPlannedPartialRun(false, { dryRun: false, publish: true, dedupeMode: 'strict', publishMinSeverity: 'HIGH' });
+  completeSeededDelivery(seeded, PUBLICATION_FINDINGS);
+  try {
+    // The marker claims two landed but names keys matching no eligible finding.
+    // Demoting them would repost live comments; trusting them would hide a finding
+    // that never posted. Neither is allowed. The existing sibling test covers the
+    // force-post path; this one covers the ordinary resume, which reaches the same
+    // guard through a different branch of `savedConfirmations`.
+    writePostedMarker(seeded.dir, {
+      posted: 2, attempted: 2, verified: true, confirmedKeys: ['ghost-one', 'ghost-two'], planFingerprint: seeded.plan.fingerprint,
+    }, TEST_HOME);
+    const { provider, calls } = fakeProvider();
+    const options = { prUrl: 'u', runDir: seeded.dir, resumeRunId: 'x', homeOverride: TEST_HOME, publish: true, provider };
+    await assert.rejects(runReview(options), /posting-policy-mismatch/);
+    assert.equal(calls.batches.length, 0, 'unidentifiable posting evidence authorizes no write');
+  } finally {
+    seeded.cleanup();
+  }
+});
+
 test('resume publication — unknown prior outcomes remain failures and force-post still cannot publish suppressed findings', async () => {
   const seeded = seedPlannedPartialRun(false, { dryRun: false, publish: true, dedupeMode: 'strict', publishMinSeverity: 'HIGH' });
   completeSeededDelivery(seeded, PUBLICATION_FINDINGS);

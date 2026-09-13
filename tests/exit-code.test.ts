@@ -8,6 +8,26 @@ import { join } from 'node:path';
 import { decideExitCode } from '../src/commands/review.js';
 import { parseSeverity, partitionFindingsForPublication } from '../src/util/severity.js';
 import type { Finding } from '../src/types.js';
+import { ensureBundleFresh } from '../scripts/dogfood.mjs';
+
+/**
+ * These tests grade `dist/cli.cjs`, which `npm run test` does not build.
+ *
+ * Without this guard the whole file passes against a bundle that predates the
+ * change under test — or, on a clean checkout, against no bundle at all, where
+ * node exits non-zero for a missing file and an exit-code assertion can read that
+ * as the behaviour it was checking for. A green run would then prove nothing about
+ * the current source. `ensureBundleFresh` rebuilds into a temp dir and compares
+ * bytes, so it fails loudly with the exact remediation instead.
+ *
+ * Memoized: the comparison costs one esbuild pass, and once per file is enough.
+ */
+let bundleVerified = false;
+function requireFreshBundle(): void {
+  if (bundleVerified) return;
+  ensureBundleFresh();
+  bundleVerified = true;
+}
 
 function f(severity: Finding['severity']): Finding {
   return { severity, title: 't', body: 'b' };
@@ -93,6 +113,7 @@ test('bundled publication fixture retains every severity through dispatch, verif
   const home = join(root, 'home');
   const runId = 'publication-offline';
   const runDir = join(home, '.pr-review', 'runs', runId);
+  requireFreshBundle();
   const cli = fileURLToPath(new URL('../dist/cli.cjs', import.meta.url));
   const script = fileURLToPath(new URL('../evals/acceptance/publication-runtime.mjs', import.meta.url));
   try {
@@ -150,6 +171,7 @@ test('bundled publication fixture retains every severity through dispatch, verif
 
 test('bundled post filters all supported input shapes without changing their bytes or posting decorated bodies', () => {
   const root = mkdtempSync(join(tmpdir(), 'pr-publication-post-cli-'));
+  requireFreshBundle();
   const cli = fileURLToPath(new URL('../dist/cli.cjs', import.meta.url));
   try {
     const capture = join(root, 'writes.json');

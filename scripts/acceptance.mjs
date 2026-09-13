@@ -486,7 +486,14 @@ async function runDefectsCell(provider, runtime) {
     }
     const bodies = live.map((c) => c.body).join('\n---\n');
     const landed = (expected.must_find ?? []).some((p) => new RegExp(p, 'is').test(bodies));
-    if (!landed && !publishMinSeverity) failures.push('no posted comment body matches any must_find pattern — findings were retained but not delivered');
+    // A threshold legitimately withholds the must_find defects below it, so the
+    // delivery assertion cannot run under one — EXCEPT at NIT, which publishes
+    // everything and is identical to passing no flag at all. Keying this on "the
+    // flag was present" instead of "the flag suppresses something" silently
+    // disabled the only check that proves findings reach the PR, turning
+    // `--publish-min-severity nit` into a green matrix that verified no delivery.
+    const suppressesSomething = publishMinSeverity !== undefined && publishMinSeverity !== 'NIT';
+    if (!landed && !suppressesSomething) failures.push('no posted comment body matches any must_find pattern — findings were retained but not delivered');
     // INV-POST-01 re-anchors everything inline on GitHub and GitLab, so a
     // non-inline comment there is a violation. Azure DevOps legitimately posts
     // a location-less finding as a resolvable PR-level thread, so the same

@@ -108,6 +108,27 @@ test('publication CLI flags reject invalid values before URL, findings-file, or 
   }
 });
 
+test('adjudication CLI rejects unsupported combinations and unauthenticated standalone reports before network access', () => {
+  const cli = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
+  for (const options of [[], ['--no-codex', '--skip', 'verifier']]) {
+    const result = spawnSync(process.execPath, ['--import', 'tsx', cli, 'review', 'invalid-url', '--adjudicate', ...options], { encoding: 'utf8' });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /requires --no-codex and an enabled verifier/);
+  }
+  const root = mkdtempSync(join(tmpdir(), 'pr-adjudication-post-'));
+  try {
+    const file = join(root, 'report.json');
+    const content = JSON.stringify({ finalFindings: [f('HIGH')], actionableFindings: [], adjudication: { schemaVersion: 1 } });
+    writeFileSync(file, content);
+    const result = spawnSync(process.execPath, ['--import', 'tsx', cli, 'post', 'invalid-url', '--findings', file], { encoding: 'utf8' });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /require authenticated review --resume/);
+    assert.equal(readFileSync(file, 'utf8'), content);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('bundled publication fixture retains every severity through dispatch, verifier, dedupe and offline audit', () => {
   const root = mkdtempSync(join(tmpdir(), 'pr-publication-cli-'));
   const home = join(root, 'home');

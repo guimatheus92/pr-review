@@ -30,11 +30,11 @@ Node CLI (deterministic plumbing)
      ├─ selective recovery     → one automatic session for unresolved reviewers only
      └─ runCodex()             → optional attempt-scoped read-only sibling
  12. assemble Phase 1           → only after every planned reviewer is valid
- 13. direct verifier            → separate session only for CRITICAL/HIGH Phase 1 findings
+ 13. direct verifier            → CRITICAL/HIGH normally; every nonempty candidate set with --adjudicate
  14. dedupe + persist           → complete delivery only; all findings against the original comment snapshot
  15. publication partition      → authenticated threshold; all findings stay in artifacts
  16. runPost() / renderSummary  → eligible pending comments; complete body-only local summary
- 17. exit code                  → 0 complete, 1 any retained finding ≥ --fail-on, 2 incomplete/operational failure
+ 17. exit code                  → 0 complete, 1 evaluated finding ≥ --fail-on (actionable with adjudication), 2 incomplete/operational failure
 ```
 
 The sections below describe how delivery, trust and recovery are *built*. What
@@ -62,15 +62,38 @@ When the `codex` CLI is installed, its read-only sibling runs in parallel and wr
 
 ### Retention and publication
 
+Reviewers read applicable project knowledge before applying their individual lens.
+The shared rule file has a line-range index and explicit instructions to follow up
+on partial reads. A generic preference is not sufficient evidence against a
+documented supported pattern. Repository facts stay in repository-owned content.
+
+CLI-only `--adjudicate` uses schema-v3 plans; normal new plans remain v2 and both
+legacy versions remain readable. `src/dispatch/adjudication.ts` computes stable IDs
+from reviewer identity, ordinal and the original finding's canonical JSON.
+The Phase 1 artifact carries those candidates. Its direct verifier writes a strict
+object with complete `accept|reject|amend` decisions, reasons, evidence references,
+and separate genuinely new findings. It runs for any nonempty candidate set,
+requires Codex disabled, and uses the existing immutable attempt promotion and
+authenticated digest path. It cannot rewrite originals. Incomplete or malformed
+decisions fail closed; recovery uses the existing bounded verifier attempts.
+
+For that mode, Node persists every original deduplicated finding in `finalFindings`,
+the decisions in `adjudication`, and the independently deduplicated accepted/amended
+set in `actionableFindings`. Both posting and fail-on use actionable findings.
+Resume and verify reconstruct the same set from authenticated Phase 1 and verifier
+evidence. Standalone post refuses these reports; publication requires authenticated
+resume. The summary distinguishes actionable results, decisions and retained evidence.
+This protocol enforces decisions, not their semantic correctness.
+
 `src/util/severity.ts` owns severity parsing and ordering for publication, exit
 gating, summary sorting, and the audit. `--publish-min-severity` is not an analysis
-instruction or a configuration setting. New plans are schema v2 and authenticate
+instruction or a configuration setting. Normal new plans are schema v2 and authenticate
 the canonical threshold in `execution`; old v1 plans remain publish-all.
 
 `finalizeReview` first deduplicates all complete outputs against the original
 gather snapshot and persists every retained finding. It then partitions eligibility
 and records aggregate metadata without shrinking `finalFindings`. The summary
-prints all bodies; `--fail-on` evaluates the full retained set. Suppression is
+prints all bodies; without adjudication `--fail-on` evaluates the full retained set. Suppression is
 never counted as `skipped`, attempted, an error, or dedupe loss.
 
 Resume reconstructs retention from authenticated inputs and keeps a separate
@@ -117,6 +140,7 @@ src/
 │   ├── manifests.ts         # dependency names + groups from root manifests AND manifests owning changed files; ecosystem tags per manifest kind
 │   └── detect.ts            # detectStack: categorized language / ecosystem / dependency / token evidence + cwdMatchesPr
 ├── dispatch/
+│   ├── adjudication.ts      # stable candidate IDs, strict verifier decisions, actionable projection
 │   ├── single-session.ts    # materialization, dispatch-only sessions, selective recovery, direct verifier, Node aggregation
 │   ├── delivery.ts          # plan/state schemas, strict sidecars, promotion, digests, attempt ceilings
 │   ├── reviewer-progress.ts # reviewer-progress.ndjson attempt/promotion events

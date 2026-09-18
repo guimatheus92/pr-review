@@ -40,7 +40,7 @@ import { skillsAllowedForCheckout } from '../plugins/trust.js';
 import { canonicalPrAuthority } from '../providers/identity.js';
 import { gitTopLevel } from '../util/git.js';
 import { discoverMcpCapabilities } from '../plugins/installed.js';
-import { atomicWriteJsonSync, recoverAtomicFileSync, sha256File } from '../util/atomic-json.js';
+import { atomicWriteJsonSync, canonicalJson, recoverAtomicFileSync, sha256File } from '../util/atomic-json.js';
 import { acquireFinalizationLease } from '../util/finalization-lease.js';
 import {
   assertDispatchPlanMirrors,
@@ -50,6 +50,9 @@ import {
   reserveCodexAttempt,
   lastRuntimeAttemptDiagnostic,
   planPublicationMinimumSeverity,
+  planAdjudicates,
+  readPhase1Candidates,
+  readVerifierAdjudication,
   validateDeliveryArtifacts,
   validateDispatchArtifacts,
   writeFinalizationRecord,
@@ -59,6 +62,7 @@ import {
 } from '../dispatch/delivery.js';
 import { runtimeInstalledPluginRoots } from '../plugins/installed.js';
 import { compareSeverity, meetsSeverityThreshold, partitionFindingsForPublication, type PublicationMetadata } from '../util/severity.js';
+import { actionableFindings as applyAdjudication, findingCandidates, type Adjudication, type FindingCandidate } from '../dispatch/adjudication.js';
 
 interface ReviewCmdOptions {
   prUrl: string;
@@ -84,6 +88,7 @@ interface ReviewCmdOptions {
   language?: string;
   failOn?: Severity;
   publishMinSeverity?: Severity;
+  adjudicate?: boolean;
   runtime?: RuntimeChoice;
   withCodex?: boolean;
   /** Use this exact run dir instead of minting a new one (set by the --detach parent). */
@@ -379,6 +384,7 @@ export function renderSummary(
   degraded?: string[],
   publication?: PublicationMetadata,
   pendingPublicationCount?: number,
+  adjudication?: { record: Adjudication; candidates: FindingCandidate[]; actionableFindings: Finding[] },
 ): string {
   const totalRaw = outputs.reduce((n, o) => n + o.findings.length, 0);
   const phaseOneHasSevereFinding = outputs.some(
@@ -388,7 +394,7 @@ export function renderSummary(
       output.findings.some((finding) => finding.severity === 'CRITICAL' || finding.severity === 'HIGH'),
   );
   const verifierSkipped = (output: ReviewerOutput) =>
-    output.reviewerName === 'verifier' && output.findings.length === 0 && !phaseOneHasSevereFinding;
+    !adjudication && output.reviewerName === 'verifier' && output.findings.length === 0 && !phaseOneHasSevereFinding;
   const reviewersRun = outputs.filter((output) => !verifierSkipped(output)).length;
   const lines: string[] = [
     `# PR Review Summary`,
@@ -399,7 +405,7 @@ export function renderSummary(
   ];
   if (publication) {
     lines.push(
-      `Publication threshold: ${publication.minimumSeverity}+ | Eligible: ${publication.eligibleCount} / ${finalFindings.length} | Suppressed: ${publication.suppressedCount}`,
+      `Publication threshold: ${publication.minimumSeverity}+ | Eligible: ${publication.eligibleCount} / ${adjudication?.actionableFindings.length ?? finalFindings.length} | Suppressed: ${publication.suppressedCount}`,
     );
     if (pendingPublicationCount !== undefined) {
       lines.push(`Already published: ${publication.eligibleCount - pendingPublicationCount} | Pending publication: ${pendingPublicationCount}`);
@@ -444,14 +450,25 @@ export function renderSummary(
 
   if (passRouting) lines.push(...summarizePasses(passRouting).section);
 
+  if (adjudication) {
+    lines.push('## Actionable Findings', '', `${adjudication.actionableFindings.length} actionable; ${finalFindings.length} original deduplicated findings retained as evidence.`);
+    for (const finding of adjudication.actionableFindings.slice().sort((left, right) => compareSeverity(left.severity, right.severity))) {
+      lines.push('', '---', '', finding.body);
+    }
+    lines.push('', '## Adjudication Decisions', '', '| Candidate | Action | Reason | Evidence |', '|---|---|---|---|');
+    for (const decision of adjudication.record.decisions) {
+      const candidate = adjudication.candidates.find(entry => entry.id === decision.findingId)!;
+      lines.push(`| ${safeSummaryValue(candidate.finding.title)} (${decision.findingId}) | ${decision.action} | ${safeSummaryValue(decision.reason)} | ${safeSummaryValue(decision.evidence.join('; '))} |`);
+    }
+  }
   const sorted = finalFindings
     .slice()
     .sort((left, right) => compareSeverity(left.severity, right.severity));
 
   if (sorted.length === 0) {
-    lines.push(`## Findings`, ``, '_No findings after deduplication._');
+    lines.push(adjudication ? '## Retained Evidence' : '## Findings', ``, '_No findings after deduplication._');
   } else {
-    lines.push(`## Findings`);
+    lines.push(adjudication ? '## Retained Evidence' : '## Findings');
     for (const f of sorted) {
       lines.push(``, '---', ``, f.body);
     }
@@ -624,6 +641,20 @@ export async function finalizeReview(a: {
   if (a.publishMinSeverity !== undefined && a.publishMinSeverity !== minimumSeverity) {
     throw new Error('publication refused [publish-min-severity-mismatch]: the authenticated threshold cannot change');
   }
+  let adjudication: { record: Adjudication; candidates: FindingCandidate[]; actionableFindings: Finding[] } | undefined;
+  if (plan && planAdjudicates(plan)) {
+    const failures = validateDeliveryArtifacts(plan, a.deliveryState!);
+    if (failures.length > 0) throw new Error(`adjudication artifact drift: ${failures.join('; ')}`);
+    const candidates = readPhase1Candidates(plan);
+    if (canonicalJson(findingCandidates(a.outputs.filter(output => output.reviewerName !== 'verifier'))) !== canonicalJson(candidates)) {
+      throw new Error('adjudication candidates do not match retained reviewer output');
+    }
+    if (candidates.length > 0 && a.deliveryState!.verifier.state !== 'valid') throw new Error('adjudication is incomplete');
+    const record = readVerifierAdjudication(plan);
+    const additions = a.outputs.filter(output => output.reviewerName === 'verifier').flatMap(output => output.findings);
+    if (canonicalJson(additions) !== canonicalJson(record.additions)) throw new Error('verifier additions differ from adjudication');
+    adjudication = { record, candidates, actionableFindings: dedupeFindings(applyAdjudication(candidates, record), a.gather.existingComments, a.dedupeMode).kept };
+  }
 
   for (const out of a.outputs) {
     try {
@@ -648,10 +679,11 @@ export async function finalizeReview(a: {
     reviewers: a.outputs.map((output) => ({ reviewer: output.reviewerName, findings: output.findings })),
     finalFindings,
     droppedCount,
+    ...(adjudication ? { adjudication: adjudication.record, actionableFindings: adjudication.actionableFindings } : {}),
   };
   atomicWriteJsonSync(findingsPath, findingsArtifact);
   const { publicationEligibleFindings, suppressedByPublicationFilter, publication } =
-    partitionFindingsForPublication(finalFindings, minimumSeverity);
+    partitionFindingsForPublication(adjudication?.actionableFindings ?? finalFindings, minimumSeverity);
   atomicWriteJsonSync(findingsPath, { ...findingsArtifact, publication });
   process.stderr.write(
     `[review] publication threshold ${publication.minimumSeverity}+: ${publicationEligibleFindings.length} eligible, ` +
@@ -663,7 +695,7 @@ export async function finalizeReview(a: {
   if (known?.planFingerprint && known.planFingerprint !== plan?.fingerprint) {
     throw new Error('publication refused [posting-plan-mismatch]: posting state belongs to another plan');
   }
-  if (plan?.schemaVersion === 2 && known &&
+  if (plan && plan.schemaVersion !== 1 && known &&
       (known.planFingerprint !== plan.fingerprint || !known.confirmedKeys || known.attempted !== publication.eligibleCount)) {
     throw new Error('publication refused [posting-policy-mismatch]: posting state does not account for this authenticated eligible set');
   }
@@ -672,7 +704,7 @@ export async function finalizeReview(a: {
   const expectedCounts = new Map<string, number>();
   for (const key of eligibleKeys) expectedCounts.set(key, (expectedCounts.get(key) ?? 0) + 1);
   const confirmedCounts = new Map<string, number>();
-  const savedConfirmations = a.forcePost && plan?.schemaVersion !== 2 ? [] : known?.confirmedKeys ?? [];
+  const savedConfirmations = a.forcePost && (!plan || plan.schemaVersion === 1) ? [] : known?.confirmedKeys ?? [];
   for (const key of savedConfirmations) {
     const count = (confirmedCounts.get(key) ?? 0) + 1;
     if (count > (expectedCounts.get(key) ?? 0)) {
@@ -742,7 +774,7 @@ export async function finalizeReview(a: {
           attempted: publicationEligibleFindings.length, posted: Math.max(known!.posted, confirmedKeys.length),
           skipped: 0, errors: [], verified: true, confirmedKeys,
         };
-      } else if (plan?.schemaVersion === 2) {
+      } else if (plan && plan.schemaVersion !== 1) {
         postResult = {
           attempted: publicationEligibleFindings.length, posted: confirmedKeys.length, skipped: 0, verified: false,
           confirmedKeys, errors: pendingPublicationFindings.map((finding) => ({ finding, error: why })),
@@ -758,7 +790,7 @@ export async function finalizeReview(a: {
       // reasoning below — `tests/posted-marker.test.ts` pins it, so if it is ever
       // relaxed this guard becomes live again instead of the silent demote-or-
       // duplicate it exists to prevent.
-      if (known?.confirmedKeys && (!a.forcePost || plan?.schemaVersion === 2) && known.posted > confirmedKeys.length) {
+      if (known?.confirmedKeys && (!a.forcePost || (plan && plan.schemaVersion !== 1)) && known.posted > confirmedKeys.length) {
         throw new Error('publication refused [posting-evidence-missing]: prior confirmed writes cannot be identified; refusing to demote or duplicate them');
       }
       if (known && known.posted < known.attempted) {
@@ -815,6 +847,7 @@ export async function finalizeReview(a: {
     [...(a.degraded ?? []), ...operationalFailures],
     publication,
     a.dryRun ? pendingPublicationFindings.length : undefined,
+    adjudication,
   );
   if (hasOperationalFailure) {
     const operationalError = ['operational review failure:', ...operationalFailures.map((failure) => `- ${failure}`)].join('\n');
@@ -836,7 +869,7 @@ export async function finalizeReview(a: {
     appendProgress(a.outDir, 'done', `${postResult?.posted ?? 0} posted, ${finalFindings.length} findings`);
   }
 
-  const exitCode = decideExitCode(a.findingsUnavailable || hasOperationalFailure, finalFindings, a.failOn);
+  const exitCode = decideExitCode(a.findingsUnavailable || hasOperationalFailure, adjudication?.actionableFindings ?? finalFindings, a.failOn);
   if (a.deliveryState) {
     const plan = assertDispatchPlanMirrors(
       join(a.outDir, 'dispatch-plan.json'),
@@ -1075,6 +1108,9 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
       throw new Error('resume recovery refused [control-record-incomplete]: authoritative dispatch plan and delivery state are required');
     }
     const plan = assertDispatchPlanMirrors(planMirrorPath, authoritativePlanPath);
+    if (opts.adjudicate !== undefined && opts.adjudicate !== planAdjudicates(plan)) {
+      throw new Error('resume recovery refused [adjudication-mismatch]: the authenticated decision mode cannot change');
+    }
     if (opts.publishMinSeverity !== undefined && opts.publishMinSeverity !== planPublicationMinimumSeverity(plan)) {
       throw new Error(
         `resume recovery refused [publish-min-severity-mismatch]: saved threshold ${planPublicationMinimumSeverity(plan)} ` +
@@ -1188,6 +1224,7 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
     });
   }
 
+  if (opts.adjudicate) throw new Error('resume refused [adjudication-mismatch]: legacy runs have no authenticated adjudication; start a fresh review');
   if (opts.publishMinSeverity !== undefined && opts.publishMinSeverity !== 'NIT') {
     throw new Error('resume refused [publish-min-severity-mismatch]: legacy runs have no authenticated publication threshold; use a fresh review or explicit post command');
   }
@@ -1325,6 +1362,9 @@ export async function runReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
 }
 
 async function reviewPipeline(opts: ReviewCmdOptions, where: { outDir?: string }): Promise<ReviewResult> {
+  if (opts.adjudicate && (opts.withCodex !== false || opts.skip?.includes('verifier'))) {
+    throw new Error('--adjudicate requires --no-codex and an enabled verifier');
+  }
   const overallStart = Date.now();
   const invocationCwd = process.cwd();
   const cwd = gitTopLevel(invocationCwd) ?? invocationCwd;
@@ -1661,6 +1701,7 @@ async function reviewPipeline(opts: ReviewCmdOptions, where: { outDir?: string }
       dedupeMode: config.dedupeMode,
       failOn: opts.failOn,
       publishMinSeverity: opts.publishMinSeverity ?? 'NIT',
+      ...(opts.adjudicate ? { adjudicate: true } : {}),
     },
     configProjection: {
       defaultModel: config.defaultModel,

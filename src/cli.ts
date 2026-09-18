@@ -99,6 +99,7 @@ program
   .option('--lang <code>', 'Language for finding titles/bodies (e.g. pt-BR, es)')
   .option('--fail-on <severity>', 'Exit 1 when any finding at/above this severity survives dedupe (critical|high|medium|low|nit)')
   .option('--publish-min-severity <severity>', 'Publish only findings at/above this severity; keep all findings locally (critical|high|medium|low|nit; default: nit)')
+  .option('--adjudicate', 'Apply explicit verifier decisions before publication and fail-on; retain original evidence (requires --no-codex)')
   .option('--runtime <name>', 'Agent CLI hosting the session: copilot | claude | auto (probe PATH)', undefined)
   .option('--no-codex', 'Never run the Codex second-opinion reviewer, even when the codex CLI is installed')
   .option('--resume <run-id>', 'Resume a prior run: reuse its reviewer outputs on disk, skip dispatch, then dedupe + post')
@@ -131,6 +132,7 @@ program
         lang?: string;
         failOn?: string;
         publishMinSeverity?: string;
+        adjudicate?: boolean;
         runtime?: string;
         codex: boolean;
         resume?: string;
@@ -148,6 +150,9 @@ program
         }
         const failOn = parseSeverity(opts.failOn, '--fail-on');
         const publishMinSeverity = parseSeverity(opts.publishMinSeverity, '--publish-min-severity');
+        if (opts.adjudicate && !opts.resume && (opts.codex || skip.includes('verifier'))) {
+          throw new Error('--adjudicate requires --no-codex and an enabled verifier');
+        }
         // Background mode: spawn a detached child that runs the review, and
         // return a run-id the caller can poll. Resume/context-only are already
         // fast/foreground, so --detach is a no-op for them.
@@ -184,6 +189,7 @@ program
           language: opts.lang,
           failOn,
           publishMinSeverity,
+          adjudicate: opts.adjudicate,
           runtime: opts.runtime as RuntimeChoice | undefined,
           withCodex: opts.codex ? undefined : false,
           resumeRunId: opts.resume,
@@ -223,6 +229,9 @@ program
     try {
       const minimumSeverity = parseSeverity(opts.publishMinSeverity, '--publish-min-severity');
       const raw = JSON.parse(readFileSync(opts.findings, 'utf8')) as { reviewers?: Array<{ reviewer: string; model: string; findings: ReviewerOutput['findings'] }>; finalFindings?: ReviewerOutput['findings'] } | Array<{ reviewer: string; model: string; findings: ReviewerOutput['findings'] }>;
+      if (!Array.isArray(raw) && (Object.hasOwn(raw, 'adjudication') || Object.hasOwn(raw, 'actionableFindings'))) {
+        throw new Error('adjudicated reports require authenticated review --resume; standalone post cannot validate their decisions');
+      }
       let outputs: ReviewerOutput[];
       if (Array.isArray(raw)) {
         outputs = raw.map((r) => ({

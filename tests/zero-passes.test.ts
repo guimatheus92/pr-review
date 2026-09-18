@@ -685,7 +685,7 @@ test('runReview — gather receives the provider resolved from trusted config, n
 // only review-shaped prompt text in the repo is PASS_RULES, VERIFIER_BRIEF, the
 // orchestrator scaffold, and the codex prompt — none may hardcode a framework.
 test('prompt text in the repo stays stack-agnostic (no framework names)', async () => {
-  const { PASS_RULES, VERIFIER_BRIEF } = await import('../src/dispatch/single-session.js');
+  const { PASS_RULES, VERIFIER_BRIEF, ADJUDICATION_BRIEF, REVIEW_EVIDENCE_RULES } = await import('../src/dispatch/single-session.js');
   const { fileURLToPath } = await import('node:url');
   const srcDir = fileURLToPath(new URL('../src/dispatch/', import.meta.url));
   const codexSrc = readFileSync(join(srcDir, 'codex.ts'), 'utf8');
@@ -694,6 +694,8 @@ test('prompt text in the repo stays stack-agnostic (no framework names)', async 
   for (const [label, text] of [
     ['PASS_RULES', PASS_RULES],
     ['VERIFIER_BRIEF', VERIFIER_BRIEF],
+    ['ADJUDICATION_BRIEF', ADJUDICATION_BRIEF],
+    ['REVIEW_EVIDENCE_RULES', REVIEW_EVIDENCE_RULES],
     ['single-session.ts', singleSrc],
     ['codex.ts', codexSrc],
   ] as const) {

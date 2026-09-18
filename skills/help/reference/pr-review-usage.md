@@ -74,6 +74,32 @@ review or explicit standalone `post` for a different publication threshold.
 
 ## What it does
 
+### Explicit verifier decisions
+
+```bash
+pr-review review "$PR_URL" --dry-run --no-codex --adjudicate
+```
+
+This CLI-only opt-in requires the verifier enabled. Reviewers still read project
+knowledge first; afterward the verifier must accept, reject or amend every Phase 1
+candidate by stable ID, with reasons and evidence. It runs for any nonempty candidate
+set, including LOW/NIT-only results. Missing or malformed decisions stop completion.
+
+The verifier distinguishes false premises from supported preventative recommendations.
+An already-failed deployment is not required: when a concrete concern has overstated
+impact, it should amend the wording or severity before considering rejection. These
+are still model judgments, not independent proof that a finding is correct.
+
+Original `finalFindings` and reviewer outputs remain in the report. A separate
+`actionableFindings` set drives publication and `--fail-on`; severity filtering
+does not change either retained view. The summary shows decisions and originals.
+Schema-v3 plans make the opt-in sticky on resume, and older binaries refuse them.
+To publish a completed preview, use `review "$PR_URL" --resume <run-id>`; standalone
+`post` refuses adjudicated reports because their decisions require authentication.
+Do not add `--adjudicate` to an old run: start a fresh review instead.
+
+### Default pipeline
+
 1. Detects the provider from the URL (GitHub, Azure DevOps, or GitLab)
 2. Gathers PR metadata, diff, linked work items, existing comments — metadata and comments fetched in parallel, cached for re-runs. On the first review on a machine, missing skill packs are cloned to `~/.pr-review/packs/` (needs git + network, ~1-2 min, one-time; failures warn rather than abort)
 3. Detects canonical Linguist languages plus categorized dependency/ecosystem evidence from root and changed-file manifests. Passes are ranked by specific glob, dependency evidence, language-consistent weak glob, then tag (cap 6), plus every baseline; a generic language or manifest cannot prove an unrelated product
@@ -106,6 +132,7 @@ Most review knowledge comes from skill packs (git repos under `~/.pr-review/pack
 | `--lang <code>` | Language for finding titles/bodies (default `en`) |
 | `--fail-on <severity>` | Exit 1 if findings at/above this severity survive dedupe (`critical`\|`high`\|`medium`\|`low`\|`nit`) |
 | `--publish-min-severity <severity>` | Publish this severity and above; retain all findings locally (same values; default `nit`; CLI-only) |
+| `--adjudicate` | Apply explicit verifier decisions to publication/fail-on; retain original evidence; requires `--no-codex` and an enabled verifier |
 | `--skip <names>` | Comma-separated pass names to skip — full (`awesome-copilot/go`) or bare suffix (`go`); also `verifier`, `codex` |
 | `--no-cache` | Bypass the gather cache |
 | `--skill <file>` | Include a specific .md file (inside the checkout) while preserving its `applyTo`/`paths` scope |

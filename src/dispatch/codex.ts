@@ -193,7 +193,8 @@ export async function runCodexReviewer(opts: CodexReviewOptions): Promise<Review
     });
   }
   const prompt =
-    `You are an adversarial second-opinion code reviewer. Read the PR review context at \`${opts.contextPath}\` (metadata, existing comments, diff).${skillsRulesSentence(opts.skillsPath)} ` +
+    skillsRulesSentence(opts.skillsPath) +
+    `You are an adversarial second-opinion code reviewer. Read the PR review context at \`${opts.contextPath}\` (metadata, existing comments, diff). ` +
     `Hunt for real bugs, security issues, and broken edge cases the diff introduces — assume other reviewers already caught the obvious; look for what they would miss. Do not restate existing comments. ` +
     `Output ONLY a JSON array of findings using the shape: ${OUTPUT_SHAPE}. If you find nothing, output []. No prose. No fences. ${NO_POSTING_DIRECTIVE}`;
 

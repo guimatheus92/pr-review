@@ -4,6 +4,13 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+### Added
+- CLI-only `--adjudicate --no-codex` enables explicit verifier accept/reject/amend decisions for every Phase 1 candidate. Schema-v3 plans authenticate the opt-in and strict ID coverage; malformed or missing decisions fail closed. Original findings remain evidence, while a separate actionable set drives publication and fail-on. Resume and audit reconstruct decisions from authenticated artifacts. Standalone post refuses adjudicated reports; publish through authenticated resume. Normal reviews and legacy plans retain their existing behavior.
+
+### Fixed
+- Primary reviewers and companions now read project knowledge before applying a generic lens, with a line-range index for shared rules and explicit checks against unsupported premises. Supported repository patterns require concrete contrary evidence before being reported as defects; observed changes remain distinguishable from unverified consequences. No repository-specific rules were added to the CLI.
+- Artifact-retention audit now fails explicitly when finalization artifacts fail authentication instead of passing after reconstruction is unavailable.
+
 ## [0.15.0] — 2026-09-12
 
 ### Added

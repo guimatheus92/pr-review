@@ -155,6 +155,61 @@ function seedCompanionSources(): { sources: CompanionPluginSource[]; cleanup(): 
   };
 }
 
+test('project knowledge precedes every reviewer lens and guards unsupported premises', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-knowledge-first-'));
+  const companions = seedCompanionSources();
+  try {
+    const ctx = prepareSessionContext({
+      ...baseOpts(outDir, ['src/main.ts'], [pass('pack/contracts')]),
+      projectSkills: [{
+        name: 'shared-contract', source: '/project/rules/shared-contract.md',
+        description: 'Shared input contract', appliesTo: ['src/**'],
+        body: 'Component-specific models consume the same shared input before applying local overrides.',
+      }],
+      invokeCompanions: true,
+      installedCompanions: ['pr-review-toolkit', 'code-review'],
+      companionSources: companions.sources,
+    });
+    assert.equal(ctx.dispatchPlan!.reviewers.length, 8);
+    for (const reviewer of ctx.dispatchPlan!.reviewers) {
+      const prompt = reviewer.promptTemplate;
+      assert.ok(prompt.startsWith('Before forming any findings, read the project-specific rules'));
+      assert.ok(prompt.indexOf(join(outDir, 'skills-project.md')) < prompt.indexOf(ctx.contextPath));
+      assert.ok(prompt.includes('A documented supported pattern is not a defect'));
+      assert.ok(prompt.includes('unavailable context is not proof of failure'));
+      assert.ok(prompt.includes('preserve a concrete concern with appropriately qualified impact'));
+      assert.ok(!prompt.includes("apply ONLY that pass's rules"));
+    }
+    assert.ok(readFileSync(join(outDir, 'skills-project.md'), 'utf8').includes('same shared input'));
+  } finally {
+    companions.cleanup();
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('shared rule index points to complete bodies including long and CRLF content', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-rule-index-'));
+  try {
+    const projectSkills = ['first', 'second'].map((name, index) => ({
+      name, description: `Rule ${name}`, source: `/${name}.md`, appliesTo: ['src/**'],
+      body: `START_${name}\r\n${'read this rule\r\n'.repeat(index ? 1200 : 3)}END_${name}`,
+    }));
+    const ctx = prepareSessionContext({ ...baseOpts(outDir, ['src/main.ts'], [pass('pack/contracts')]), projectSkills });
+    const text = readFileSync(ctx.skillsFiles.project!, 'utf8');
+    const lines = text.split('\n');
+    for (const rule of projectSkills) {
+      const row = lines.find(line => line.startsWith(`| ${rule.name} |`))!;
+      const match = /\| (\d+)-(\d+) \|/.exec(row)!;
+      const selected = lines.slice(Number(match[1]) - 1, Number(match[2])).join('\n');
+      assert.ok(selected.startsWith(`## ${rule.name}\n`));
+      assert.ok(selected.includes(rule.body));
+      assert.ok(selected.endsWith(`END_${rule.name}`));
+    }
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
 test('passes — one pass-*.md per pass (rules + ONE body), union has all, prompt records pass names', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {

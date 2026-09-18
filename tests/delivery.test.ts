@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -15,6 +15,11 @@ import {
   hasSevereFindings,
   inspectReviewerDelivery,
   promoteReviewerAttempt,
+  promoteVerifierAttempt,
+  inspectVerifierDelivery,
+  readPhase1Candidates,
+  readVerifierAdjudication,
+  requiresVerifier,
   readAuthoritativeDeliveryState,
   recordCodexResult,
   reconcileDeliveryCompletion,
@@ -92,6 +97,50 @@ test('assembleConsolidated — appends a required verifier without mutating phas
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as { reviewers: Array<{ name: string }> };
     assert.deepEqual(parsed.reviewers.map((reviewer) => reviewer.name), ['one', 'verifier']);
     assert.deepEqual(phase1.map((reviewer) => reviewer.reviewerName), ['one']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('adjudication delivery binds all candidate decisions and refuses invalid replacement attempts', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-adjudication-delivery-'));
+  try {
+    const verifierAttempts = join(dir, 'verifier-attempts');
+    mkdirSync(verifierAttempts);
+    const raw = join(dir, 'reviewer.json');
+    writeFileSync(raw, JSON.stringify([finding('LOW')]));
+    const plan = createDispatchPlan({
+      runId: 'run', runDir: dir, createdAt: new Date(0).toISOString(),
+      pr: { provider: 'github', url: 'u', owner: 'o', repo: 'r', number: 1 },
+      metadata: { headSha: 'h', baseSha: 'b', headBranch: 'f', baseBranch: 'main', state: 'open', isDraft: false },
+      runtime: 'copilot', runtimeBinary: 'copilot', disabledMcpServers: [], model: 'm', timeoutMs: 1,
+      phase1Path: join(dir, 'phase1.json'), findingsPath: join(dir, 'findings.json'),
+      execution: { dryRun: true, publish: false, dedupeMode: 'strict', adjudicate: true },
+      configProjection: {}, configFingerprint: 'f', artifacts: [],
+      reviewers: [{ name: 'reviewer', kind: 'pass', description: 'Review', agentType: 'general-purpose',
+        promptTemplate: '{{PR_REVIEW_OUTPUT_PATH}}', canonicalOutputPath: raw, attemptsDir: join(dir, 'attempts'), maxAttempts: 3 }],
+      verifier: { enabled: true, outputFormat: 'adjudication-v1', canonicalOutputPath: join(dir, 'raw-verifier.json'), attemptsDir: verifierAttempts, maxAttempts: 2 },
+      codex: { enabled: false, contextPath: join(dir, 'context.md'), attemptsDir: join(dir, 'codex'), maxAttempts: 2 },
+    });
+    assert.equal(plan.schemaVersion, 3);
+    writeDispatchPlan(plan, join(dir, 'plan.json'));
+    assert.deepEqual(readDispatchPlan(join(dir, 'plan.json')), plan);
+    const inventory = inspectReviewerDelivery({ reviewer: raw }, 'm', 0);
+    assert.equal(requiresVerifier(plan, inventory.outputs), true);
+    assert.equal(hasSevereFindings(inventory.outputs), false);
+    assemblePhase1(plan.phase1Path, inventory, true);
+    const candidates = readPhase1Candidates(plan);
+    writeFileSync(join(verifierAttempts, 'attempt-1.json'), JSON.stringify({ schemaVersion: 1, decisions: [], additions: [] }));
+    assert.equal(promoteVerifierAttempt(plan.verifier, 1, 'm', 0, candidates).status, 'invalid');
+    assert.equal(existsSync(plan.verifier.canonicalOutputPath!), false);
+    const decision = { schemaVersion: 1, decisions: [{ findingId: candidates[0]!.id, action: 'reject', reason: 'Supported input', evidence: ['project rule'] }], additions: [] };
+    writeFileSync(join(verifierAttempts, 'attempt-2.json'), JSON.stringify(decision));
+    assert.equal(promoteVerifierAttempt(plan.verifier, 2, 'm', 0, candidates).status, 'valid');
+    assert.deepEqual(readVerifierAdjudication(plan), decision);
+    assert.deepEqual(inspectVerifierDelivery(plan, 0).output?.findings, []);
+    assert.equal(promoteVerifierAttempt(plan.verifier, 1, 'm', 0, candidates).status, 'collision');
+    assert.throws(() => createDispatchPlan({ ...plan, verifier: { ...plan.verifier, enabled: false } }), /requires/);
+    assert.throws(() => createDispatchPlan({ ...plan, codex: { ...plan.codex, enabled: true } }), /requires/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

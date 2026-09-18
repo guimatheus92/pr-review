@@ -22,6 +22,14 @@ Each pass gets a `pass-<name>.md` file in the run dir (`~/.pr-review/runs/<id>/`
 
 ## How passes are selected
 
+Reviewer and companion prompts require applicable project rules before forming
+findings. The shared file includes a rule index with line ranges so a partial tool
+read can be completed. Put concise supported patterns, exceptions, and review
+contracts early in scoped repository rules. Do not hide essential facts only in
+sibling references or an installed-plugin pass: that pass is a lens, not shared
+authority for every other reviewer. A documented pattern can still contain a defect,
+but the finding must establish why the rule does not apply rather than assume it.
+
 Selection separates LENSES from CONTEXT. Your own skills (repo dirs, configured dirs, forced files/dirs) are CONTEXT: every matched one is injected into EVERY pass as authoritative project rules (`skills-project.md`) - they override generic judgement and never consume pass slots. There is no numeric cap on matched project skills and their bodies are inlined whole (no byte truncation) - the review pays the token cost by design rather than silently losing a business rule. The PASSES are pack skills: stack hits (glob/tag, capped at `MAX_STACK_PASSES = 6`) plus EVERY baseline pointer (the generic lenses always run on a code PR). With no pack passes at all (`skill_packs: []`), your skills become the passes themselves — up to 10 as passes (bodies never truncated; only third-party pack bodies cap), overflow injected whole as context.
 
 Pass selection within the packs:
@@ -53,6 +61,11 @@ Valid `--skip` / `skip_reviewers` names are **pass names** — the full `<pack>/
 - **Companion plugins** — each installed companion criterion is copied into a hash-bound run-local brief and dispatched through a generic agent. Every planned companion identity, up to seven, reads the same `skills-project.md` or `skills-all.md` shared file as Codex and the verifier; `code-review` consumes the materialized PR diff rather than invoking its native URL/`gh` workflow.
 
 ## Frontmatter quick reference
+
+`--adjudicate --no-codex` optionally adds explicit accept/reject/amend decisions for
+every Phase 1 candidate, regardless of severity. It is a generic CLI process, not
+a domain skill. Originals remain evidence; only the actionable projection drives
+posting and fail-on. It does not replace primary reviewers reading project rules.
 
 ```yaml
 ---

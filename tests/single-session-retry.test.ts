@@ -16,12 +16,15 @@ import {
   createDispatchPlan,
   readAuthoritativeDeliveryState,
   verifierAttemptOutputPath,
+  readPhase1Candidates,
+  readVerifierAdjudication,
   writeDispatchPlan,
 } from '../src/dispatch/delivery.js';
 import { sha256File } from '../src/util/atomic-json.js';
 import { readReviewerProgress } from '../src/dispatch/reviewer-progress.js';
 import { createDeliveryState, inspectReviewerDelivery, promoteReviewerAttempt, writeDeliveryState } from '../src/dispatch/delivery.js';
 import { runtimeTaskName } from '../src/dispatch/runtime.js';
+import { controlDirForRun } from '../src/util/tmp.js';
 
 // spawnRuntime's resolved shape — the seam the fake must satisfy.
 type SpawnResult = { stdout: string; stderr: string; exitCode: number };
@@ -125,6 +128,97 @@ test('publication threshold never suppresses Phase-1 findings or the direct veri
     assert.deepEqual(result.outputs.flatMap((output) => output.findings), findings);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('structured adjudication runs for LOW candidates and retains originals instead of reviewer corrections', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-structured-verifier-'));
+  try {
+    const opts: SingleSessionOptions = {
+      prUrl: 'https://github.com/o/r/pull/1',
+      gather: { pr: { provider: 'github', url: 'https://github.com/o/r/pull/1', owner: 'o', repo: 'r', number: 1 },
+        metadata: { title: 'Test', description: 'Complete', author: 'a', headSha: 'h', baseSha: 'b', baseBranch: 'main', headBranch: 'f', labels: [], linkedItems: [], createdAt: '', updatedAt: '', isDraft: false, state: 'open' },
+        changedFiles: [{ path: 'a.ts', status: 'modified', additions: 1, deletions: 0, patch: '@@ -1 +1 @@\n-a\n+b' }], existingComments: [], gatheredAt: '' },
+      passes: [{ name: 'quality', source: '/quality.md', body: 'review', matchedBy: 'baseline', matchedOn: [] }],
+      indexEntries: [], stackTags: [], installedCompanions: [], skipReviewers: [], outDir: dir,
+      invokeCompanions: false, defaultModel: 'explicit-model',
+      execution: { dryRun: true, publish: false, dedupeMode: 'strict', adjudicate: true },
+    };
+    const ctx = prepareSessionContext(opts);
+    const plan = ctx.dispatchPlan!;
+    assert.equal(plan.schemaVersion, 3);
+    assert.ok(readFileSync(ctx.verifierPath!, 'utf8').includes('Reviewer disagreement'));
+    let calls = 0;
+    const original = { severity: 'LOW', title: 'Unsupported premise', body: 'The shared input is missing.', file: 'a.ts', line: 1 };
+    const result = await runSingleSession(opts, ctx, async () => {
+      calls++;
+      if (calls === 1) writeFileSync(attemptOutputPath(plan.reviewers[0]!, 1), JSON.stringify([original]));
+      else {
+        assert.equal(calls, 2);
+        writeFileSync(verifierAttemptOutputPath(plan.verifier, 1), JSON.stringify({ schemaVersion: 1,
+          decisions: readPhase1Candidates(plan).map(candidate => ({ findingId: candidate.id, action: 'reject', reason: 'Shared binding exists.', evidence: ['project contract'] })), additions: [] }));
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    assert.equal(calls, 2);
+    assert.equal(result.findingsUnavailable, false);
+    assert.equal(result.deliveryState?.verifier.state, 'valid');
+    assert.deepEqual(result.outputs.flatMap(output => output.findings), [original]);
+    assert.equal(readVerifierAdjudication(plan).decisions[0]!.action, 'reject');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('structured adjudication recovers only the invalid verifier and treats empty reviews explicitly', async () => {
+  for (const empty of [false, true]) {
+    const home = mkdtempSync(join(tmpdir(), 'pr-adjudication-recovery-'));
+    const outDir = join(home, '.pr-review/runs/recovery');
+    mkdirSync(outDir, { recursive: true });
+    try {
+      const opts: SingleSessionOptions = {
+        prUrl: 'https://github.com/o/r/pull/1',
+        gather: { pr: { provider: 'github', url: 'https://github.com/o/r/pull/1', owner: 'o', repo: 'r', number: 1 },
+          metadata: { title: 'Test', description: 'Complete', author: 'a', headSha: 'h', baseSha: 'b', baseBranch: 'main', headBranch: 'f', labels: [], linkedItems: [], createdAt: '', updatedAt: '', isDraft: false, state: 'open' },
+          changedFiles: [{ path: 'a.ts', status: 'modified', additions: 1, deletions: 0, patch: '@@ -1 +1 @@\n-a\n+b' }], existingComments: [], gatheredAt: '' },
+        passes: [{ name: 'quality', source: '/quality.md', body: 'review', matchedBy: 'baseline', matchedOn: [] }],
+        indexEntries: [], stackTags: [], installedCompanions: [], skipReviewers: [], outDir,
+        controlDir: controlDirForRun(outDir, home), invokeCompanions: false, defaultModel: 'explicit-model',
+        execution: { dryRun: true, publish: false, dedupeMode: 'strict', adjudicate: true },
+      };
+      const ctx = prepareSessionContext(opts);
+      const plan = ctx.dispatchPlan!;
+      let calls = 0;
+      const result = await runSingleSession(opts, ctx, async () => {
+        calls++;
+        if (calls === 1) writeFileSync(attemptOutputPath(plan.reviewers[0]!, 1), JSON.stringify(empty ? [] : [{ severity: 'HIGH', title: 't', body: 'b', file: 'a.ts', line: 1 }]));
+        else writeFileSync(verifierAttemptOutputPath(plan.verifier, 1), JSON.stringify({ schemaVersion: 1, decisions: [], additions: [] }));
+        return { stdout: '', stderr: '', exitCode: 0 };
+      });
+      if (empty) {
+        assert.equal(calls, 1);
+        assert.equal(result.findingsUnavailable, false);
+        assert.equal(result.deliveryState?.verifier.state, 'skipped-no-candidates');
+        assert.deepEqual(readVerifierAdjudication(plan), { schemaVersion: 1, decisions: [], additions: [] });
+      } else {
+        assert.equal(result.findingsUnavailable, true);
+        assert.equal(result.deliveryState?.verifier.state, 'invalid');
+        assert.equal(existsSync(plan.findingsPath), false);
+        const digest = sha256File(plan.reviewers[0]!.canonicalOutputPath);
+        const resumed = await resumePlannedSession(plan, ctx.deliveryStatePath!, ctx.authoritativeDeliveryStatePath!, async request => {
+          assert.ok(request.promptBody.includes('decision protocol'));
+          writeFileSync(verifierAttemptOutputPath(plan.verifier, 2), JSON.stringify({ schemaVersion: 1, additions: [],
+            decisions: readPhase1Candidates(plan).map(candidate => ({ findingId: candidate.id, action: 'accept', reason: 'Supported by the diff.', evidence: ['a.ts:1'] })) }));
+          return { stdout: '', stderr: '', exitCode: 0 };
+        });
+        assert.equal(resumed.findingsUnavailable, false);
+        assert.equal(resumed.deliveryState?.verifier.attempts, 2);
+        assert.equal(sha256File(plan.reviewers[0]!.canonicalOutputPath), digest);
+        assert.equal(resumed.deliveryState?.reviewerAttempts.quality, 1);
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   }
 });
 

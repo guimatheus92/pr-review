@@ -38,13 +38,17 @@ import {
   createDispatchPlan,
   createDeliveryState,
   hasSevereFindings,
+  inspectVerifierDelivery,
   inspectReviewerDelivery,
+  planAdjudicates,
   promoteReviewerAttempt,
   promoteVerifierAttempt,
   readDeliveryState,
+  readPhase1Candidates,
   reconcileDeliveryCompletion,
   repairDeliveryStateMirror,
   reserveCodexAttempt,
+  requiresVerifier,
   renderAttemptPrompt,
   validateDispatchArtifacts,
   validateDeliveryArtifacts,
@@ -109,6 +113,7 @@ export interface SingleSessionOptions {
     dedupeMode: 'strict' | 'loose' | 'off';
     failOn?: Severity;
     publishMinSeverity?: Severity;
+    adjudicate?: boolean;
   };
   /** False for previews; no-dispatch contexts must not create recoverable schema-v1 control. */
   persistRecoveryControl?: boolean;
@@ -158,9 +163,18 @@ export const OUTPUT_SHAPE =
 
 export function skillsRulesSentence(skillsPath: string | undefined): string {
   return skillsPath
-    ? ` Also read the project-specific rules at \`${skillsPath}\` — they are authoritative and OVERRIDE generic judgement.`
+    ? `Before forming any findings, read the project-specific rules at \`${skillsPath}\` — they are authoritative and OVERRIDE generic judgement. Use its rule index to read every applicable rule in full; follow up on truncated reads rather than relying on the beginning of the file. `
     : '';
 }
+
+export const REVIEW_EVIDENCE_RULES =
+  'Before returning a finding, check its premise against the applicable project rules and the supplied source context. ' +
+  'A documented supported pattern is not a defect merely because a generic skill prefers another pattern. ' +
+  'Report a contradiction only when concrete evidence shows why that project rule does not apply to this change. ' +
+  'Trace the relevant inputs and consumers before claiming something is missing or invalid; unavailable context is not proof of failure. ' +
+  'Keep observed changes separate from unverified consequences, and preserve a concrete concern with appropriately qualified impact rather than inventing certainty or discarding the observation. ' +
+  'Preventative review does not require an already-failed deployment or incident: a source-proven contract change with an applicable compatibility or validation requirement can justify a bounded recommendation. ' +
+  'State what changed, the affected contract, and the concrete check or remedy; do not claim an unobserved failure or that a check was never run merely because its result is absent. ';
 
 /**
  * The ONLY review-shaped text this repo still owns: pipeline rules — severity
@@ -170,12 +184,13 @@ export function skillsRulesSentence(skillsPath: string | undefined): string {
 export const PASS_RULES = [
   `## Pipeline rules`,
   ``,
-  `- You are a code reviewer applying ONLY the rules in the skill below to this PR's diff. Do not do a general review.`,
+  `- Use the skill below as your review lens for this PR's diff, subject to the authoritative project-specific rules. Do not do a general review.`,
+  `- ${REVIEW_EVIDENCE_RULES.trim()}`,
   `- Severity scale: CRITICAL (exploitable or production-breaking today) → HIGH (real risk, fix before merge) → MEDIUM (should fix soon) → LOW (minor) → NIT (tiny suggestion; never blocks).`,
   `- Only flag code this PR changes. Never flag pre-existing issues in untouched lines.`,
   `- Do not duplicate anything listed under "Existing Comments" in the PR context.`,
   `- Every finding carries the exact \`file\` and \`line\` from the diff (new-side line numbers).`,
-  `- In each finding's body, state the rule violated and the concrete fix.`,
+  `- In each finding's body, state the supporting evidence, applicable rule, and concrete action. Distinguish a proven defect from a qualified recommendation; do not invent a rule violation to justify advice.`,
 ].join('\n');
 
 /**
@@ -215,6 +230,24 @@ export const VERIFIER_BRIEF = [
   `- **NIT** — almost never use; the verifier is for substantive gaps.`,
   ``,
   `In each finding's body, state which passes/files it spans, why it was missed, and the concrete fix.`,
+].join('\n');
+
+export const ADJUDICATION_BRIEF = [
+  '# Verifier: explicit finding decisions',
+  '',
+  'Read the authoritative project rules before judging the candidates in phase1-findings.json. Their IDs are computed by Node; copy them exactly.',
+  REVIEW_EVIDENCE_RULES.trim(),
+  'For EVERY candidate return exactly one accept, reject, or amend decision, with a nonempty reason and evidence references to the supplied context or project rules.',
+  'Evaluate in this order: establish the underlying observation and applicable contract; correct its impact, severity, and remedy; then decide whether any actionable concern remains.',
+  'Accept a supported, actionable finding. An actionable finding may be a concrete preventative check required by the applicable project contract, not only a demonstrated failure.',
+  'Amend before considering rejection when a supported observation has an overstated consequence or remedy. Keep the observed change and a bounded action, and remove unsupported claims about failure, missing validation, or policy violations. Missing proof of a worst-case outcome does not erase a supported concern.',
+  'Reject when the underlying premise is false, no supported actionable concern remains after that assessment, or a documented intentional pattern was misclassified as a defect. Do not reject solely because no deployment or incident has failed yet.',
+  'For duplicate candidates, accept or amend one evidence-backed representative first, then reject the duplicates with its exact candidate ID in their evidence. Do not reject every candidate merely because they describe the same concern.',
+  'Do not accept a claim merely because several reviewers repeat it. Trace its premise and check the applicable documented exceptions.',
+  'Use additions only for new source-code defects missed by all reviewers. Reviewer disagreement, rejection explanations, and review-process corrections belong ONLY in decisions, never additions.',
+  'Do not rewrite, delete, or edit any candidate or other reviewer output file. Node retains the originals and applies your decisions.',
+  'Return ONLY this JSON object: {"schemaVersion":1,"decisions":[{"findingId":"<exact candidate id>","action":"accept|reject|amend","reason":"...","evidence":["<file/section and supporting fact>"],"finding":{"severity":"CRITICAL|HIGH|MEDIUM|LOW|NIT","title":"...","body":"...","file":"...","line":1}}],"additions":[]}.',
+  'The finding property is REQUIRED only for amend and FORBIDDEN for accept or reject. additions contains ordinary Finding objects only. An empty candidate set uses empty decisions and additions.',
 ].join('\n');
 
 export interface SessionContext {
@@ -377,8 +410,9 @@ function passTaskPrompt(
     ? `This installed-plugin pass declares MCP servers: ${capabilityAudit.servers.join(', ') || '(none)'}. This runtime denies MCP at the process level — categorically under claude, and for every inventoried server under copilot — so expect no mcp__* tool to be callable and nothing to attempt. Record what you actually observe, never a call you could not make: normally available, attempted and used are all empty arrays.${declaredNames} If an mcp__* tool IS nonetheless callable, name its server in available (and in used only after a successful result) and say so in notes — that is a denial leak worth reporting, and this sidecar is the only place it can surface. Before returning, write a JSON object to \`${capabilityAudit.path}\` using exactly this shape: {"reviewer":"${capabilityAudit.reviewer}","available":[],"attempted":[],"used":[],"notes":"evidence"}. All three are arrays of server-name strings, never booleans. `
     : '';
   return (
-    `Read the PR context at \`${contextPath}\`, then read your review pass at \`${passPath}\` and apply ONLY that pass's rules to the diff.` +
-    `${skillsRulesSentence(projectPath)} ` +
+    skillsRulesSentence(projectPath) +
+    `Read the PR context at \`${contextPath}\`, then read your review pass at \`${passPath}\` and apply that lens subject to the project rules. ` +
+    REVIEW_EVIDENCE_RULES +
     audit +
     `Before returning, write your exact JSON findings array to \`${outputPath}\` using the Write or apply_patch tool, even when it is empty. ` +
     `Then output that same JSON array using the shape: ${OUTPUT_SHAPE}. If you find nothing, write and output []. No prose. No fences. ` +
@@ -393,15 +427,26 @@ function passTaskPrompt(
  * two of those cut mid-body). Every pass pays the read cost by design.
  */
 function renderProjectFile(skills: SkillDefinition[]): string {
+  const blocks = skills.map(skill => ['', `## ${skill.name}`, skill.description ? `_${skill.description}_` : '', '', skill.body.trim()].join('\n'));
   const lines: string[] = [
     `# Project-Specific Rules`,
     ``,
     `The following project conventions, business rules, and team standards apply to this review. They are authoritative and OVERRIDE generic judgement.`,
+    '',
+    '## Rule Index',
+    '',
+    'Read every applicable rule in full before forming findings. A partial or truncated read is not the complete project contract.',
+    '',
+    '| Rule | Lines | Scope |',
+    '|---|---|---|',
   ];
-  for (const s of skills) {
-    lines.push('', `## ${s.name}`, s.description ? `_${s.description}_` : '', '', s.body.trim());
+  let nextLine = lines.length + skills.length + 1;
+  for (const [index, skill] of skills.entries()) {
+    const lineCount = blocks[index]!.split('\n').length;
+    lines.push(`| ${skill.name.replaceAll('|', '\\|')} | ${nextLine + 1}-${nextLine + lineCount - 1} | ${skill.appliesTo.join(', ').replaceAll('|', '\\|') || 'Matched project context'} |`);
+    nextLine += lineCount;
   }
-  return lines.join('\n');
+  return [...lines, ...blocks].join('\n');
 }
 
 /** Companion agents keep their own criteria; the union skills file is optional context. */
@@ -412,8 +457,9 @@ function companionTaskPrompt(
   outputPath: string,
 ): string {
   return (
-    `Read the PR context at \`${contextPath}\`, then apply the companion review criteria at \`${briefPath}\`.` +
-    `${skillsRulesSentence(skillsPath)} ` +
+    skillsRulesSentence(skillsPath) +
+    `Read the PR context at \`${contextPath}\`, then apply the companion review criteria at \`${briefPath}\` subject to the project rules. ` +
+    REVIEW_EVIDENCE_RULES +
     `Before returning, write your exact JSON findings array to \`${outputPath}\` using the Write or apply_patch tool, even when it is empty. ` +
     `Then output that same JSON array using the shape: ${OUTPUT_SHAPE}. If you find nothing, write and output []. No prose. No fences. ` +
     NO_POSTING_DIRECTIVE
@@ -426,10 +472,17 @@ function verifierTaskPrompt(
   phase1Path: string,
   authoritativeSkills: string | undefined,
   outputPath: string,
+  adjudicate = false,
 ): string {
+  if (adjudicate) {
+    return skillsRulesSentence(authoritativeSkills) +
+      `Read your decision protocol at \`${verifierPath}\`, the PR context at \`${contextPath}\`, and every candidate at \`${phase1Path}\`. ` +
+      `Write the exact adjudication JSON object to \`${outputPath}\` using Write or apply_patch. Return the same object. No prose or fences. ` +
+      NO_POSTING_DIRECTIVE;
+  }
   return (
     `You are the verifier. Read your role brief at \`${verifierPath}\`, the PR context at \`${contextPath}\`, and the complete Phase 1 findings at \`${phase1Path}\`.` +
-    `${skillsRulesSentence(authoritativeSkills)} Output ONLY a JSON array of cross-cutting issues, contradictions, or gaps that the other passes missed using shape ${OUTPUT_SHAPE}. ` +
+    ` ${skillsRulesSentence(authoritativeSkills)}Output ONLY a JSON array of cross-cutting issues, contradictions, or gaps that the other passes missed using shape ${OUTPUT_SHAPE}. ` +
     `Before returning, write that exact array to \`${outputPath}\` using the Write or apply_patch tool, even when it is empty. ` +
     `If nothing to add, write and output []. No prose. No fences. ${NO_POSTING_DIRECTIVE}`
   );
@@ -595,6 +648,9 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
     );
   }
   const wantVerifier = !skip.has('verifier');
+  if (opts.execution?.adjudicate && (!wantVerifier || opts.includeCodex)) {
+    throw new Error('--adjudicate requires the verifier enabled and Codex disabled');
+  }
   // Project rules: --skip drops one from the context file too.
   const projectAll = opts.projectSkills ?? [];
   const projectSkipped = projectAll.filter((s) => isSkipped(skip, s.name));
@@ -680,7 +736,7 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
   let verifierPath: string | undefined;
   if (wantVerifier) {
     verifierPath = resolve(opts.outDir, 'verifier.md');
-    writeFileSync(verifierPath, VERIFIER_BRIEF, 'utf8');
+    writeFileSync(verifierPath, opts.execution?.adjudicate ? ADJUDICATION_BRIEF : VERIFIER_BRIEF, 'utf8');
   }
 
   const companionBriefFiles: Record<string, string> = {};
@@ -791,6 +847,7 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
     reviewers: reviewerPlans,
     verifier: {
       enabled: wantVerifier,
+      ...(opts.execution?.adjudicate ? { outputFormat: 'adjudication-v1' as const } : {}),
       promptTemplate: wantVerifier && verifierPath
         ? verifierTaskPrompt(
             verifierPath,
@@ -798,6 +855,7 @@ export function prepareSessionContext(opts: SingleSessionOptions): SessionContex
             phase1Path,
             skillsFiles['project'] ?? skillsFiles['all'],
             OUTPUT_PATH_TOKEN,
+            opts.execution?.adjudicate,
           )
         : undefined,
       canonicalOutputPath: wantVerifier ? verifierOutputPath : undefined,
@@ -1474,7 +1532,7 @@ function promoteBatch(
 
 function readVerifierOutput(plan: DispatchPlan, durationMs: number): ReviewerOutput | undefined {
   if (!plan.verifier.canonicalOutputPath) return undefined;
-  return inspectReviewerDelivery({ verifier: plan.verifier.canonicalOutputPath }, plan.model, durationMs).outputs[0];
+  return inspectVerifierDelivery(plan, durationMs).output;
 }
 
 function outputsFindingCount(outputs: readonly ReviewerOutput[], verifier?: ReviewerOutput): number {
@@ -1506,7 +1564,8 @@ async function runDirectVerifier(
     disabledMcpServers: plan.disabledMcpServers,
   });
   const endedAt = Date.now();
-  const promotion = promoteVerifierAttempt(plan.verifier, attemptNumber, plan.model, endedAt - startedAt);
+  const promotion = promoteVerifierAttempt(plan.verifier, attemptNumber, plan.model, endedAt - startedAt,
+    planAdjudicates(plan) ? readPhase1Candidates(plan) : undefined);
   return {
     child,
     attempt: runtimeAttempt(
@@ -1705,7 +1764,7 @@ async function runPlannedSession(
     };
   }
 
-  assemblePhase1(plan.phase1Path, inventory);
+  assemblePhase1(plan.phase1Path, inventory, planAdjudicates(plan));
   appendReviewerProgress(plan.runDir, {
     kind: 'phase1-assembled',
     findingCount: inventory.recoveredFindingCount,
@@ -1718,9 +1777,9 @@ async function runPlannedSession(
   if (!plan.verifier.enabled) {
     state.verifier = { state: 'skipped-disabled', phase1Digest, attempts: 0 };
     appendReviewerProgress(plan.runDir, { kind: 'verifier-decision', detail: 'skipped-disabled' });
-  } else if (!hasSevereFindings(inventory.outputs)) {
-    state.verifier = { state: 'skipped-no-severe', phase1Digest, attempts: 0 };
-    appendReviewerProgress(plan.runDir, { kind: 'verifier-decision', detail: 'skipped-no-severe' });
+  } else if (!requiresVerifier(plan, inventory.outputs)) {
+    state.verifier = { state: planAdjudicates(plan) ? 'skipped-no-candidates' : 'skipped-no-severe', phase1Digest, attempts: 0 };
+    appendReviewerProgress(plan.runDir, { kind: 'verifier-decision', detail: state.verifier.state });
   } else {
     const verifierAttempt = state.verifier.attempts + 1;
     const verifier = await executeVerifierAttempt(
@@ -1854,7 +1913,8 @@ export async function resumePlannedSession(
   ) {
     if (existsSync(plan.verifier.canonicalOutputPath)) {
       if (!state.verifier.digest || !state.verifier.phase1Digest) {
-        const recovery = promoteVerifierAttempt(plan.verifier, state.verifier.attempts, plan.model, 0);
+        const recovery = promoteVerifierAttempt(plan.verifier, state.verifier.attempts, plan.model, 0,
+          planAdjudicates(plan) ? readPhase1Candidates(plan) : undefined);
         if (recovery.status !== 'valid') {
           throw new Error('delivery artifact integrity failure: unbound canonical verifier output');
         }
@@ -1870,7 +1930,8 @@ export async function resumePlannedSession(
         throw new Error('delivery artifact integrity failure: canonical verifier output changed');
       }
     } else {
-      const recovery = promoteVerifierAttempt(plan.verifier, state.verifier.attempts, plan.model, 0);
+      const recovery = promoteVerifierAttempt(plan.verifier, state.verifier.attempts, plan.model, 0,
+        planAdjudicates(plan) ? readPhase1Candidates(plan) : undefined);
       if (recovery.status === 'valid' && state.verifier.phase1Digest) {
         state.verifier = {
           state: 'valid',
@@ -1970,7 +2031,7 @@ export async function resumePlannedSession(
     };
   }
 
-  assemblePhase1(plan.phase1Path, inventory);
+  assemblePhase1(plan.phase1Path, inventory, planAdjudicates(plan));
   appendReviewerProgress(plan.runDir, {
     kind: 'phase1-assembled',
     findingCount: inventory.recoveredFindingCount,
@@ -1989,9 +2050,9 @@ export async function resumePlannedSession(
   if (!plan.verifier.enabled) {
     state.verifier = { state: 'skipped-disabled', phase1Digest, attempts: state.verifier.attempts };
     appendReviewerProgress(plan.runDir, { kind: 'verifier-decision', detail: 'skipped-disabled' });
-  } else if (!hasSevereFindings(inventory.outputs)) {
-    state.verifier = { state: 'skipped-no-severe', phase1Digest, attempts: state.verifier.attempts };
-    appendReviewerProgress(plan.runDir, { kind: 'verifier-decision', detail: 'skipped-no-severe' });
+  } else if (!requiresVerifier(plan, inventory.outputs)) {
+    state.verifier = { state: planAdjudicates(plan) ? 'skipped-no-candidates' : 'skipped-no-severe', phase1Digest, attempts: state.verifier.attempts };
+    appendReviewerProgress(plan.runDir, { kind: 'verifier-decision', detail: state.verifier.state });
   } else if (!verifierOutput) {
     if (state.verifier.attempts >= plan.verifier.maxAttempts) {
       state.kind = 'terminal-incomplete';

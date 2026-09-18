@@ -7,6 +7,7 @@ import type { Runtime } from './runtime.js';
 import { readAuthenticatedJsonSync, writeAuthenticatedJsonSync } from '../util/control-auth.js';
 import { controlDirForRun } from '../util/tmp.js';
 import { isSeverity } from '../util/severity.js';
+import { findingCandidates, findingShaped, parseAdjudication, type Adjudication, type FindingCandidate } from './adjudication.js';
 
 export const DISPATCH_PLAN_SCHEMA_VERSION = 2;
 export const DELIVERY_STATE_SCHEMA_VERSION = 1;
@@ -31,6 +32,7 @@ export interface DispatchReviewerPlan {
 
 export interface DispatchVerifierPlan {
   enabled: boolean;
+  outputFormat?: 'adjudication-v1';
   promptTemplate?: string;
   canonicalOutputPath?: string;
   attemptsDir?: string;
@@ -84,7 +86,12 @@ interface DispatchPlanBase {
 export type DispatchPlan = DispatchPlanBase & (
   | { schemaVersion: 1; execution: DispatchExecution & { publishMinSeverity?: never } }
   | { schemaVersion: 2; execution: DispatchExecution & { publishMinSeverity: Severity } }
+  | { schemaVersion: 3; execution: DispatchExecution & { publishMinSeverity: Severity; adjudicate: true } }
 );
+
+export function planAdjudicates(plan: DispatchPlan): boolean {
+  return plan.schemaVersion === 3;
+}
 
 export function planPublicationMinimumSeverity(plan: DispatchPlan): Severity {
   return plan.schemaVersion === 1 ? 'NIT' : plan.execution.publishMinSeverity;
@@ -116,6 +123,7 @@ export type VerifierDeliveryState =
   | 'not-evaluated'
   | 'skipped-disabled'
   | 'skipped-no-severe'
+  | 'skipped-no-candidates'
   | 'required'
   | 'valid'
   | 'missing'
@@ -193,10 +201,9 @@ export interface PromotionResult {
 }
 
 type DispatchPlanDraft = Omit<DispatchPlanBase, 'fingerprint'> & {
-  execution: DispatchExecution & { publishMinSeverity?: Severity };
+  execution: DispatchExecution & { publishMinSeverity?: Severity; adjudicate?: boolean };
 };
 
-const SEVERITIES: readonly Severity[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'NIT'];
 const EMPTY_SEVERITY_COUNTS = (): Record<Severity, number> => ({
   CRITICAL: 0,
   HIGH: 0,
@@ -210,27 +217,17 @@ export function isPathInside(root: string, path: string): boolean {
   return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
 }
 
-function findingShaped(value: unknown): value is Finding {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const finding = value as Record<string, unknown>;
-  if (!SEVERITIES.includes(finding.severity as Severity)) return false;
-  if (typeof finding.title !== 'string' || typeof finding.body !== 'string') return false;
-  if (finding.file !== undefined && typeof finding.file !== 'string') return false;
-  if (finding.line !== undefined && (!Number.isInteger(finding.line) || (finding.line as number) < 1)) return false;
-  if (finding.endLine !== undefined && (!Number.isInteger(finding.endLine) || (finding.endLine as number) < 1)) return false;
-  return true;
-}
-
 function parseSidecar(
   reviewerName: string,
   path: string,
   model: string,
   durationMs: number,
+  candidates?: readonly FindingCandidate[],
 ): ReviewerDelivery {
   if (!existsSync(path)) return { name: reviewerName, path, status: 'missing' };
   try {
     const rawOutput = readFileSync(path, 'utf8');
-    const findings = parseFindingArray(rawOutput);
+    const findings = candidates ? parseAdjudication(rawOutput, candidates).additions : parseFindingArray(rawOutput);
     return {
       name: reviewerName,
       path,
@@ -254,12 +251,17 @@ function parseFindingArray(rawOutput: string): Finding[] {
 export function createDispatchPlan(draft: DispatchPlanDraft): DispatchPlan {
   const publishMinSeverity = draft.execution.publishMinSeverity ?? 'NIT';
   if (!isSeverity(publishMinSeverity)) throw new Error('invalid publication minimum severity');
+  const { adjudicate, ...execution } = draft.execution;
+  if (adjudicate && (!draft.verifier.enabled || draft.codex.enabled || draft.verifier.outputFormat !== 'adjudication-v1')) {
+    throw new Error('adjudication requires an enabled structured verifier and disabled Codex');
+  }
+  if (!adjudicate && draft.verifier.outputFormat) throw new Error('structured verifier requires adjudication');
   const core = {
     ...draft,
-    schemaVersion: DISPATCH_PLAN_SCHEMA_VERSION,
-    execution: { ...draft.execution, publishMinSeverity },
+    schemaVersion: adjudicate ? 3 : DISPATCH_PLAN_SCHEMA_VERSION,
+    execution: { ...execution, publishMinSeverity, ...(adjudicate ? { adjudicate: true } : {}) },
   } as const;
-  return { ...core, fingerprint: sha256(canonicalJson(core)) };
+  return { ...core, fingerprint: sha256(canonicalJson(core)) } as DispatchPlan;
 }
 
 function dispatchPlanShaped(value: unknown): value is DispatchPlan {
@@ -271,8 +273,12 @@ function dispatchPlanShaped(value: unknown): value is DispatchPlan {
       (execution.failOn !== undefined && !isSeverity(execution.failOn))) return false;
   const supportedPolicy = plan.schemaVersion === 1
     ? !Object.prototype.hasOwnProperty.call(execution, 'publishMinSeverity')
-    : plan.schemaVersion === DISPATCH_PLAN_SCHEMA_VERSION && isSeverity(execution.publishMinSeverity);
-  return supportedPolicy &&
+    : [2, 3].includes(plan.schemaVersion ?? 0) && isSeverity(execution.publishMinSeverity);
+  const adjudicationPolicy = plan.schemaVersion === 3
+    ? 'adjudicate' in execution && execution.adjudicate === true && plan.verifier?.enabled === true &&
+      plan.verifier.outputFormat === 'adjudication-v1' && plan.codex?.enabled === false
+    : !Object.hasOwn(execution, 'adjudicate') && plan.verifier?.outputFormat === undefined;
+  return supportedPolicy && adjudicationPolicy &&
     typeof plan.fingerprint === 'string' &&
     typeof plan.runId === 'string' &&
     typeof plan.runDir === 'string' &&
@@ -459,9 +465,10 @@ export function promoteReviewerAttempt(
   attempt: number,
   model: string,
   durationMs: number,
+  candidates?: readonly FindingCandidate[],
 ): PromotionResult {
   const path = attemptOutputPath(reviewer, attempt);
-  const candidate = parseSidecar(reviewer.name, path, model, durationMs);
+  const candidate = parseSidecar(reviewer.name, path, model, durationMs, candidates);
   if (candidate.status !== 'valid') {
     const canonicalAppeared = existsSync(reviewer.canonicalOutputPath);
     return {
@@ -476,7 +483,7 @@ export function promoteReviewerAttempt(
     };
   }
   if (existsSync(reviewer.canonicalOutputPath)) {
-    const canonical = parseSidecar(reviewer.name, reviewer.canonicalOutputPath, model, durationMs);
+    const canonical = parseSidecar(reviewer.name, reviewer.canonicalOutputPath, model, durationMs, candidates);
     if (canonical.status !== 'valid' || canonical.sha256 !== candidate.sha256) {
       return {
         reviewer: reviewer.name,
@@ -511,7 +518,7 @@ export function promoteReviewerAttempt(
       }
     }
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    const winner = parseSidecar(reviewer.name, reviewer.canonicalOutputPath, model, durationMs);
+    const winner = parseSidecar(reviewer.name, reviewer.canonicalOutputPath, model, durationMs, candidates);
     if (winner.status !== 'valid' || winner.sha256 !== candidate.sha256) {
       return {
         reviewer: reviewer.name,
@@ -533,10 +540,12 @@ export function promoteVerifierAttempt(
   attempt: number,
   model: string,
   durationMs: number,
+  candidates?: readonly FindingCandidate[],
 ): PromotionResult {
   if (!verifier.canonicalOutputPath || !verifier.attemptsDir) {
     throw new Error('verifier output paths are unavailable');
   }
+  if (verifier.outputFormat === 'adjudication-v1' && !candidates) throw new Error('adjudication candidates are unavailable');
   return promoteReviewerAttempt(
     {
       name: 'verifier',
@@ -551,7 +560,41 @@ export function promoteVerifierAttempt(
     attempt,
     model,
     durationMs,
+    candidates,
   );
+}
+
+export function readPhase1Candidates(plan: DispatchPlan): FindingCandidate[] {
+  const parsed = JSON.parse(readFileSync(plan.phase1Path, 'utf8')) as { reviewers?: Array<{ name: string; findings: Finding[] }>; candidates?: unknown };
+  if (!Array.isArray(parsed.reviewers) || parsed.reviewers.some(reviewer =>
+    !reviewer || typeof reviewer.name !== 'string' || !Array.isArray(reviewer.findings) || !reviewer.findings.every(findingShaped))) {
+    throw new Error('invalid Phase 1 candidates');
+  }
+  if (canonicalJson(parsed.reviewers.map(reviewer => reviewer.name)) !== canonicalJson(plan.reviewers.map(reviewer => reviewer.name))) {
+    throw new Error('Phase 1 reviewer roster mismatch');
+  }
+  const candidates = findingCandidates(parsed.reviewers.map(reviewer => ({
+    reviewerName: reviewer.name, findings: reviewer.findings, model: plan.model, rawOutput: '', durationMs: 0, exitCode: 0,
+  })));
+  if (planAdjudicates(plan) && canonicalJson(parsed.candidates) !== canonicalJson(candidates)) throw new Error('Phase 1 candidate IDs mismatch');
+  return candidates;
+}
+
+export function inspectVerifierDelivery(plan: DispatchPlan, durationMs: number): ReviewerDelivery {
+  const path = plan.verifier.canonicalOutputPath ?? '';
+  return parseSidecar('verifier', path, plan.model, durationMs, planAdjudicates(plan) ? readPhase1Candidates(plan) : undefined);
+}
+
+export function readVerifierAdjudication(plan: DispatchPlan): Adjudication {
+  if (!planAdjudicates(plan)) throw new Error('run did not opt into adjudication');
+  const candidates = readPhase1Candidates(plan);
+  if (candidates.length === 0) return { schemaVersion: 1, decisions: [], additions: [] };
+  if (!plan.verifier.canonicalOutputPath) throw new Error('adjudication output is unavailable');
+  return parseAdjudication(readFileSync(plan.verifier.canonicalOutputPath, 'utf8'), candidates);
+}
+
+export function requiresVerifier(plan: DispatchPlan, outputs: readonly ReviewerOutput[]): boolean {
+  return planAdjudicates(plan) ? outputs.some(output => output.findings.length > 0) : hasSevereFindings(outputs);
 }
 
 export function hasSevereFindings(outputs: readonly ReviewerOutput[]): boolean {
@@ -567,14 +610,17 @@ function consolidatedPayload(outputs: readonly ReviewerOutput[]): {
 }
 
 /** Assemble Phase 1 only after every planned reviewer has delivered valid output. */
-export function assemblePhase1(path: string, inventory: DeliveryInventory): void {
+export function assemblePhase1(path: string, inventory: DeliveryInventory, adjudicate = false): void {
   if (!inventory.complete) {
     throw new Error(
       `incomplete reviewer delivery: ${inventory.valid.length}/${inventory.planned.length} valid, ` +
       `${inventory.missing.length} missing, ${inventory.invalid.length} invalid`,
     );
   }
-  atomicWriteJsonSync(path, consolidatedPayload(inventory.outputs));
+  atomicWriteJsonSync(path, {
+    ...consolidatedPayload(inventory.outputs),
+    ...(adjudicate ? { candidates: findingCandidates(inventory.outputs) } : {}),
+  });
 }
 
 export function assembleConsolidated(
@@ -659,7 +705,9 @@ export function reconcileDeliveryCompletion(plan: DispatchPlan, state: DeliveryS
     state.valid.length === state.planned.length &&
     state.missing.length === 0 &&
     state.invalid.length === 0 &&
-    ['valid', 'skipped-disabled', 'skipped-no-severe'].includes(state.verifier.state);
+    (planAdjudicates(plan)
+      ? ['valid', 'skipped-no-candidates'].includes(state.verifier.state)
+      : ['valid', 'skipped-disabled', 'skipped-no-severe'].includes(state.verifier.state));
   if (!primaryComplete) return state;
   if (!plan.codex.enabled || state.codex.state === 'valid') {
     state.kind = 'complete';
@@ -782,7 +830,7 @@ export function readAuthoritativeFinalization(
     if (record.schemaVersion !== 1 || record.planFingerprint !== plan.fingerprint) {
       throw new Error('finalization record does not match the dispatch plan');
     }
-    if (plan.schemaVersion === 2 &&
+    if (plan.schemaVersion !== 1 &&
         (!record.execution || typeof record.execution.dryRun !== 'boolean' || typeof record.execution.publish !== 'boolean' ||
           (record.execution.dryRun && record.execution.publish) ||
           (plan.execution.publish && !record.execution.publish))) {

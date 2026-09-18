@@ -357,6 +357,27 @@ Installed plugins — from Copilot CLI or Claude Code alike — provide an addit
 
 ## Background runs, status and resume
 
+### Optional adjudication
+
+`pr-review review <url> --dry-run --no-codex --adjudicate` enables explicit verifier
+decisions. Every nonempty Phase 1 candidate set, not only HIGH/CRITICAL findings,
+requires one `accept`, `reject`, or `amend` decision per stable finding ID, with a
+reason and supporting evidence. Missing or invalid decisions prevent completion.
+The verifier is a second check, not a replacement for reviewers reading project rules.
+
+Original reviewer output and deduplicated `finalFindings` remain evidence.
+`actionableFindings` contains accepted/amended findings plus genuine new verifier
+findings, after deduplication. Posting and `--fail-on` use that actionable set;
+`--publish-min-severity` then filters publication only. The summary shows both
+views and all decisions. Reviewer corrections are decisions, not new code findings.
+
+This CLI-only opt-in requires Codex disabled and the verifier enabled. Schema-v3
+plans authenticate the mode; older binaries refuse them. Resume inherits it and
+cannot add it to an older run. Use authenticated `review --resume` to publish a
+completed preview: standalone `post` refuses adjudicated report files because it
+cannot authenticate their decisions. Normal reviews keep the existing behavior.
+Model decisions remain fallible; audit proves delivery and retention, not truth.
+
 A full review takes roughly 6–10 minutes. `pr-review review <url> --detach` returns a run-id immediately; `pr-review status <run-id>` shows the live progress feed, or the summary once done. `status` exits `0` when done, `20` while running, `21` when authenticated recovery is available (it prints the exact `--resume` command), `22` on a terminal failure, and `1` when the run-id is unknown.
 
 <details>
@@ -390,6 +411,8 @@ pr-review review <pr-url> [flags]            # full pipeline
 #   --fail-on <severity>    critical|high|medium|low|nit → exit 1 on surviving findings
 #   --publish-min-severity <severity>  publish this severity and above;
 #                           retain all findings locally (default: nit; CLI-only)
+#   --adjudicate            apply explicit verifier decisions to publication/fail-on;
+#                           retain originals; requires --no-codex and verifier enabled
 #   --runtime <name>        copilot|claude|auto — which agent CLI hosts the session
 #                           (yaml: runtime, env: PR_REVIEW_RUNTIME; default auto)
 #   --default-model <id>    model requested from that runtime (yaml: default_model,

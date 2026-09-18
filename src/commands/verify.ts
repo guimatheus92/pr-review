@@ -5,7 +5,7 @@ import { RUNS_ROOT } from '../util/tmp.js';
 import { ERROR_FILE } from '../util/tmp.js';
 import { readPostedMarker, type PostedMarker } from '../util/posted-marker.js';
 import { readAuthoritativeControl } from './status.js';
-import { readAuthoritativeFinalization, isPathInside, inspectReviewerDelivery, planPublicationMinimumSeverity, validateDeliveryArtifacts, type DispatchPlan, type DeliveryState, type FinalizationRecord } from '../dispatch/delivery.js';
+import { readAuthoritativeFinalization, isPathInside, inspectReviewerDelivery, inspectVerifierDelivery, planAdjudicates, readPhase1Candidates, readVerifierAdjudication, planPublicationMinimumSeverity, validateDeliveryArtifacts, type DispatchPlan, type DeliveryState, type FinalizationRecord } from '../dispatch/delivery.js';
 import { commentKey, postingShape, windowStart, CLOCK_SLACK_MS } from './post.js';
 import { decideExitCode, readCapabilityUsage, type CapabilityUsage } from './review.js';
 import { resolvePr } from '../providers/index.js';
@@ -17,6 +17,7 @@ import { canonicalJson, sha256File } from '../util/atomic-json.js';
 import { companionRuntimeDirective } from '../plugins/companions.js';
 import { partitionFindingsForPublication, type PublicationMetadata } from '../util/severity.js';
 import { dedupeFindings } from '../dedupe.js';
+import { actionableFindings, findingCandidates, type Adjudication } from '../dispatch/adjudication.js';
 
 /**
  * Post-hoc audit of a finished run against INVARIANTS.md.
@@ -87,6 +88,8 @@ interface StackArtifact {
 
 interface FindingsArtifact {
   finalFindings?: Finding[];
+  actionableFindings?: Finding[];
+  adjudication?: Adjudication;
   droppedCount?: number;
   reviewers?: Array<{ reviewer: string; findings: Finding[] }>;
   publication?: PublicationMetadata;
@@ -465,7 +468,7 @@ export const CHECKS: InvariantCheck[] = [
         // Every publish attempt writes the marker. Absent WITH findings to post
         // means either the attempt was never recorded or the record was lost —
         // the exact artifact state that let a duplicated post go unnoticed.
-        return ctx.effectiveExecution?.publish && (eligibleCount > 0 || ctx.plan?.schemaVersion === 2)
+        return ctx.effectiveExecution?.publish && (eligibleCount > 0 || (ctx.plan && ctx.plan.schemaVersion !== 1))
           ? fail(`a publish run retained ${eligibleCount} eligible finding(s) but recorded no posting state`)
           : skip('no publish attempt was recorded for this run');
       }
@@ -474,7 +477,7 @@ export const CHECKS: InvariantCheck[] = [
         return fail(`${eligibleCount} finding(s) retained for publication but ${ctx.marker.attempted} attempted — the difference was neither posted nor reported`);
       }
       if (ctx.marker.verified === false) return fail('the publish outcome could not be verified');
-      if (ctx.plan?.schemaVersion === 2) {
+      if (ctx.plan && ctx.plan.schemaVersion !== 1) {
         if (ctx.marker.planFingerprint !== ctx.plan.fingerprint || !ctx.marker.confirmedKeys) {
           return fail('posting confirmations are not bound to this authenticated publication plan');
         }
@@ -933,9 +936,11 @@ export const CHECKS: InvariantCheck[] = [
       if (![0, 1, 2].includes(exitCode)) return fail(`finalization recorded exit ${exitCode}`);
       if (exitCode === 2 && !ctx.errorTxt) return fail('exit 2 without error.txt — the failure is unnamed');
       if (exitCode === 0 && ctx.errorTxt) return fail('exit 0 with error.txt present — a stale failure was not cleared');
-      if (ctx.plan?.schemaVersion === 2 && exitCode !== 2 && ctx.findings?.finalFindings) {
-        const expected = decideExitCode(false, ctx.findings.finalFindings, ctx.plan.execution.failOn);
-        if (exitCode !== expected) return fail(`exit ${exitCode}, expected ${expected} from --fail-on over all retained findings, including suppressed findings`);
+      if (ctx.plan && ctx.plan.schemaVersion !== 1 && exitCode !== 2 && ctx.findings?.finalFindings) {
+        const evaluated = planAdjudicates(ctx.plan) ? ctx.findings.actionableFindings : ctx.findings.finalFindings;
+        if (!evaluated) return fail('adjudicated run has no actionable findings record');
+        const expected = decideExitCode(false, evaluated, ctx.plan.execution.failOn);
+        if (exitCode !== expected) return fail(`exit ${exitCode}, expected ${expected} from --fail-on over the authenticated actionable set, including severity-suppressed findings`);
       }
       return pass(`exit ${exitCode}${exitCode === 2 ? ' with error.txt naming the failure' : ' and no error.txt'}`);
     },
@@ -945,6 +950,7 @@ export const CHECKS: InvariantCheck[] = [
     needs: 'run',
     run(ctx) {
       if (failedBeforeSelection(ctx)) return skip('the run failed before pass selection — only the pre-selection artifacts exist');
+      if (ctx.finalizationError) return fail(`the finalization artifacts failed authentication (${ctx.finalizationError})`);
       if (ctx.publicationError) return fail(ctx.publicationError);
       if (ctx.retentionError) return fail(ctx.retentionError);
       const required = ['pr-review-gather.json', 'stack.json', 'passes.json', 'companions.json', 'capabilities.json'];
@@ -994,13 +1000,31 @@ function checkRetainedEvidence(plan: DispatchPlan, state: DeliveryState, gather:
       if (!state.reviewerDigests[reviewer.name]) throw new Error(`reviewer ${reviewer.name} has no authenticated digest`);
       return [reviewer.name, reviewer.canonicalOutputPath];
     }));
-    if (state.verifier.state === 'valid') {
+    if (state.verifier.state === 'valid' && !planAdjudicates(plan)) {
       if (!plan.verifier.canonicalOutputPath || !state.verifier.digest) throw new Error('verifier has no authenticated output');
       files.verifier = plan.verifier.canonicalOutputPath;
     }
     const inventory = inspectReviewerDelivery(files, plan.model, 0);
     if (!inventory.complete) throw new Error('retained findings cannot be reconstructed from incomplete reviewer evidence');
     const outputs = inventory.outputs;
+    if (planAdjudicates(plan)) {
+      const candidates = readPhase1Candidates(plan);
+      if (canonicalJson(findingCandidates(outputs)) !== canonicalJson(candidates)) throw new Error('Phase 1 candidates differ from canonical reviewer evidence');
+      if (candidates.length > 0 && (state.verifier.state !== 'valid' || !state.verifier.digest || state.verifier.phase1Digest !== state.phase1Digest)) {
+        throw new Error('adjudication is not bound to complete Phase 1 evidence');
+      }
+      const record = readVerifierAdjudication(plan);
+      if (canonicalJson(record) !== canonicalJson(findings.adjudication)) throw new Error('adjudication decisions changed in the report');
+      const expected = dedupeFindings(actionableFindings(candidates, record), gather.existingComments, plan.execution.dedupeMode).kept;
+      if (canonicalJson(expected) !== canonicalJson(findings.actionableFindings)) throw new Error('actionable findings do not match authenticated adjudication');
+      if (state.verifier.state === 'valid') {
+        const verifier = inspectVerifierDelivery(plan, 0).output;
+        if (!verifier) throw new Error('invalid structured verifier evidence');
+        outputs.push(verifier);
+      }
+    } else if (findings.adjudication !== undefined || findings.actionableFindings !== undefined) {
+      throw new Error('unexpected adjudication on a run without authenticated opt-in');
+    }
     if (plan.codex.enabled) {
       if (state.codex.state !== 'valid' || !state.codex.output) throw new Error('Codex evidence is incomplete');
       outputs.push(state.codex.output);
@@ -1117,7 +1141,7 @@ export async function loadVerifyContext(opts: {
   const findings = readJson<FindingsArtifact>(join(runDir, 'pr-review-findings.json'), corrupt);
   const marker = readPostedMarker(runDir, opts.home);
   const effectiveExecution = finalization?.execution ??
-    (plan?.schemaVersion === 2 && marker && marker !== 'corrupt' && marker.planFingerprint === plan.fingerprint
+    (plan && plan.schemaVersion !== 1 && marker && marker !== 'corrupt' && marker.planFingerprint === plan.fingerprint
       ? { dryRun: false, publish: true }
       : plan?.execution ?? null);
   const capabilities = readJson<CapabilitiesArtifact>(join(runDir, 'capabilities.json'), corrupt);
@@ -1137,17 +1161,17 @@ export async function loadVerifyContext(opts: {
   let publicationEligibleFindings: Finding[] = [];
   let suppressedByPublicationFilter: Finding[] = [];
   try {
-    const selected = partitionFindingsForPublication(findings?.finalFindings ?? [], plan ? planPublicationMinimumSeverity(plan) : 'NIT');
+    const selected = partitionFindingsForPublication((plan && planAdjudicates(plan) ? findings?.actionableFindings : findings?.finalFindings) ?? [], plan ? planPublicationMinimumSeverity(plan) : 'NIT');
     publication = selected.publication;
     publicationEligibleFindings = selected.publicationEligibleFindings;
     suppressedByPublicationFilter = selected.suppressedByPublicationFilter;
-    if (plan?.schemaVersion === 2 && finalization && canonicalJson(findings?.publication) !== canonicalJson(publication)) {
+    if (plan && plan.schemaVersion !== 1 && finalization && canonicalJson(findings?.publication) !== canonicalJson(publication)) {
       publicationError = 'publication metadata does not match the authenticated threshold and complete retained finding counts';
     }
   } catch (error) {
     publicationError = `publication evidence is invalid: ${(error as Error).message}`;
   }
-  const retentionError = plan?.schemaVersion === 2 && state?.kind === 'complete' && finalization && findings
+  const retentionError = plan && plan.schemaVersion !== 1 && state?.kind === 'complete' && finalization && findings
     ? checkRetainedEvidence(plan, state, gather, findings)
     : null;
   const planned = postingShape(publicationEligibleFindings, gather.changedFiles, gather.pr.provider);

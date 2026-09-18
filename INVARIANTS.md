@@ -72,6 +72,14 @@ Every final finding remains in the local artifacts before publication; findings
 below the threshold are suppressed from publication, never attempted or called
 skipped. The same explicit flag on `post` filters its input without rewriting it.
 
+With CLI-only `--adjudicate`, authenticated verifier decisions classify every
+Phase 1 candidate by stable ID as accepted, rejected, or amended. Publication
+uses the deduplicated actionable set, then the severity threshold. Original
+findings and decision reasons remain local evidence; a rejection or reviewer
+correction is never itself a code finding. Missing, malformed, or contradictory
+decision coverage prevents completion and publication. This opt-in requires
+the verifier enabled and Codex disabled. Other runs keep existing behavior.
+
 **Why:** A thread can be linked, replied to and resolved by the person who fixes
 it. A comment cannot. Everything the tool produces is meant to be actionable at
 a line, so anything that cannot be resolved is not a finding — it is noise the
@@ -605,6 +613,9 @@ about the finding count. `1` = a finding at or above the `--fail-on` threshold
 survived deduplication, including findings suppressed from publication.
 `--fail-on` evaluates all `finalFindings` independently of
 `--publish-min-severity`; neither option changes what reviewers analyze.
+For an authenticated `--adjudicate` run, `--fail-on` instead evaluates the
+actionable set, including severity-suppressed actionable findings, not rejected
+original evidence. The opt-in is sticky on resume.
 `2` = an operational failure; `error.txt` names it. A run that reaches finalization always
 leaves `error.txt` on exit 2 and clears it on exit 0.
 
@@ -637,6 +648,15 @@ same aggregate publication counts, including on dry runs. Resume reconstructs
 the retained set from authenticated review inputs and the original gather,
 separately from publication progress; promotion is recorded without rewriting
 the original plan. Legacy artifacts without publication metadata remain readable.
+
+Opt-in adjudication additionally retains the complete decision record and
+`actionableFindings`. `finalFindings` still retains the original deduplicated
+evidence, including rejected and superseded candidates. The summary shows both
+views and decision reasons. Resume and audit reconstruct decisions and actionable
+findings from authenticated reviewer and verifier artifacts, not report counts.
+Nonempty Phase 1 findings require adjudication regardless of severity; an empty
+Phase 1 needs no decisions. No repository identity or domain exception belongs
+in the adjudication code or shipped prompt.
 
 **Why:** `--resume`, `status`, the operational-failure checks, `verify` and the
 eval harness all read them. They are the only record of what a run actually did.

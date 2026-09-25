@@ -1,5 +1,5 @@
 import { execFileSync, spawn, type ChildProcess, type ChildProcessByStdio, type StdioOptions } from 'node:child_process';
-import { readFileSync, rmSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 
@@ -84,45 +84,56 @@ export function killOnExit(child: ChildProcess): void {
   child.once('close', () => liveChildren.delete(child));
 }
 
-/** Run-dir file holding the pid `spawnCli` returned for the runtime session. */
-export const RUNTIME_PID_FILE = 'runtime.pid';
-
-function commandLine(pid: number): string | null {
+/** `pid<TAB>command line` for every process, or null when the table cannot be read. */
+function processTable(): { pid: number; cmd: string }[] | null {
   const [file, args] = process.platform === 'win32'
-    ? ['powershell', ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`]]
-    : ['ps', ['-o', 'command=', '-p', String(pid)]];
+    ? ['powershell', ['-NoProfile', '-NonInteractive', '-Command',
+        'Get-CimInstance Win32_Process | ForEach-Object { [string]$_.ProcessId + [char]9 + $_.CommandLine }']]
+    : ['ps', ['-eo', 'pid=,args=']];
   try {
-    return execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: 15_000 });
+    const out = execFileSync(file, args, {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: 30_000, maxBuffer: 64 * 1024 * 1024,
+    });
+    return out.split(/\r?\n/).flatMap((line) => {
+      const m = /^\s*(\d+)[\t ](.*)$/.exec(line);
+      return m ? [{ pid: Number(m[1]), cmd: m[2]! }] : [];
+    });
   } catch {
     return null;
   }
 }
 
-const fold = (s: string) => (process.platform === 'win32' ? s.replace(/\//g, '\\').toLowerCase() : s);
+/**
+ * The argv shape every runtime this CLI spawns carries its run dir in:
+ * `--add-dir <runDir>` (claude, copilot) or `-C <runDir>` (codex), quoted on
+ * win32 by `spawnCli`. An editor that merely opened a file in the run dir
+ * names it too, so the flag is part of the identity.
+ */
+export function namesRunDir(cmd: string, outDir: string): boolean {
+  const win = process.platform === 'win32';
+  const fold = (s: string) => (win ? s.replace(/\//g, '\\').toLowerCase() : s);
+  const dir = fold(outDir).replace(/[\\/]+$/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[\\s"])(?:--add-dir|${win ? '-c' : '-C'})"?\\s+"?${dir}[\\\\/]?(?:"|\\s|$)`).test(fold(cmd));
+}
 
 /**
- * INV-HYG-04. Kill a runtime session whose run process died without killing
- * it (a hard kill runs no exit handler). Acts only when all three hold: the
- * run's `run.pid` exists and is dead, the recorded runtime pid is alive, and that pid's
- * command line names this run dir — the runtime is always spawned with it, so
- * a pid the OS has since reused for something else is left alone.
+ * INV-HYG-04. Kill the runtime sessions of a run whose process died without
+ * killing them — a hard kill runs no exit handler. Acts only when the run's
+ * `run.pid` exists and is dead, and only on processes whose argv hands them
+ * this run dir (`namesRunDir`). Matched by argv rather than by a recorded pid:
+ * on win32 the recorded pid would be the `cmd.exe` in front of the runtime,
+ * which can die first and leave the runtime unreachable through it.
  * Returns true when it killed something.
  */
 export function reapOrphanRuntime(outDir: string): boolean {
-  const read = (f: string) => {
-    try {
-      return Number(readFileSync(join(outDir, f), 'utf8').trim());
-    } catch {
-      return 0;
-    }
-  };
-  const runPid = read('run.pid');
-  const runtimePid = read(RUNTIME_PID_FILE);
-  // No run.pid means no owner to judge: never kill on a missing beacon.
-  if (!(runPid > 0) || pidAlive(runPid) || !(runtimePid > 0) || !pidAlive(runtimePid)) return false;
-  const cmd = commandLine(runtimePid);
-  if (!cmd || !fold(cmd).includes(fold(outDir))) return false;
-  killPidTree(runtimePid);
-  rmSync(join(outDir, RUNTIME_PID_FILE), { force: true });
-  return true;
+  let runPid = 0;
+  try {
+    runPid = Number(readFileSync(join(outDir, 'run.pid'), 'utf8').trim());
+  } catch {
+    // No run.pid means no owner to judge: never kill on a missing beacon.
+  }
+  if (!(runPid > 0) || pidAlive(runPid)) return false;
+  const orphans = (processTable() ?? []).filter((p) => p.pid !== process.pid && namesRunDir(p.cmd, outDir));
+  for (const p of orphans) killPidTree(p.pid);
+  return orphans.length > 0;
 }

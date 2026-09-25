@@ -26,16 +26,22 @@ function callText(src: string, open: number): string {
 }
 
 /**
+ * Blank out comments, keeping newlines so line numbers survive: prose like
+ * "exec (not execFile)" is not a call. `://` is left alone for URLs in strings.
+ */
+function stripComments(raw: string): string {
+  return raw
+    .replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, ' '))
+    .replace(/(^|[^:])\/\/.*$/gm, (_, p: string) => p);
+}
+
+/**
  * Every call in `src` that reaches `node:child_process`: the imported names,
  * `promisify(...)` aliases of them, and injectable parameters typed
  * `typeof <fn>` (the providers' `resolveToken(host, exec = execFileSync)`).
  */
 export function childProcessCalls(file: string, raw: string): CallSite[] {
-  // Blank out comments, keeping newlines so line numbers survive: prose like
-  // "exec (not execFile)" is not a call. `://` is left alone for URLs in strings.
-  const src = raw
-    .replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, ' '))
-    .replace(/(^|[^:])\/\/.*$/gm, (_, p: string) => p);
+  const src = stripComments(raw);
   const imp = /import\s*\{([^}]*)\}\s*from\s*['"]node:child_process['"]/.exec(src);
   if (!imp) return [];
   const names = new Set(
@@ -98,4 +104,12 @@ test('INV-HYG-04 control — the scanner flags a visible child and accepts a hid
   ].join('\n');
   const calls = childProcessCalls('fixture.ts', src);
   assert.deepEqual(calls.map((c) => [c.line, isHidden(c)]), [[5, false], [6, true], [7, false]]);
+});
+
+test('INV-HYG-04 — no ChildProcess.kill() in src/: on win32 it ends only the shell, use killTree', () => {
+  const root = join(import.meta.dirname, '..', 'src');
+  const hits = tsFiles(root).flatMap((f) =>
+    stripComments(readFileSync(f, 'utf8')).split('\n').flatMap((line, i) =>
+      /\bchild\w*\??\.kill\(/i.test(line) ? [`${relative(root, f)}:${i + 1}`] : []));
+  assert.deepEqual(hits, []);
 });

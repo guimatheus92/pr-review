@@ -188,7 +188,9 @@ export function runStatus(runId: string, now = Date.now()): StatusResult {
   const alive = runAlive(outDir);
   // INV-HYG-04: a run killed too hard to run its exit handler leaves its
   // runtime session running. The poller calls this, so it is where it ends.
-  if (alive === false && reapOrphanRuntime(outDir)) {
+  // A run that wrote its summary finished — its session closed first — and a
+  // finished run keeps its run.pid, so skip the process-table scan there.
+  if (alive === false && !existsSync(summaryPath) && reapOrphanRuntime(outDir)) {
     appendProgress(outDir, 'error', 'run process died — killed its orphaned runtime session');
   }
   const snapshot = renderProgressSnapshot(readProgress(outDir), now);

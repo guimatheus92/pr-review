@@ -1,5 +1,5 @@
-import { assertSafeArg, killOnExit, killTree, RUNTIME_PID_FILE, spawnCli } from '../util/spawn.js';
-import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { assertSafeArg, killOnExit, killTree, spawnCli } from '../util/spawn.js';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import type { GatherOutput, ReviewerOutput, Severity, SkillDefinition } from '../types.js';
 import { matchesAny } from '../util/globs.js';
@@ -2276,12 +2276,9 @@ function spawnRuntime(args: {
       cwd: args.addDir,
       env: runtimeSpawnEnvironment(args.runtime),
     });
-    // INV-HYG-04: the session must not outlive this process. `runtime.pid` is
-    // what `status`/`--resume` read when this process is killed too hard to run
-    // the exit handler.
+    // INV-HYG-04: the session must not outlive this process. A kill too hard to
+    // run the exit handler is caught by `reapOrphanRuntime` on the next status/resume.
     killOnExit(child);
-    const runtimePidPath = join(args.addDir, RUNTIME_PID_FILE);
-    if (child.pid !== undefined) writeFileSync(runtimePidPath, String(child.pid), 'utf8');
 
     let stdout = '';
     let stderr = '';
@@ -2322,7 +2319,6 @@ function spawnRuntime(args: {
     child.on('close', (code) => {
       clearTimeout(timer);
       clearInterval(heartbeat);
-      rmSync(runtimePidPath, { force: true });
       resolve({
         stdout,
         stderr: stderr + (timedOut ? '\n[timed out]' : ''),

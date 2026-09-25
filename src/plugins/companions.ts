@@ -1,4 +1,4 @@
-import { spawnCli } from '../util/spawn.js';
+import { killTree, spawnCli } from '../util/spawn.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
@@ -329,7 +329,7 @@ function runPluginCli(args: string[], binary: string, timeoutMs = 30_000): Promi
       resolve(result);
     };
     const timer = setTimeout(() => {
-      child.kill();
+      killTree(child); // INV-HYG-04: child.kill() would end only the win32 shell
       finish({ stdout, stderr, code: -1 });
     }, timeoutMs);
     child.stdin.end();

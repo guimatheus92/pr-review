@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { controlDirForRun, ERROR_FILE, RUNS_ROOT } from '../src/util/tmp.js';
 import { runStatus, statusExitCode } from '../src/commands/status.js';
-import { killTree, pidAlive, RUNTIME_PID_FILE, spawnCli } from '../src/util/spawn.js';
+import { killTree, pidAlive, spawnCli } from '../src/util/spawn.js';
 import {
   createDispatchPlan,
   readAuthoritativeDispatchPlan,
@@ -518,7 +518,7 @@ test('runStatus — INV-HYG-04: the orphaned runtime session of a dead run is ki
   const pidFile = join(dir, 'idle.pid');
   writeFileSync(script, `require('fs').writeFileSync(process.argv[2], String(process.pid)); setInterval(() => {}, 1000);`, 'utf8');
   // The run dir rides in argv exactly as the runtime's --add-dir does.
-  const child = spawnCli(process.execPath, [script, pidFile, dir], { stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawnCli(process.execPath, [script, pidFile, '--add-dir', dir], { stdio: ['pipe', 'pipe', 'pipe'] });
   child.stdin.end();
   let pid = 0;
   try {
@@ -527,7 +527,6 @@ test('runStatus — INV-HYG-04: the orphaned runtime session of a dead run is ki
     }
     assert.ok(pid > 0, 'idle runtime never started');
     writeFileSync(join(dir, 'run.pid'), String(DEAD_PID), 'utf8');
-    writeFileSync(join(dir, RUNTIME_PID_FILE), String(child.pid), 'utf8');
     runStatus(id);
     for (let i = 0; i < 60 && pidAlive(pid); i++) await new Promise((r) => setTimeout(r, 50));
     assert.equal(pidAlive(pid), false, `orphaned runtime ${pid} survived status`);

@@ -1,10 +1,10 @@
 import { after, test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { killTree, pidAlive, reapOrphanRuntime, RUNTIME_PID_FILE, spawnCli } from '../src/util/spawn.js';
+import { killTree, namesRunDir, pidAlive, reapOrphanRuntime, spawnCli } from '../src/util/spawn.js';
 
 /** Every idle runtime started here. If a kill under test regresses, the survivor would hold
  * this file open forever; kill it by pid so the regression FAILS instead of hanging. */
@@ -18,11 +18,11 @@ after(() => {
 });
 
 /** A long-lived node process that writes its own pid to `pidFile`, launched through spawnCli like a runtime. */
-async function idleRuntime(root: string, extraArg: string): Promise<{ child: ReturnType<typeof spawnCli>; pid: number }> {
+async function idleRuntime(root: string, extraArgs: string[]): Promise<{ child: ReturnType<typeof spawnCli>; pid: number }> {
   const script = join(root, 'idle.js');
   const pidFile = join(root, `idle-${Date.now()}.pid`);
   writeFileSync(script, `require('fs').writeFileSync(process.argv[2], String(process.pid)); setInterval(() => {}, 1000);`, 'utf8');
-  const child = spawnCli(process.execPath, [script, pidFile, extraArg], { stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawnCli(process.execPath, [script, pidFile, ...extraArgs], { stdio: ['pipe', 'pipe', 'pipe'] });
   child.stdin.end();
   for (let i = 0; i < 100; i++) {
     try {
@@ -107,7 +107,7 @@ test('spawnCli — explicit child environment reaches the process without losing
 test('INV-HYG-04 — killTree ends the runtime itself, not just the win32 shell in front of it', async () => {
   const root = mkdtempSync(join(tmpdir(), 'pr-review-killtree-'));
   try {
-    const { child, pid } = await idleRuntime(root, 'x');
+    const { child, pid } = await idleRuntime(root, []);
     killTree(child);
     assert.ok(await gone(pid), `runtime pid ${pid} survived killTree`);
   } finally {
@@ -115,48 +115,59 @@ test('INV-HYG-04 — killTree ends the runtime itself, not just the win32 shell 
   }
 });
 
-test('INV-HYG-04 — reapOrphanRuntime kills a runtime whose run process is dead', async () => {
+test('INV-HYG-04 — namesRunDir recognizes a runtime handed the run dir, not a reader of it', () => {
+  const dir = process.platform === 'win32' ? 'C:\\Users\\me\\.pr-review\\runs\\gh__o__r__1__T1' : '/home/me/.pr-review/runs/gh__o__r__1__T1';
+  const q = (s: string) => (process.platform === 'win32' ? `"${s}"` : s);
+  assert.equal(namesRunDir(`claude ${q('-p')} ${q('--add-dir')} ${q(dir)} ${q('--add-dir')} ${q('/repo')}`, dir), true);
+  assert.equal(namesRunDir(`codex exec ${q('-C')} ${q(dir)} ${q('-o')} ${q(join(dir, 'a.json'))}`, dir), true);
+  // An editor with a file of the run dir open is not a runtime.
+  assert.equal(namesRunDir(`notepad ${q(join(dir, 'pr-review-summary.md'))}`, dir), false);
+  // A sibling run whose id extends this one is not this run.
+  assert.equal(namesRunDir(`claude ${q('--add-dir')} ${q(`${dir}0`)}`, dir), false);
+  if (process.platform === 'win32') {
+    assert.equal(namesRunDir(`claude "--add-dir" "${dir.toLowerCase()}"`, dir.replace(/\\/g, '/')), true);
+  }
+});
+
+test('INV-HYG-04 — reapOrphanRuntime kills the runtime of a dead run, even after its shell died', async () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-reap-'));
   try {
-    const { child, pid } = await idleRuntime(outDir, outDir);
+    const { child, pid } = await idleRuntime(outDir, ['--add-dir', outDir]);
     writeFileSync(join(outDir, 'run.pid'), String(await deadPid()), 'utf8');
-    writeFileSync(join(outDir, RUNTIME_PID_FILE), String(child.pid), 'utf8');
+    // On win32 kill only the cmd.exe in front of it, as a hard kill of the run
+    // did live: the runtime must still be found, by its own argv.
+    if (process.platform === 'win32') process.kill(child.pid!);
+    assert.ok(pidAlive(pid));
     assert.equal(reapOrphanRuntime(outDir), true);
     assert.ok(await gone(pid), `orphaned runtime ${pid} still alive`);
-    assert.equal(existsSync(join(outDir, RUNTIME_PID_FILE)), false);
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
 });
 
-test('INV-HYG-04 — reapOrphanRuntime leaves a live run and a reused pid alone', async () => {
+test('INV-HYG-04 — reapOrphanRuntime leaves a live run, an unknown owner, and other runs alone', async () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-reap-keep-'));
   const other = mkdtempSync(join(tmpdir(), 'pr-review-reap-other-'));
-  const started: ReturnType<typeof spawnCli>[] = [];
   try {
+    const mine = await idleRuntime(outDir, ['--add-dir', outDir]);
+    const theirs = await idleRuntime(other, ['--add-dir', other]);
+
     // Run still alive: its runtime is not an orphan.
-    const live = await idleRuntime(outDir, outDir);
-    started.push(live.child);
     writeFileSync(join(outDir, 'run.pid'), String(process.pid), 'utf8');
-    writeFileSync(join(outDir, RUNTIME_PID_FILE), String(live.child.pid), 'utf8');
     assert.equal(reapOrphanRuntime(outDir), false);
-    assert.ok(pidAlive(live.pid));
+    assert.ok(pidAlive(mine.pid));
 
     // No run.pid at all: nothing says the owner is dead, so nothing is killed.
     rmSync(join(outDir, 'run.pid'));
     assert.equal(reapOrphanRuntime(outDir), false);
-    assert.ok(pidAlive(live.pid));
+    assert.ok(pidAlive(mine.pid));
 
-    // Run dead, but the recorded pid now belongs to a process that is not this
-    // run's runtime (pid reuse): its command line does not name the run dir.
-    const stranger = await idleRuntime(other, other);
-    started.push(stranger.child);
+    // Dead run: only its own runtime goes, never another run's.
     writeFileSync(join(outDir, 'run.pid'), String(await deadPid()), 'utf8');
-    writeFileSync(join(outDir, RUNTIME_PID_FILE), String(stranger.child.pid), 'utf8');
-    assert.equal(reapOrphanRuntime(outDir), false);
-    assert.ok(pidAlive(stranger.pid));
+    assert.equal(reapOrphanRuntime(outDir), true);
+    assert.ok(await gone(mine.pid));
+    assert.ok(pidAlive(theirs.pid), 'another run\'s runtime was killed');
   } finally {
-    for (const c of started) killTree(c);
     rmSync(outDir, { recursive: true, force: true });
     rmSync(other, { recursive: true, force: true });
   }

@@ -720,8 +720,8 @@ running with nobody to read it; the same happened to every session whose run
 was killed from outside.
 
 **Enforced:** every `node:child_process` call site in `src/`;
-`src/util/spawn.ts` (`killTree`); `src/dispatch/single-session.ts`
-(`runtime.pid`); `src/commands/status.ts` (`reapOrphanRuntime`)
+`src/util/spawn.ts` (`killTree`, `killOnExit`, `reapOrphanRuntime`);
+`src/commands/status.ts`, `src/commands/review.ts` (`--resume`)
 
 **Verified:** `tests/windows-hide.test.ts`, `tests/spawn.test.ts`,
 `tests/status.test.ts`

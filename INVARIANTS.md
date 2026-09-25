@@ -700,3 +700,30 @@ than the noise.
 guards the assertion helpers themselves
 
 **Check:** human
+
+### INV-HYG-04 — No child process opens a window, and none outlives its run
+
+**Always:** Every child process the CLI starts is started with `windowsHide`,
+so no review ever puts a console window on the reviewer's desktop. A runtime
+session is killed as a whole process tree — never just the shell in front of it
+— on timeout, on exit, and when `status` or `--resume` finds its run's process
+dead.
+
+**Why:** A detached run has no console, so on Windows every console child
+started without `windowsHide` gets a fresh console, and Windows 11 hands that
+console to Windows Terminal as a new empty window. Measured on 2026-09-24: ten
+windows per review, one every ~3 s during gather and selection, each blocking
+its synchronous `git`/`gh` call while the handoff ran — eight concurrent reviews
+froze the desktop. On win32 the runtime runs behind `cmd.exe` (`shell: true`),
+so `child.kill()` ended the shell and left the `claude`/`copilot` session
+running with nobody to read it; the same happened to every session whose run
+was killed from outside.
+
+**Enforced:** every `node:child_process` call site in `src/`;
+`src/util/spawn.ts` (`killTree`); `src/dispatch/single-session.ts`
+(`runtime.pid`); `src/commands/status.ts` (`reapOrphanRuntime`)
+
+**Verified:** `tests/windows-hide.test.ts`, `tests/spawn.test.ts`,
+`tests/status.test.ts`
+
+**Check:** tests-only

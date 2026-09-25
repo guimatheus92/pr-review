@@ -263,6 +263,7 @@ export const TEST_ONLY: Record<string, string> = {
   'INV-HYG-01': 'guarded by tests/zero-passes.test.ts — prompt text lives in the bundle, not in a run',
   'INV-HYG-02': 'guarded by tests/dogfood.test.ts and the CI bundle-freshness gate — a build property',
   'INV-HYG-03': 'human judgment; eval fixtures in evals/ are the standing guard',
+  'INV-HYG-04': 'guarded by tests/windows-hide.test.ts and tests/spawn.test.ts — a window that never opened leaves no artifact',
 };
 
 export const CHECKS: InvariantCheck[] = [

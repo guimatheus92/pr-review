@@ -62,12 +62,19 @@ const SYSTEM32 = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32');
  * descendant) must not read as a kill.
  */
 function killPidTree(pid: number): boolean {
-  try {
-    if (process.platform === 'win32') {
-      execFileSync(join(SYSTEM32, 'taskkill.exe'), ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true, timeout: 30_000 });
-    } else {
+  if (process.platform !== 'win32') {
+    // SIGKILL cannot be caught or ignored, so an accepted signal IS the kill.
+    // Liveness would lie here: a killed child of this process stays a zombie —
+    // `kill(pid, 0)` still succeeds — until this process's event loop reaps it.
+    try {
       process.kill(pid, 'SIGKILL');
+      return true;
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code === 'ESRCH';
     }
+  }
+  try {
+    execFileSync(join(SYSTEM32, 'taskkill.exe'), ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true, timeout: 30_000 });
   } catch {
     // Judged below by liveness: the error text does not distinguish "already gone" from "refused".
   }

@@ -1,4 +1,4 @@
-import { killTree, spawnCli } from '../util/spawn.js';
+import { killOnExit, killTree, spawnCli } from '../util/spawn.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
@@ -319,6 +319,7 @@ function runPluginCli(args: string[], binary: string, timeoutMs = 30_000): Promi
       resolve({ stdout: '', stderr: (e as Error).message, code: -1 });
       return;
     }
+    killOnExit(child);
     let stdout = '';
     let stderr = '';
     let settled = false;

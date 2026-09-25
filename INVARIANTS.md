@@ -705,9 +705,10 @@ guards the assertion helpers themselves
 
 **Always:** Every child process the CLI starts is started with `windowsHide`,
 so no review ever puts a console window on the reviewer's desktop. A runtime
-session is killed as a whole process tree — never just the shell in front of it
-— on timeout, on exit, and when `status` or `--resume` finds its run's process
-dead.
+session is killed itself — never just the shell in front of it (on win32 as the
+whole `taskkill /T` tree, since it runs behind `cmd.exe`) — on timeout, on
+exit, and when `status` or `--resume` finds its run's process dead. A kill is
+reported only when the process is gone afterwards.
 
 **Why:** A detached run has no console, so on Windows every console child
 started without `windowsHide` gets a fresh console, and Windows 11 hands that

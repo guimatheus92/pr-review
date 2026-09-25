@@ -20,7 +20,7 @@ import { DEFAULT_MODEL, normalizeModel, resolveRuntime, type Runtime, type Runti
 import { detectCodex, mapCodexResult, runCodexReviewer } from '../dispatch/codex.js';
 import { controlDirForRun, ensureRunDir, ERROR_FILE, RUNS_ROOT, sanitizeForFilename } from '../util/tmp.js';
 import { appendProgress } from '../util/progress.js';
-import { reapOrphanRuntime } from '../util/spawn.js';
+import { describeReap, reapOrphanRuntime } from '../util/spawn.js';
 import { readPostedMarker, writePostedMarker } from '../util/posted-marker.js';
 import { withRetry } from '../util/retry.js';
 import { printable, redactRuntimeSecrets, safeRuntimeDiagnostic } from '../util/text.js';
@@ -1047,9 +1047,10 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   try {
     // INV-HYG-04: before this run claims run.pid, end any session the killed
     // attempt left behind — it would keep writing into the attempts being recovered.
-    if (reapOrphanRuntime(outDir)) {
-      process.stderr.write('[resume] killed the orphaned runtime session of the interrupted attempt\n');
-      appendProgress(outDir, 'resume', 'killed the orphaned runtime session of the interrupted attempt');
+    const reaped = describeReap(reapOrphanRuntime(outDir));
+    if (reaped) {
+      process.stderr.write(`[resume] ${reaped}\n`);
+      appendProgress(outDir, 'resume', reaped);
     }
     writeFileSync(join(outDir, 'run.pid'), String(process.pid), 'utf8');
   let gather = JSON.parse(readFileSync(gatherPath, 'utf8')) as GatherOutput;

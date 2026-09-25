@@ -3,7 +3,7 @@ import { basename, dirname, join } from 'node:path';
 import { controlDirForRun, ERROR_FILE, RUNS_ROOT } from '../util/tmp.js';
 import { REVIEWER_OUTPUT_FILES } from '../dispatch/single-session.js';
 import { appendProgress, readProgress, renderProgressSnapshot } from '../util/progress.js';
-import { pidAlive, reapOrphanRuntime } from '../util/spawn.js';
+import { describeReap, pidAlive, reapOrphanRuntime } from '../util/spawn.js';
 import type { DeliveryState } from '../dispatch/delivery.js';
 import {
   readAuthoritativeDeliveryState,
@@ -189,9 +189,14 @@ export function runStatus(runId: string, now = Date.now()): StatusResult {
   // INV-HYG-04: a run killed too hard to run its exit handler leaves its
   // runtime session running. The poller calls this, so it is where it ends.
   // A run that wrote its summary finished — its session closed first — and a
-  // finished run keeps its run.pid, so skip the process-table scan there.
-  if (alive === false && !existsSync(summaryPath) && reapOrphanRuntime(outDir)) {
-    appendProgress(outDir, 'error', 'run process died — killed its orphaned runtime session');
+  // run with no plan never spawned one, so only those in between pay the
+  // process-table scan. The plan check reads the control dir too, which the
+  // runtime cannot touch, so an orphan cannot make itself unreapable.
+  // NOTE: this makes runStatus act, not only read — deliberately, since the
+  // poller is the one caller guaranteed to come back after a hard kill.
+  if (alive === false && !existsSync(summaryPath) && hasAnyPlannedControl(outDir)) {
+    const reaped = describeReap(reapOrphanRuntime(outDir));
+    if (reaped) appendProgress(outDir, 'error', reaped);
   }
   const snapshot = renderProgressSnapshot(readProgress(outDir), now);
   const recoveryAuthorityExists = hasRecoveryAuthority(outDir);

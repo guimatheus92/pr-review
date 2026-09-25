@@ -4,7 +4,8 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { controlDirForRun, ERROR_FILE, RUNS_ROOT } from '../src/util/tmp.js';
 import { runStatus, statusExitCode } from '../src/commands/status.js';
-import { killTree, pidAlive, spawnCli } from '../src/util/spawn.js';
+import { pidAlive } from '../src/util/spawn.js';
+import { gone, idleRuntime } from './idle-runtime.js';
 import {
   createDispatchPlan,
   readAuthoritativeDispatchPlan,
@@ -514,28 +515,36 @@ test('statusExitCode — the codes the slash-command poll loop branches on', () 
 test('runStatus — INV-HYG-04: the orphaned runtime session of a dead run is killed and recorded', async () => {
   const id = `test-status-reap-${process.pid}`;
   const dir = seed(id);
-  const script = join(dir, 'idle.js');
-  const pidFile = join(dir, 'idle.pid');
-  writeFileSync(script, `require('fs').writeFileSync(process.argv[2], String(process.pid)); setInterval(() => {}, 1000);`, 'utf8');
-  // The run dir rides in argv exactly as the runtime's --add-dir does.
-  const child = spawnCli(process.execPath, [script, pidFile, '--add-dir', dir], { stdio: ['pipe', 'pipe', 'pipe'] });
-  child.stdin.end();
-  let pid = 0;
   try {
-    for (let i = 0; i < 100 && !pid; i++) {
-      try { pid = Number(readFileSync(pidFile, 'utf8')); } catch { await new Promise((r) => setTimeout(r, 50)); }
-    }
-    assert.ok(pid > 0, 'idle runtime never started');
+    // The run dir rides in argv exactly as the runtime's --add-dir does.
+    const { pid } = await idleRuntime(dir, ['--add-dir', dir]);
     writeFileSync(join(dir, 'run.pid'), String(DEAD_PID), 'utf8');
+    writeFileSync(join(dir, 'dispatch-plan.json'), '{}', 'utf8'); // a runtime is only ever spawned after the plan
     runStatus(id);
-    for (let i = 0; i < 60 && pidAlive(pid); i++) await new Promise((r) => setTimeout(r, 50));
-    assert.equal(pidAlive(pid), false, `orphaned runtime ${pid} survived status`);
-    assert.match(readFileSync(join(dir, 'progress.ndjson'), 'utf8'), /orphaned runtime session/);
+    assert.ok(await gone(pid), `orphaned runtime ${pid} survived status`);
+    assert.match(readFileSync(join(dir, 'progress.ndjson'), 'utf8'), new RegExp(`killed its orphaned runtime session \\(pid [\\d, ]*${pid}`));
   } finally {
-    killTree(child);
-    if (pid && pidAlive(pid)) process.kill(pid);
-    child.stdout.destroy();
-    child.stderr.destroy();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runStatus — INV-HYG-04: a finished run, or one that never planned a dispatch, is not scanned', async () => {
+  const id = `test-status-noreap-${process.pid}`;
+  const dir = seed(id);
+  try {
+    const { pid } = await idleRuntime(dir, ['--add-dir', dir]);
+    writeFileSync(join(dir, 'run.pid'), String(DEAD_PID), 'utf8');
+
+    // No plan: nothing was ever dispatched from this run, so nothing is killed.
+    runStatus(id);
+    assert.ok(pidAlive(pid), 'a run with no dispatch plan had a process killed');
+
+    // A summary: the run finished and its session closed before it was written.
+    writeFileSync(join(dir, 'dispatch-plan.json'), '{}', 'utf8');
+    writeFileSync(join(dir, 'pr-review-summary.md'), '# done\n', 'utf8');
+    runStatus(id);
+    assert.ok(pidAlive(pid), 'a finished run had a process killed');
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });

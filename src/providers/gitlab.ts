@@ -25,6 +25,7 @@ export function resolveToken(host: string, exec: typeof execFileSync = execFileS
     const token = exec('glab', ['config', 'get', 'token', '-h', host], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
     }).trim();
     // glab's keyring-backed storage can print an empty token with exit 0 —
     // same guard as github.ts: an empty token must throw here, or authEnv()

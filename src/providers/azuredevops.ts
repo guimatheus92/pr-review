@@ -55,8 +55,8 @@ function resolveCredential(): AdoCredential {
     const argv = ['account', 'get-access-token', '--resource', ADO_AZURE_AD_RESOURCE_ID, '--query', 'accessToken', '-o', 'tsv'];
     const token = (
       process.platform === 'win32'
-        ? execSync(['az', ...argv].join(' '), { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-        : execFileSync('az', argv, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+        ? execSync(['az', ...argv].join(' '), { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+        : execFileSync('az', argv, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
     ).trim();
     if (token) {
       process.stderr.write(`[ado] using bearer token from \`az account get-access-token\`\n`);

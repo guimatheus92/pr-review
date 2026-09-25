@@ -34,7 +34,7 @@ export function resolveToken(host: string, exec: typeof execFileSync = execFileS
   let detail: string;
   try {
     const args = cloud ? ['auth', 'token'] : ['auth', 'token', '--hostname', host];
-    const token = exec('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    const token = exec('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }).trim();
     // Guard the empty-but-exit-0 case (broken keyring/hosts.yml state): an
     // empty token must throw here — returning '' would make authEnv() inject
     // an empty token and the detached child would silently fall through to

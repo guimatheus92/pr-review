@@ -48,7 +48,7 @@ export const MCP_PROCESS_DENIAL = {
 export type ProbeExec = (file: string, args: string[]) => void;
 
 const defaultProbe: ProbeExec = (file, args) => {
-  execFileSync(file, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+  execFileSync(file, args, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
 };
 
 /** Exported for `pr-review doctor`. */

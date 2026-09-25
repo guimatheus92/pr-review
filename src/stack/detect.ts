@@ -130,6 +130,7 @@ function defaultGitRemote(cwd: string): string | null {
     return execFileSync('git', ['remote', 'get-url', 'origin'], {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
       encoding: 'utf8',
     }).trim();
   } catch {
@@ -143,6 +144,7 @@ function defaultGitToplevel(cwd: string): string | null {
     return execFileSync('git', ['rev-parse', '--show-toplevel'], {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
       encoding: 'utf8',
     }).trim();
   } catch {

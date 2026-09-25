@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { controlDirForRun, ERROR_FILE, RUNS_ROOT } from '../src/util/tmp.js';
 import { runStatus, statusExitCode } from '../src/commands/status.js';
+import { killTree, pidAlive, RUNTIME_PID_FILE, spawnCli } from '../src/util/spawn.js';
 import {
   createDispatchPlan,
   readAuthoritativeDispatchPlan,
@@ -508,4 +509,34 @@ test('statusExitCode — the codes the slash-command poll loop branches on', () 
   assert.equal(statusExitCode('running'), 20);
   assert.equal(statusExitCode('interrupted'), 21);
   assert.equal(statusExitCode('failed'), 22);
+});
+
+test('runStatus — INV-HYG-04: the orphaned runtime session of a dead run is killed and recorded', async () => {
+  const id = `test-status-reap-${process.pid}`;
+  const dir = seed(id);
+  const script = join(dir, 'idle.js');
+  const pidFile = join(dir, 'idle.pid');
+  writeFileSync(script, `require('fs').writeFileSync(process.argv[2], String(process.pid)); setInterval(() => {}, 1000);`, 'utf8');
+  // The run dir rides in argv exactly as the runtime's --add-dir does.
+  const child = spawnCli(process.execPath, [script, pidFile, dir], { stdio: ['pipe', 'pipe', 'pipe'] });
+  child.stdin.end();
+  let pid = 0;
+  try {
+    for (let i = 0; i < 100 && !pid; i++) {
+      try { pid = Number(readFileSync(pidFile, 'utf8')); } catch { await new Promise((r) => setTimeout(r, 50)); }
+    }
+    assert.ok(pid > 0, 'idle runtime never started');
+    writeFileSync(join(dir, 'run.pid'), String(DEAD_PID), 'utf8');
+    writeFileSync(join(dir, RUNTIME_PID_FILE), String(child.pid), 'utf8');
+    runStatus(id);
+    for (let i = 0; i < 60 && pidAlive(pid); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(pidAlive(pid), false, `orphaned runtime ${pid} survived status`);
+    assert.match(readFileSync(join(dir, 'progress.ndjson'), 'utf8'), /orphaned runtime session/);
+  } finally {
+    killTree(child);
+    if (pid && pidAlive(pid)) process.kill(pid);
+    child.stdout.destroy();
+    child.stderr.destroy();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

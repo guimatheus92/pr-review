@@ -1,5 +1,5 @@
 import { exec } from 'node:child_process';
-import { spawnCli } from '../util/spawn.js';
+import { killOnExit, killTree, spawnCli } from '../util/spawn.js';
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ReviewerOutput } from '../types.js';
@@ -219,14 +219,11 @@ export async function runCodexReviewer(opts: CodexReviewOptions): Promise<Review
       return;
     }
 
+    killOnExit(child);
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        // best-effort
-      }
+      killTree(child);
     }, opts.timeoutMs ?? CODEX_TIMEOUT_MS);
 
     // A child that rejected a flag and exited already makes this write EPIPE.

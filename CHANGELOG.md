@@ -4,6 +4,10 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+### Fixed
+- **Reviews no longer open empty Windows Terminal windows, and several at once no longer freeze the desktop.** A detached run has no console, so on Windows every console child it started without `windowsHide` got a fresh console — and Windows 11 hands a new console to Windows Terminal as a new window. #28 removed the MCP server trees behind the first wave of these; what remained were the CLI's own synchronous reads during gather and selection: `git` (checkout root, remote, trust provenance), `gh auth token`, `glab`, `az`, and the `where` probe. Measured on 2026-09-24: ten windows per review, one every ~3 s, stopping the moment `dispatch-plan.json` was written — each handoff also blocked its call for those ~3 s. Every `node:child_process` call now passes `windowsHide`, and `tests/windows-hide.test.ts` fails on any call in `src/` that omits it, with a control proving the scanner flags a visible call (INV-HYG-04).
+- **A runtime session no longer outlives its run.** On win32 the runtime runs behind `cmd.exe`, so the timeout's `child.kill()` ended the shell and left the `claude`/`copilot` session (and Codex) running with nobody to read it. Sessions are now killed as a process tree, on timeout and when the CLI exits. A CLI killed too hard to run an exit handler — observed on a run whose Opus session kept running after its process died at 240 s — leaves `runtime.pid` in the run dir, and the next `pr-review status` (which the slash command polls) or `--resume` kills that session. It acts only when `run.pid` exists and is dead and the recorded pid's command line names the run dir, so a pid the OS reused is left alone.
+
 ## [0.15.0] — 2026-09-12
 
 ### Added

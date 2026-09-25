@@ -2,7 +2,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { controlDirForRun, ERROR_FILE, RUNS_ROOT } from '../util/tmp.js';
 import { REVIEWER_OUTPUT_FILES } from '../dispatch/single-session.js';
-import { readProgress, renderProgressSnapshot } from '../util/progress.js';
+import { appendProgress, readProgress, renderProgressSnapshot } from '../util/progress.js';
+import { pidAlive, reapOrphanRuntime } from '../util/spawn.js';
 import type { DeliveryState } from '../dispatch/delivery.js';
 import {
   readAuthoritativeDeliveryState,
@@ -34,16 +35,6 @@ export function statusExitCode(state: StatusState): number {
       return 21;
     case 'failed':
       return 22;
-  }
-}
-
-/** True if a process with this pid is alive. EPERM (exists, not ours) counts as alive. */
-function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
   }
 }
 
@@ -195,6 +186,11 @@ export function runStatus(runId: string, now = Date.now()): StatusResult {
   const summaryPath = join(outDir, 'pr-review-summary.md');
   const errPath = join(outDir, ERROR_FILE);
   const alive = runAlive(outDir);
+  // INV-HYG-04: a run killed too hard to run its exit handler leaves its
+  // runtime session running. The poller calls this, so it is where it ends.
+  if (alive === false && reapOrphanRuntime(outDir)) {
+    appendProgress(outDir, 'error', 'run process died — killed its orphaned runtime session');
+  }
   const snapshot = renderProgressSnapshot(readProgress(outDir), now);
   const recoveryAuthorityExists = hasRecoveryAuthority(outDir);
   const authoritative = readAuthoritativeControl(outDir);

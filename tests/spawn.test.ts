@@ -122,6 +122,9 @@ test('INV-HYG-04 — namesRunDir recognizes a runtime handed the run dir, not a 
   assert.equal(namesRunDir(`codex exec ${q('-C')} ${q(dir)} ${q('-o')} ${q(join(dir, 'a.json'))}`, dir), true);
   // An editor with a file of the run dir open is not a runtime.
   assert.equal(namesRunDir(`notepad ${q(join(dir, 'pr-review-summary.md'))}`, dir), false);
+  // Nor is one that opened the run dir itself — only the flag tells them apart.
+  assert.equal(namesRunDir(`code ${q(dir)}`, dir), false);
+  assert.equal(namesRunDir(`explorer ${q(`${dir}${process.platform === 'win32' ? '\\' : '/'}`)}`, dir), false);
   // A sibling run whose id extends this one is not this run.
   assert.equal(namesRunDir(`claude ${q('--add-dir')} ${q(`${dir}0`)}`, dir), false);
   if (process.platform === 'win32') {

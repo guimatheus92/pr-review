@@ -18,9 +18,9 @@ import { loadLinguist } from '../stack/linguist.js';
 import { detectStack, maskUrl } from '../stack/detect.js';
 import { DEFAULT_MODEL, normalizeModel, resolveRuntime, type Runtime, type RuntimeChoice } from '../dispatch/runtime.js';
 import { detectCodex, mapCodexResult, runCodexReviewer } from '../dispatch/codex.js';
-import { controlDirForRun, ensureRunDir, ERROR_FILE, RUNS_ROOT, sanitizeForFilename } from '../util/tmp.js';
+import { controlDirForRun, ensureRunDir, ERROR_FILE, RUNS_ROOT, runsRootFor, sanitizeForFilename } from '../util/tmp.js';
 import { appendProgress } from '../util/progress.js';
-import { describeReap, reapOrphanRuntime } from '../util/spawn.js';
+import { reapThenClaimRunPid } from '../util/spawn.js';
 import { readPostedMarker, writePostedMarker } from '../util/posted-marker.js';
 import { withRetry } from '../util/retry.js';
 import { printable, redactRuntimeSecrets, safeRuntimeDiagnostic } from '../util/text.js';
@@ -1045,14 +1045,12 @@ async function resumeReview(opts: ReviewCmdOptions): Promise<ReviewResult> {
   const controlDir = controlDirForRun(outDir, opts.homeOverride);
   const releaseResumeLease = acquireFinalizationLease(controlDir);
   try {
-    // INV-HYG-04: before this run claims run.pid, end any session the killed
-    // attempt left behind — it would keep writing into the attempts being recovered.
-    const reaped = describeReap(reapOrphanRuntime(outDir));
-    if (reaped) {
-      process.stderr.write(`[resume] ${reaped}\n`);
-      appendProgress(outDir, 'resume', reaped);
-    }
-    writeFileSync(join(outDir, 'run.pid'), String(process.pid), 'utf8');
+    // INV-HYG-04: end any session the killed attempt left behind — it would keep
+    // writing into the attempts being recovered — and only then claim run.pid.
+    // Refuses while one survives. A run dir outside this home's runs root is
+    // not swept: it cannot be one of this CLI's runs.
+    const reaped = reapThenClaimRunPid(outDir, runsRootFor(opts.homeOverride));
+    if (reaped) process.stderr.write(`[resume] ${reaped}\n`);
   let gather = JSON.parse(readFileSync(gatherPath, 'utf8')) as GatherOutput;
   const invocationCwd = process.cwd();
   const repoRoot = gitTopLevel(invocationCwd) ?? invocationCwd;

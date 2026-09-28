@@ -15,7 +15,7 @@ function ghAuthOk(): boolean {
   try {
     // No shell: gh ships as gh.exe on Windows (not a .cmd shim), and
     // shell+args-array trips DEP0190 — same shape as resolveToken in github.ts.
-    execFileSync('gh', ['auth', 'status'], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    execFileSync('gh', ['auth', 'status'], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, timeout: 30_000 });
     return true;
   } catch {
     return false;

@@ -12,7 +12,9 @@ export type ProgressPhase =
   | 'post'
   | 'done'
   | 'error'
-  | 'resume';
+  | 'resume'
+  /** `status`/`--resume` sweeping the run's orphaned runtime sessions — after the run, not a step of it. */
+  | 'reap';
 
 /** One line of the run's live progress feed (~/.pr-review/runs/<id>/progress.ndjson). */
 export interface ProgressEvent {
@@ -68,7 +70,9 @@ function fmtElapsed(ms: number): string {
 export function renderProgressSnapshot(events: ProgressEvent[], nowMs?: number): string {
   if (events.length === 0) return 'starting…';
   const first = events[0]!;
-  const last = events[events.length - 1]!;
+  // The headline is where the run got to. A `reap` line lands after the run
+  // died, and as the last event it would stand in for that on every poll.
+  const last = events.filter((e) => e.phase !== 'reap').at(-1) ?? events.at(-1)!;
   const elapsed = fmtElapsed((nowMs ?? last.ts) - first.ts);
   return `⏳ ${last.phase}${last.detail ? ` — ${last.detail}` : ''}  ·  ${elapsed} elapsed`;
 }

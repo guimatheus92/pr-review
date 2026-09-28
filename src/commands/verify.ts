@@ -257,13 +257,13 @@ export const TEST_ONLY: Record<string, string> = {
   // that could hint at it — in-scope rows with no patch — is also what a PR of
   // binaries and pure renames legitimately produces, so grading it from a run
   // would fail honest runs and still miss a provider that quietly refetched.
-  'INV-FETCH-04': 'guarded by tests/providers/azuredevops.test.ts and tests/gather-cache.test.ts — a fetch that did not happen leaves no artifact to grade',
-  'INV-TRUST-02': 'guarded by tests/config.test.ts — "no yaml/env key exists" is an absence, not something a run can record',
-  'INV-TRUST-03': 'guarded by tests/linked-skills.test.ts — a refused link leaves only a degraded note, and absence proves nothing',
+  'INV-FETCH-04': 'guarded by tests/providers/azuredevops.test.ts, tests/gather-cache.test.ts and tests/zero-passes.test.ts — a fetch that did not happen leaves no artifact to grade',
+  'INV-TRUST-02': 'guarded by tests/config.test.ts and tests/linked-skills.test.ts — "no yaml/env key exists" is an absence, not something a run can record',
+  'INV-TRUST-03': 'guarded by tests/linked-skills.test.ts, tests/git-provenance.test.ts and tests/loader.test.ts — a refused link leaves only a degraded note, and absence proves nothing',
   'INV-HYG-01': 'guarded by tests/zero-passes.test.ts — prompt text lives in the bundle, not in a run',
   'INV-HYG-02': 'guarded by tests/dogfood.test.ts and the CI bundle-freshness gate — a build property',
   'INV-HYG-03': 'human judgment; eval fixtures in evals/ are the standing guard',
-  'INV-HYG-04': 'guarded by tests/windows-hide.test.ts and tests/spawn.test.ts — a window that never opened leaves no artifact',
+  'INV-HYG-04': 'guarded by tests/windows-hide.test.ts, tests/spawn.test.ts and tests/status.test.ts — a window that never opened leaves no artifact',
 };
 
 export const CHECKS: InvariantCheck[] = [

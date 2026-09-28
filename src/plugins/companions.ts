@@ -330,7 +330,12 @@ function runPluginCli(args: string[], binary: string, timeoutMs = 30_000): Promi
       resolve(result);
     };
     const timer = setTimeout(() => {
-      killTree(child); // INV-HYG-04: child.kill() would end only the win32 shell
+      // INV-HYG-04: child.kill() would end only the win32 shell. The caller reports
+      // only the exit code, so a survivor is named here or nowhere.
+      const why = killTree(child);
+      if (why) {
+        process.stderr.write(`[companions] \`${binary} ${args.join(' ')}\` timed out and could NOT kill its process tree (pid ${child.pid}): ${why} — end it manually\n`);
+      }
       finish({ stdout, stderr, code: -1 });
     }, timeoutMs);
     child.stdin.end();

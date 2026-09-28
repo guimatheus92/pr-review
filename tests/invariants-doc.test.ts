@@ -152,3 +152,14 @@ test('verify registry — TEST_ONLY entries state their guard, and no ID is regi
     assert.match(reason, /guarded by|human judgment/i, `${id}'s TEST_ONLY reason must name its guard`);
   }
 });
+
+// `pr-review verify` prints the TEST_ONLY reason verbatim as the audit row, so a
+// guard named in the doc but missing from the reason is coverage the report
+// silently disowns — INV-HYG-04 shipped naming two of its three test files.
+test('verify registry — a tests-only reason names exactly the tests its Verified line cites', () => {
+  for (const entry of doc().filter((e) => e.check === 'tests-only')) {
+    const named = [...(TEST_ONLY[entry.id] ?? '').matchAll(/tests\/[\w./-]*\w/g)].map((m) => m[0]).sort();
+    const cited = [...new Set(entry.verified.filter((p) => p.startsWith('tests/')))].sort();
+    assert.deepEqual(named, cited, `${entry.id}: the TEST_ONLY reason and INVARIANTS.md's Verified line name different tests`);
+  }
+});

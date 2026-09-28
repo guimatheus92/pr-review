@@ -1,20 +1,34 @@
 // Shared by the INV-HYG-04 tests: a long-lived node process launched through
 // spawnCli exactly like a runtime, plus the pollers that judge whether it died.
 import { after } from 'node:test';
-import { spawn } from 'node:child_process';
+import type { ChildProcessByStdio } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { Readable, Writable } from 'node:stream';
 import { pidAlive, spawnCli } from '../src/util/spawn.js';
+
+/**
+ * A pid no process has — `process.kill(pid, 0)` answers ESRCH. Not a process
+ * that just exited: the OS may hand that pid to someone else mid-test.
+ */
+export const DEAD_PID = 2147483646;
+
+/** Named, not `ReturnType<typeof spawnCli>`: that resolves to the LAST overload, whose stdout is null. */
+export interface IdleRuntime {
+  child: ChildProcessByStdio<Writable, Readable, Readable>;
+  pid: number;
+}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Every idle runtime started by a test file, for the `after` sweep below. */
-const started: { child: ReturnType<typeof spawnCli>; pid: number }[] = [];
+const started: IdleRuntime[] = [];
 
-// A kill under test that regresses leaves a survivor holding the file open
-// forever; kill it by pid so the regression FAILS instead of hanging. Only
-// while `child` has not exited — a pid the tree kill already reaped may since
-// belong to someone else.
+// A kill under test that regresses leaves a survivor whose stdout/stderr pipes
+// keep this process's event loop referenced, so `node --test` would hang on it
+// instead of failing: kill it by pid, and destroy the pipes. The exit-code
+// guard is best effort — on win32 `child` is the cmd.exe in front of the pid,
+// whose exit says nothing about the pid — and the catch covers the race.
 after(() => {
   for (const s of started) {
     try {
@@ -28,7 +42,7 @@ after(() => {
 });
 
 /** Start an idle node process with `extraArgs` in its argv; resolves once it has written its own pid. */
-export async function idleRuntime(root: string, extraArgs: string[]): Promise<{ child: ReturnType<typeof spawnCli>; pid: number }> {
+export async function idleRuntime(root: string, extraArgs: string[]): Promise<IdleRuntime> {
   const script = join(root, 'idle.js');
   const pidFile = join(root, `idle-${process.hrtime.bigint()}.pid`);
   // Write-then-rename so a reader never sees an empty or partial pid.
@@ -62,11 +76,4 @@ export async function gone(pid: number): Promise<boolean> {
     await sleep(50);
   }
   return false;
-}
-
-/** A pid that is certainly dead: a process that already exited. */
-export async function deadPid(): Promise<number> {
-  const c = spawn(process.execPath, ['-e', ''], { windowsHide: true });
-  await new Promise((r) => c.on('close', r));
-  return c.pid!;
 }

@@ -1,9 +1,9 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { controlDirForRun, ERROR_FILE, RUNS_ROOT } from '../util/tmp.js';
 import { REVIEWER_OUTPUT_FILES } from '../dispatch/single-session.js';
-import { appendProgress, readProgress, renderProgressSnapshot } from '../util/progress.js';
-import { describeReap, pidAlive, reapOrphanRuntime } from '../util/spawn.js';
+import { readProgress, renderProgressSnapshot } from '../util/progress.js';
+import { pidAlive, reapAndRecord, readRunPid, type ReapDeps } from '../util/spawn.js';
 import type { DeliveryState } from '../dispatch/delivery.js';
 import {
   readAuthoritativeDeliveryState,
@@ -38,12 +38,29 @@ export function statusExitCode(state: StatusState): number {
   }
 }
 
-/** null = unknown (no run.pid, e.g. an old or foreground run); else whether the run's process is alive. */
+/** null = unknown (no readable run.pid, e.g. an old or foreground run); else whether the run's process is alive. */
 function runAlive(outDir: string): boolean | null {
-  const p = join(outDir, 'run.pid');
-  if (!existsSync(p)) return null;
-  const pid = Number(readFileSync(p, 'utf8').trim());
-  return pid > 0 ? pidAlive(pid) : null;
+  let pid = 0;
+  try {
+    pid = readRunPid(outDir);
+  } catch {
+    // An unreadable beacon says no more than a missing one.
+  }
+  return pid ? pidAlive(pid) : null;
+}
+
+/**
+ * Whether the run wrote its summary after it last claimed run.pid — then it
+ * finished, and its sessions closed first. Existence alone does not say so: a
+ * `--resume` re-claims run.pid over the summary a failed first attempt left,
+ * and a hard kill of that resume must still be swept.
+ */
+function summaryAfterClaim(outDir: string): boolean {
+  try {
+    return statSync(join(outDir, 'pr-review-summary.md')).mtimeMs >= statSync(join(outDir, 'run.pid')).mtimeMs;
+  } catch {
+    return false;
+  }
 }
 
 function hasReviewerOutput(outDir: string): boolean {
@@ -177,7 +194,7 @@ function hasAnyPlannedControl(outDir: string): boolean {
  * an intermediate artifact like phase1-findings.json must NOT read as "interrupted"
  * while the run is still going, or the poller would fire a racing --resume.
  */
-export function runStatus(runId: string, now = Date.now()): StatusResult {
+export function runStatus(runId: string, now = Date.now(), reapDeps?: ReapDeps): StatusResult {
   const outDir = join(RUNS_ROOT, runId);
   if (!existsSync(outDir)) {
     return { state: 'missing', text: `run ${runId} not found under ${RUNS_ROOT}` };
@@ -186,19 +203,22 @@ export function runStatus(runId: string, now = Date.now()): StatusResult {
   const summaryPath = join(outDir, 'pr-review-summary.md');
   const errPath = join(outDir, ERROR_FILE);
   const alive = runAlive(outDir);
+  // Read before the sweep below appends to the feed.
+  let snapshot = renderProgressSnapshot(readProgress(outDir), now);
   // INV-HYG-04: a run killed too hard to run its exit handler leaves its
   // runtime session running. The poller calls this, so it is where it ends.
-  // A run that wrote its summary finished — its session closed first — and a
-  // run with no plan never spawned one, so only those in between pay the
-  // process-table scan. The plan check reads the control dir too, which the
-  // runtime cannot touch, so an orphan cannot make itself unreapable.
+  // A run that wrote its summary after claiming run.pid finished — its
+  // sessions closed first — and a run with no plan never spawned one, so only
+  // those in between pay the process-table scan. The plan check reads the
+  // control dir too, which the runtime cannot touch, so an orphan cannot make
+  // itself unreapable. A timeout kill that failed is not retried here: the run
+  // reported it where it happened, with the pid to end by hand.
   // NOTE: this makes runStatus act, not only read — deliberately, since the
   // poller is the one caller guaranteed to come back after a hard kill.
-  if (alive === false && !existsSync(summaryPath) && hasAnyPlannedControl(outDir)) {
-    const reaped = describeReap(reapOrphanRuntime(outDir));
-    if (reaped) appendProgress(outDir, 'error', reaped);
+  if (alive === false && hasAnyPlannedControl(outDir) && !summaryAfterClaim(outDir)) {
+    const { line } = reapAndRecord(outDir, RUNS_ROOT, reapDeps);
+    if (line) snapshot += `\n${line}`;
   }
-  const snapshot = renderProgressSnapshot(readProgress(outDir), now);
   const recoveryAuthorityExists = hasRecoveryAuthority(outDir);
   const authoritative = readAuthoritativeControl(outDir);
   const authoritativeDelivery = authoritative?.state ?? null;

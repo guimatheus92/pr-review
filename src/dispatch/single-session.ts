@@ -2293,7 +2293,14 @@ function spawnRuntime(args: {
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      killTree(child);
+      const why = killTree(child);
+      if (!why) return;
+      // The tree survived, so 'close' may never come: settle now, and say which process to end.
+      const msg = `[single-session] timed out and could NOT kill the runtime tree (pid ${child.pid}): ${why} — end it manually`;
+      process.stderr.write(`${msg}\n`);
+      appendProgress(args.addDir, 'error', msg);
+      clearInterval(heartbeat);
+      resolve({ stdout, stderr: `${stderr}\n${msg}`, exitCode: -1, timedOut });
     }, args.timeoutMs);
 
     // The orchestrator's own tool activity isn't observable from here (a plain

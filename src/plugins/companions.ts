@@ -1,4 +1,4 @@
-import { spawnCli } from '../util/spawn.js';
+import { killOnExit, killTree, spawnCli } from '../util/spawn.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
@@ -319,6 +319,7 @@ function runPluginCli(args: string[], binary: string, timeoutMs = 30_000): Promi
       resolve({ stdout: '', stderr: (e as Error).message, code: -1 });
       return;
     }
+    killOnExit(child);
     let stdout = '';
     let stderr = '';
     let settled = false;
@@ -329,7 +330,12 @@ function runPluginCli(args: string[], binary: string, timeoutMs = 30_000): Promi
       resolve(result);
     };
     const timer = setTimeout(() => {
-      child.kill();
+      // INV-HYG-04: child.kill() would end only the win32 shell. The caller reports
+      // only the exit code, so a survivor is named here or nowhere.
+      const why = killTree(child);
+      if (why) {
+        process.stderr.write(`[companions] \`${binary} ${args.join(' ')}\` timed out and could NOT kill its process tree (pid ${child.pid}): ${why} — end it manually\n`);
+      }
       finish({ stdout, stderr, code: -1 });
     }, timeoutMs);
     child.stdin.end();

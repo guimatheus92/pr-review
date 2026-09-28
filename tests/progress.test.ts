@@ -21,6 +21,15 @@ test('renderProgressSnapshot — nowMs advances elapsed between polls', () => {
   assert.match(out, /1m05s/);
 });
 
+test('renderProgressSnapshot — a reap line never replaces where the run got to', () => {
+  const reap: ProgressEvent = { ts: 9000, phase: 'reap', detail: 'run process died — killed its orphaned runtime session (node pid 7)' };
+  const out = renderProgressSnapshot([{ ts: 1000, phase: 'gather', detail: '18 files' }, { ts: 2000, phase: 'dispatch', detail: '6 reviewers' }, reap]);
+  assert.match(out, /dispatch — 6 reviewers/);
+  assert.doesNotMatch(out, /orphaned/);
+  // A feed with nothing else still shows it rather than nothing.
+  assert.match(renderProgressSnapshot([reap]), /reap — run process died/);
+});
+
 test('renderProgressSnapshot — empty feed', () => {
   assert.equal(renderProgressSnapshot([]), 'starting…');
 });

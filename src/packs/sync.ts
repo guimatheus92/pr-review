@@ -17,6 +17,7 @@ const defaultGit: GitExec = (args, cwd) =>
   execFileSync('git', args, {
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
     encoding: 'utf8',
     // A pack source that wants credentials must fail, not hang the review on an
     // invisible prompt; ditto a network stall.

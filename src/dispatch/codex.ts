@@ -1,5 +1,6 @@
 import { exec } from 'node:child_process';
-import { spawnCli } from '../util/spawn.js';
+import { killOnExit, killTree, spawnCli } from '../util/spawn.js';
+import { appendProgress } from '../util/progress.js';
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ReviewerOutput } from '../types.js';
@@ -147,6 +148,15 @@ export function mapCodexResult(args: {
  */
 export const CODEX_SANDBOX_ARGS = ['exec', '-s', 'read-only', '--skip-git-repo-check'] as const;
 
+/**
+ * The sibling's whole argv. Exported so the orphaned-runtime sweep's matcher
+ * (`namesRunDir`) is tested against what really runs: its `-C <outDir>` is how
+ * a sweep recognizes a Codex session this run left behind.
+ */
+export function codexSpawnArgs(outDir: string, outFile: string): string[] {
+  return [...CODEX_SANDBOX_ARGS, '-C', outDir, '-o', outFile, '-'];
+}
+
 /** The failure log body. Pure and exported so its content is testable without spawning. */
 export function formatCodexFailureLog(a: {
   error: string;
@@ -198,7 +208,7 @@ export async function runCodexReviewer(opts: CodexReviewOptions): Promise<Review
     `Output ONLY a JSON array of findings using the shape: ${OUTPUT_SHAPE}. If you find nothing, output []. No prose. No fences. ${NO_POSTING_DIRECTIVE}`;
 
   const binary = opts.binary ?? 'codex';
-  const argv = [...CODEX_SANDBOX_ARGS, '-C', opts.outDir, '-o', outFile, '-'];
+  const argv = codexSpawnArgs(opts.outDir, outFile);
 
   const result = await new Promise<{ exitCode: number; timedOut: boolean; stderr: string; stdout: string }>((res) => {
     const stderrCap = createCapture();
@@ -219,14 +229,17 @@ export async function runCodexReviewer(opts: CodexReviewOptions): Promise<Review
       return;
     }
 
+    killOnExit(child);
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        // best-effort
-      }
+      const why = killTree(child);
+      if (!why) return;
+      // The tree survived, so 'close' may never come: settle now, and say which process to end.
+      const msg = `[codex] timed out and could NOT kill its process tree (pid ${child.pid}): ${why} — end it manually`;
+      process.stderr.write(`${msg}\n`);
+      appendProgress(opts.outDir, 'error', msg);
+      res({ exitCode: -1, timedOut, stderr: `${stderrCap.value()}\n${msg}`, stdout: stdoutCap.value() });
     }, opts.timeoutMs ?? CODEX_TIMEOUT_MS);
 
     // A child that rejected a flag and exited already makes this write EPIPE.

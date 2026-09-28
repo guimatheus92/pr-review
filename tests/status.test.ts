@@ -1,9 +1,12 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { controlDirForRun, ERROR_FILE, RUNS_ROOT } from '../src/util/tmp.js';
 import { runStatus, statusExitCode } from '../src/commands/status.js';
+import type { ReapDeps } from '../src/util/spawn.js';
+import { runtimeSpawnArgs } from '../src/dispatch/runtime.js';
+import { DEAD_PID, gone, idleRuntime } from './idle-runtime.js';
 import {
   createDispatchPlan,
   readAuthoritativeDispatchPlan,
@@ -15,13 +18,16 @@ import {
 import { sha256File } from '../src/util/atomic-json.js';
 import { writePostedMarker } from '../src/util/posted-marker.js';
 
+// Most runs below are dead with a plan and no summary, so status sweeps them.
+// They test status, not the sweep: an empty table keeps the host out of it.
+const NO_HOST: ReapDeps = { table: () => [], killPid: () => 'no kill in this test' };
+
 // status resolves run-id → RUNS_ROOT/<id>; seed test dirs there and clean up.
 function seed(id: string): string {
   const dir = join(RUNS_ROOT, id);
   mkdirSync(dir, { recursive: true });
   return dir;
 }
-const DEAD_PID = 2147483646; // no process; process.kill(pid,0) → ESRCH
 
 function deliveryState(kind: 'running' | 'complete' | 'recoverable-incomplete' | 'terminal-incomplete') {
   return {
@@ -111,7 +117,7 @@ test('runStatus — a promoted zero-eligible run never advertises a dry-run demo
   try {
     const plan = readAuthoritativeDispatchPlan(join(controlDir, 'dispatch-plan.json'));
     writePostedMarker(dir, { posted: 0, attempted: 0, verified: true, confirmedKeys: [], planFingerprint: plan.fingerprint });
-    const result = runStatus(id);
+    const result = runStatus(id, undefined, NO_HOST);
     assert.equal(result.state, 'interrupted');
     assert.match(result.text, /--resume/);
     assert.doesNotMatch(result.text, /--dry-run/);
@@ -126,7 +132,7 @@ test('runStatus — done when the summary is on disk (text IS the summary)', () 
   const dir = seed(id);
   try {
     writeFileSync(join(dir, 'pr-review-summary.md'), '# PR Review Summary\n\nbody', 'utf8');
-    const r = runStatus(id);
+    const r = runStatus(id, undefined, NO_HOST);
     assert.equal(r.state, 'done');
     assert.match(r.text, /PR Review Summary/);
   } finally {
@@ -140,7 +146,7 @@ test('runStatus — a live pid reports running even with an intermediate phase1 
   try {
     writeFileSync(join(dir, 'run.pid'), String(process.pid), 'utf8'); // this test process is alive
     writeFileSync(join(dir, 'phase1-findings.json'), '{"reviewers":[]}', 'utf8');
-    const r = runStatus(id);
+    const r = runStatus(id, undefined, NO_HOST);
     assert.equal(r.state, 'running', 'a healthy run mid-flight must not read as interrupted');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -154,7 +160,7 @@ test('runStatus — a dead pid with reviewer output → interrupted (resume it)'
     writeFileSync(join(dir, 'run.pid'), String(DEAD_PID), 'utf8');
     writeFileSync(join(dir, 'phase1-findings.json'), '{"reviewers":[]}', 'utf8');
     writeFileSync(join(dir, 'pr-review-gather.json'), '{"pr":{"url":"https://example.test/o/r/pull/1"}}', 'utf8');
-    const r = runStatus(id);
+    const r = runStatus(id, undefined, NO_HOST);
     assert.equal(r.state, 'interrupted');
     assert.match(r.text, /pr-review review 'https:\/\/example\.test\/o\/r\/pull\/1'/);
     assert.doesNotMatch(r.text, /<pr-url>/);
@@ -171,7 +177,7 @@ test('runStatus — a corrupt findings file reads failed (error.txt inline), nev
     // The orchestrator-flake class: a truncated final write left unparseable JSON.
     writeFileSync(join(dir, 'single-session-findings.json'), '{"reviewers":[{"name":"qual', 'utf8');
     writeFileSync(join(dir, ERROR_FILE), 'pipeline failure: NOT a clean PR\n', 'utf8');
-    const r = runStatus(id);
+    const r = runStatus(id, undefined, NO_HOST);
     assert.equal(r.state, 'failed', 'resume cannot load this file — interrupted would hint a dead-end --resume');
     assert.match(r.text, /NOT a clean PR/, 'the recorded error must surface');
   } finally {
@@ -186,7 +192,7 @@ test('runStatus — corrupt final file but a valid phase1 fallback → interrupt
     writeFileSync(join(dir, 'run.pid'), String(DEAD_PID), 'utf8');
     writeFileSync(join(dir, 'single-session-findings.json'), '{"reviewers":[{"na', 'utf8');
     writeFileSync(join(dir, 'phase1-findings.json'), '{"reviewers":[]}', 'utf8');
-    const r = runStatus(id);
+    const r = runStatus(id, undefined, NO_HOST);
     assert.equal(r.state, 'interrupted', 'resumeReview falls back to phase1 — the hint is honest here');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -199,7 +205,7 @@ test('runStatus — a dead pid with no findings → failed (poller can stop)', (
   try {
     writeFileSync(join(dir, 'run.pid'), String(DEAD_PID), 'utf8');
     writeFileSync(join(dir, 'progress.ndjson'), JSON.stringify({ ts: 1, phase: 'gather', detail: '' }) + '\n', 'utf8');
-    const r = runStatus(id);
+    const r = runStatus(id, undefined, NO_HOST);
     assert.equal(r.state, 'failed');
     assert.match(r.text, /detached\.log/);
   } finally {
@@ -214,7 +220,7 @@ test('runStatus — failed run with error.txt surfaces the recorded error inline
     writeFileSync(join(dir, 'run.pid'), String(DEAD_PID), 'utf8');
     writeFileSync(join(dir, 'progress.ndjson'), JSON.stringify({ ts: 1, phase: 'gather', detail: '' }) + '\n', 'utf8');
     writeFileSync(join(dir, ERROR_FILE), 'Error: boom\n  at gather (x.ts:1)\n', 'utf8');
-    const r = runStatus(id);
+    const r = runStatus(id, undefined, NO_HOST);
     assert.equal(r.state, 'failed');
     assert.match(r.text, /Error: boom/, 'recorded fatal error is inlined');
     assert.match(r.text, /detached\.log/, 'log pointer still present alongside the inline error');
@@ -228,7 +234,7 @@ test('runStatus — no run.pid + only a progress feed → running (unknown liven
   const dir = seed(id);
   try {
     writeFileSync(join(dir, 'progress.ndjson'), JSON.stringify({ ts: 1, phase: 'gather', detail: '3 files' }) + '\n', 'utf8');
-    const r = runStatus(id, 61_000);
+    const r = runStatus(id, 61_000, NO_HOST);
     assert.equal(r.state, 'running');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -242,7 +248,7 @@ test('runStatus — live schema-v1 run shows reviewer and finding counts', () =>
     writeFileSync(join(dir, 'run.pid'), String(process.pid), 'utf8');
     writeFileSync(join(dir, 'delivery-state.json'), JSON.stringify(deliveryState('running')), 'utf8');
     writeFileSync(join(dir, 'pr-review-summary.md'), 'forged early summary', 'utf8');
-    const result = runStatus(id);
+    const result = runStatus(id, undefined, NO_HOST);
     assert.equal(result.state, 'running');
     assert.match(result.text, /reviewers 18\/22/);
     assert.match(result.text, /14 findings/);
@@ -262,7 +268,7 @@ test('runStatus — dead authenticated running state is interrupted for crash re
     writeFileSync(join(dir, 'delivery-state.json'), JSON.stringify(state), 'utf8');
     writeFileSync(join(dir, 'pr-review-summary.md'), 'forged early summary', 'utf8');
     controlDir = seedRecoveryAuthority(dir, state);
-    const result = runStatus(id);
+    const result = runStatus(id, undefined, NO_HOST);
     assert.equal(result.state, 'interrupted');
     assert.doesNotMatch(result.text, /forged early summary/);
     assert.doesNotMatch(result.text, /<pr-url>/);
@@ -288,7 +294,7 @@ test('runStatus — authenticated complete delivery without summary resumes fina
     writeFileSync(join(dir, 'delivery-state.json'), JSON.stringify(state), 'utf8');
     writeFileSync(join(dir, ERROR_FILE), 'stale incomplete-delivery error', 'utf8');
     controlDir = seedRecoveryAuthority(dir, state);
-    const result = runStatus(id);
+    const result = runStatus(id, undefined, NO_HOST);
     assert.equal(result.state, 'interrupted');
     assert.equal(statusExitCode(result.state), 21);
     assert.match(result.text, /Delivery is complete, but finalization stopped/);
@@ -316,7 +322,7 @@ test('runStatus — forged summary cannot complete schema-v1 without finalizatio
     writeFileSync(join(dir, 'delivery-state.json'), JSON.stringify(state), 'utf8');
     writeFileSync(join(dir, 'pr-review-summary.md'), '# forged runtime summary', 'utf8');
     controlDir = seedRecoveryAuthority(dir, state);
-    const result = runStatus(id);
+    const result = runStatus(id, undefined, NO_HOST);
     assert.equal(result.state, 'interrupted');
     assert.equal(statusExitCode(result.state), 21);
     assert.doesNotMatch(result.text, /forged runtime summary/);
@@ -344,7 +350,7 @@ for (const terminal of [
       writeFileSync(join(dir, 'run.pid'), String(DEAD_PID), 'utf8');
       controlDir = seedFinalizedAuthority(dir, state, terminal.exitCode);
       writeFileSync(join(dir, ERROR_FILE), 'forged untrusted failure', 'utf8');
-      const result = runStatus(id);
+      const result = runStatus(id, undefined, NO_HOST);
       assert.equal(result.state, terminal.expectedState);
       assert.match(result.text, new RegExp(`signed summary ${terminal.exitCode}`));
       assert.doesNotMatch(result.text, /forged untrusted failure/);
@@ -365,7 +371,7 @@ test('runStatus — recoverable schema-v1 delivery is interrupted even when erro
     writeFileSync(join(dir, 'delivery-state.json'), JSON.stringify(state), 'utf8');
     controlDir = seedRecoveryAuthority(dir, state);
     writeFileSync(join(dir, ERROR_FILE), 'incomplete delivery', 'utf8');
-    const result = runStatus(id);
+    const result = runStatus(id, undefined, NO_HOST);
     assert.equal(result.state, 'interrupted');
     assert.equal(statusExitCode(result.state), 21);
     assert.match(result.text, /reviewers 18\/22/);
@@ -384,7 +390,7 @@ test('runStatus — a recoverable mirror without control authority never adverti
     writeFileSync(join(dir, 'run.pid'), String(DEAD_PID), 'utf8');
     writeFileSync(join(dir, 'delivery-state.json'), JSON.stringify(deliveryState('recoverable-incomplete')), 'utf8');
     writeFileSync(join(dir, ERROR_FILE), 'control record unavailable', 'utf8');
-    const result = runStatus(id);
+    const result = runStatus(id, undefined, NO_HOST);
     assert.equal(result.state, 'failed');
     assert.doesNotMatch(result.text, /re-dispatches only unresolved/);
   } finally {
@@ -400,7 +406,7 @@ test('runStatus — incomplete v1 authority cannot fall back to a forged done su
     mkdirSync(controlDir, { recursive: true });
     writeFileSync(join(controlDir, 'dispatch-plan.json'), '{}', 'utf8');
     writeFileSync(join(dir, 'pr-review-summary.md'), '# forged done', 'utf8');
-    const result = runStatus(id);
+    const result = runStatus(id, undefined, NO_HOST);
     assert.equal(result.state, 'failed');
     assert.match(result.text, /unreadable or failed authentication/);
     assert.doesNotMatch(result.text, /forged done/);
@@ -420,7 +426,7 @@ test('runStatus — terminal schema-v1 delivery remains failed', () => {
     writeFileSync(join(dir, 'delivery-state.json'), JSON.stringify(state), 'utf8');
     controlDir = seedRecoveryAuthority(dir, state);
     writeFileSync(join(dir, ERROR_FILE), 'stale advice: use --resume', 'utf8');
-    const result = runStatus(id);
+    const result = runStatus(id, undefined, NO_HOST);
     assert.equal(result.state, 'failed');
     assert.equal(statusExitCode(result.state), 22);
     assert.match(result.text, /attempts-exhausted/);
@@ -455,7 +461,7 @@ test('runStatus — terminal delivery surfaces authenticated runtime cause and m
     controlDir = seedRecoveryAuthority(dir, state);
     writeFileSync(join(dir, 'delivery-state.json'), JSON.stringify({ ...state, runtimeAttempts: [] }), 'utf8');
 
-    const result = runStatus(id);
+    const result = runStatus(id, undefined, NO_HOST);
 
     assert.equal(result.state, 'failed');
     assert.match(result.text, /requested model gpt-5\.6-luna/);
@@ -487,7 +493,7 @@ test('runStatus — the latest attempt remains primary when only an earlier atte
     writeFileSync(join(dir, 'run.pid'), String(DEAD_PID), 'utf8');
     controlDir = seedRecoveryAuthority(dir, state);
 
-    const result = runStatus(id);
+    const result = runStatus(id, undefined, NO_HOST);
 
     assert.match(result.text, /Runtime attempt 2 \(automatic-recovery\)/);
     assert.match(result.text, /exit 127/);
@@ -508,4 +514,107 @@ test('statusExitCode — the codes the slash-command poll loop branches on', () 
   assert.equal(statusExitCode('running'), 20);
   assert.equal(statusExitCode('interrupted'), 21);
   assert.equal(statusExitCode('failed'), 22);
+});
+
+test('runStatus — INV-HYG-04: the orphaned runtime session of a dead run is killed, recorded and shown', async () => {
+  const id = `test-status-reap-${process.pid}`;
+  const dir = seed(id);
+  try {
+    // The run dir rides in argv exactly as the runtime's own argv carries it.
+    const { child, pid } = await idleRuntime(dir, runtimeSpawnArgs('claude', 'm', dir));
+    writeFileSync(join(dir, 'run.pid'), String(DEAD_PID), 'utf8');
+    writeFileSync(join(dir, 'dispatch-plan.json'), '{}', 'utf8'); // a runtime is only ever spawned after the plan
+    writeFileSync(join(dir, 'progress.ndjson'), `${JSON.stringify({ ts: 1, phase: 'dispatch', detail: '6 reviewers' })}\n`, 'utf8');
+    const r = runStatus(id);
+    assert.ok(await gone(pid), `orphaned runtime ${pid} survived status`);
+    // The root of the tree is the child spawnCli returned: the cmd.exe in front of it on win32.
+    const line = new RegExp(`killed its orphaned runtime session \\(\\S+ pid ${child.pid}\\)`);
+    assert.match(readFileSync(join(dir, 'progress.ndjson'), 'utf8'), line);
+    assert.match(r.text, line, 'the poller was never shown what status did');
+    // The headline still says where the run got to — on this poll and on every later one.
+    assert.match(r.text, /^⏳ dispatch — 6 reviewers/);
+    assert.match(runStatus(id).text, /^⏳ dispatch — 6 reviewers/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** Deps that count process-table reads and kill nothing — for runs that must not be swept. */
+function watching(): ReapDeps & { scans: number } {
+  const deps = {
+    scans: 0,
+    table: () => {
+      deps.scans++;
+      return 'no table in this test';
+    },
+    killPid: () => 'no kill in this test',
+  };
+  return deps;
+}
+
+// Asserted on the table reads, not on a process staying alive: on POSIX a wrongly
+// killed child of this process stays a zombie until the event loop reaps it, and
+// `kill(pid, 0)` still succeeds on a zombie — a liveness check would pass anyway.
+test('runStatus — INV-HYG-04: a finished run, or one that never planned a dispatch, is not scanned', () => {
+  const id = `test-status-noreap-${process.pid}`;
+  const dir = seed(id);
+  try {
+    writeFileSync(join(dir, 'run.pid'), String(DEAD_PID), 'utf8');
+    const deps = watching();
+
+    // No plan: nothing was ever dispatched from this run.
+    runStatus(id, Date.now(), deps);
+    assert.equal(deps.scans, 0, 'a run with no dispatch plan had its process table scanned');
+
+    // A summary written after run.pid was claimed: the run finished, its sessions closed first.
+    writeFileSync(join(dir, 'dispatch-plan.json'), '{}', 'utf8');
+    writeFileSync(join(dir, 'pr-review-summary.md'), '# done\n', 'utf8');
+    runStatus(id, Date.now(), deps);
+    assert.equal(deps.scans, 0, 'a finished run had its process table scanned');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runStatus — INV-HYG-04: a summary older than run.pid does not spare a hard-killed resume', () => {
+  const id = `test-status-resumed-${process.pid}`;
+  const dir = seed(id);
+  try {
+    writeFileSync(join(dir, 'dispatch-plan.json'), '{}', 'utf8');
+    // The first attempt failed operationally and still wrote its summary...
+    writeFileSync(join(dir, 'pr-review-summary.md'), '# first attempt\n', 'utf8');
+    const earlier = new Date(Date.now() - 60_000);
+    utimesSync(join(dir, 'pr-review-summary.md'), earlier, earlier);
+    // ...then a --resume re-claimed run.pid and was killed too hard to clean up.
+    writeFileSync(join(dir, 'run.pid'), String(DEAD_PID), 'utf8');
+    const deps = watching();
+    runStatus(id, Date.now(), deps);
+    assert.equal(deps.scans, 1, 'the sessions of a hard-killed resume were never looked for');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runStatus — INV-HYG-04: a run id that escapes the runs root is never swept', () => {
+  const name = `test-status-escape-${process.pid}`;
+  const inside = seed(name);
+  const outside = join(dirname(RUNS_ROOT), name); // ~/.pr-review/<name>, beside runs/
+  mkdirSync(outside, { recursive: true });
+  try {
+    for (const dir of [inside, outside]) {
+      writeFileSync(join(dir, 'run.pid'), String(DEAD_PID), 'utf8');
+      writeFileSync(join(dir, 'dispatch-plan.json'), '{}', 'utf8');
+    }
+    // Control: the same run inside the root is swept.
+    const control = watching();
+    runStatus(name, Date.now(), control);
+    assert.equal(control.scans, 1);
+
+    const deps = watching();
+    runStatus(`../${name}`, Date.now(), deps);
+    assert.equal(deps.scans, 0, 'status swept a directory outside the runs root');
+  } finally {
+    rmSync(inside, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
 });

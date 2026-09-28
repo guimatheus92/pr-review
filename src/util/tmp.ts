@@ -1,8 +1,9 @@
 import { mkdtempSync, mkdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { PrRef } from '../types.js';
+import { realpathCanonical } from './realpath.js';
 
 /**
  * Flatten a PR path component (owner/repo) for filesystem use. GitLab nested
@@ -38,6 +39,25 @@ export function sanitizeForFilename(name: string): string {
 
 export const RUNS_ROOT = join(homedir(), '.pr-review', 'runs');
 
+/** Where `ensureRunDir` mints run dirs for `home` (the real home when omitted). */
+export function runsRootFor(home?: string): string {
+  return home ? join(home, '.pr-review', 'runs') : RUNS_ROOT;
+}
+
+/**
+ * True when `dir` sits strictly inside `root`, links resolved. A run dir is the
+ * kill predicate of the orphaned-runtime sweep, so a run id like `../x` must
+ * not point it at an arbitrary directory.
+ */
+export function insideRunsRoot(dir: string, root: string): boolean {
+  try {
+    const rel = relative(realpathCanonical(root), realpathCanonical(dir));
+    return rel !== '' && !isAbsolute(rel) && rel.split(sep)[0] !== '..';
+  } catch {
+    return false; // a missing path has nothing in it to judge
+  }
+}
+
 /** Recovery authority lives outside the runtime-writable run directory. */
 export function controlDirForRun(runDir: string, home = homedir()): string {
   const absolute = resolve(runDir);
@@ -59,7 +79,7 @@ export function ensureRunDir(ref?: Pick<PrRef, 'provider' | 'owner' | 'repo' | '
   const id = ref
     ? `${ref.provider}__${safeOwner(ref)}__${safeSegment(ref.repo)}__${ref.number}__${stamp}`
     : `adhoc__${stamp}`;
-  const outDir = join(home ? join(home, '.pr-review', 'runs') : RUNS_ROOT, id);
+  const outDir = join(runsRootFor(home), id);
   mkdirSync(outDir, { recursive: true });
   return outDir;
 }

@@ -700,3 +700,42 @@ than the noise.
 guards the assertion helpers themselves
 
 **Check:** human
+
+### INV-HYG-04 — No child process opens a window, and none outlives its run
+
+**Always:** Every child process the CLI starts is started with `windowsHide`,
+so no review ever puts a console window on the reviewer's desktop — and none
+with `detached`, which on win32 voids `windowsHide`, except `--detach`'s own
+launch of the review process. A runtime session is killed with everything it
+started — never just the shell in front of it: on win32 as the `taskkill /T`
+tree, since it runs behind `cmd.exe`; on POSIX by SIGKILL to the process and to
+every descendant the process table lists under it — on timeout, when the CLI
+exits or is interrupted (SIGINT, SIGTERM, SIGHUP), and when `status` or
+`--resume` finds its run's process dead. That last sweep acts only inside the
+runs root, only on a process whose argv carries the run dir together with a
+flag no human-typed command line has, and only after re-reading that process
+and `run.pid` just before the kill; `--resume` refuses to continue while one
+survives. A kill is reported only when the process is gone afterwards (a
+zombie is gone), and one that fails is reported with the process's image name,
+its pid and the reason — never read as a kill.
+
+**Why:** A detached run has no console, so on Windows every console child
+started without `windowsHide` gets a fresh console, and Windows 11 hands that
+console to Windows Terminal as a new empty window. Measured on 2026-09-24: ten
+windows per review, one every ~3 s during gather and selection, each blocking
+its synchronous `git`/`gh` call while the handoff ran — eight concurrent reviews
+froze the desktop. On win32 the runtime runs behind `cmd.exe` (`shell: true`),
+so `child.kill()` ended the shell and left the `claude`/`copilot` session
+running with nobody to read it; the same happened to every session whose run
+was killed from outside.
+
+**Enforced:** every `node:child_process` call site in `src/`;
+`src/util/spawn.ts` (`killTree`, `killOnExit`, `reapOrphanRuntime`,
+`reapThenClaimRunPid`); `src/commands/status.ts`, `src/commands/review.ts`
+(`--resume`); the timeout paths of `src/dispatch/single-session.ts`,
+`src/dispatch/codex.ts` and `src/plugins/companions.ts`
+
+**Verified:** `tests/windows-hide.test.ts`, `tests/spawn.test.ts`,
+`tests/status.test.ts`
+
+**Check:** tests-only

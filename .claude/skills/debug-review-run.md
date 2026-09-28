@@ -29,11 +29,24 @@ Every `pr-review review` writes artifacts to `~/.pr-review/runs/<provider>__<own
 | `companions.json` | Every installed plugin, the ones pr-review recognizes, planned vs completed dispatches, and any missing/duplicate reviewer names. Written even on an early exit, so "planned 7 / completed 0" is visible |
 | `capabilities.json` / `capability-<pass>.json` | MCP server inventory (repo / user / plugin) and, per installed-plugin pass, which servers were available, attempted, and actually used. All three are empty when the process-level denial holds; a non-empty value raises a degraded warning naming the fields and servers, recorded here too. To classify it, cross-check the named servers against `mcpServers` in this same file (in the inventory → the denial failed) and `dispatch-plan.json` (`runtime`, `disabledMcpServers`) |
 | `.mcp.json` | Trusted repository MCP definitions normalized for the isolated run (absent when the repo declares none, or when the PR changed them). **Provenance for the run**: claude ignores it (`--strict-mcp-config`, no `--mcp-config`); under copilot the same servers are denied by name via `--disable-mcp-server`, built from this inventory — so the file is not loaded as config, but the `disabledMcpServers` plumbing that mirrors it is load-bearing, not dead weight |
+| `run.pid` | The CLI process. A fresh run keeps it after finishing; `--resume` removes its own on exit. While it is alive the run is `running`. When it is dead, `status` and `--resume` may kill processes — see **Gotchas** below |
 | `error.txt` | Written for handled failures after run-directory setup, including failed prerequisites, incomplete delivery, and post-delivery operational failures. Command-level exceptions may leave it absent; stderr is authoritative then |
 | `posted.marker` | Written on every publish attempt, carrying `verified`; the guard that stops `--resume` re-posting |
 | `passes.json` | One row per known skill — `[{name, source, matchedBy}]` where `matchedBy` is `glob`, `dependency`, `tag`, `plugin`, `repo`, `forced`, `baseline`, `context`, `index`, or `skipped` — persisted at dispatch so `--resume` can still render the summary's Skills section |
 | `pr-review-findings.json` | Final findings after dedupe |
 | `pr-review-summary.md` | The rendered summary — a `## Skills` section (pass table + on-demand index count) and the findings |
+
+## Gotchas
+
+- **`pr-review status` is not read-only — it can kill processes.** It sweeps a run for the orphaned runtime session of a CLI killed too hard to run its exit handler when ALL of these hold:
+  1. `run.pid` names a dead process;
+  2. the run has a dispatch plan (`dispatch-plan.json` or `delivery-state.json`, in the run dir or its control dir);
+  3. no `pr-review-summary.md` is newer than `run.pid` — a summary that a `--resume` inherited from its first attempt does not count;
+  4. the run dir is inside `~/.pr-review/runs`.
+
+  The sweep kills every process whose argv carries this run dir together with a flag only pr-review's own runtime argv has: `--add-dir <dir>` with `--strict-mcp-config` (claude) or `--disable-builtin-mcps` (copilot), or codex's `-C <dir>` with `--skip-git-repo-check`. Your own `claude --add-dir <run dir>`, opened to read a run, has neither flag and is left alone. Each target, and `run.pid`, is re-read just before the kill. `--resume` runs the same sweep before it claims `run.pid`, and refuses to continue while a session survives.
+- **What the sweep did is in the `status` text and in `progress.ndjson`** under the `reap` phase, which the snapshot headline skips (it keeps showing where the run got to): `killed its orphaned runtime session (<image> pid N)`, `could NOT kill orphaned runtime <image> pid N (<reason>) — end it manually`, or `orphaned runtime sessions NOT checked — <reason>` (unreadable process table or `run.pid`).
+- **A kill that failed on a timeout is reported once, where it happened** — `[single-session]` or `[codex] timed out and could NOT kill …` on stderr, plus an `error` line in `progress.ndjson` with the pid (companion detection is given no run dir to write to, so its `[companions]` line is stderr only; a kill that fails while the CLI exits is `[pr-review] exiting — could NOT kill …` on stderr) — and `status` does not retry it once the run has finished.
 
 ## Common issues
 

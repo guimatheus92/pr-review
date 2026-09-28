@@ -1,4 +1,4 @@
-import { assertSafeArg, spawnCli } from '../util/spawn.js';
+import { assertSafeArg, killOnExit, killTree, spawnCli } from '../util/spawn.js';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import type { GatherOutput, ReviewerOutput, Severity, SkillDefinition } from '../types.js';
@@ -2276,6 +2276,9 @@ function spawnRuntime(args: {
       cwd: args.addDir,
       env: runtimeSpawnEnvironment(args.runtime),
     });
+    // INV-HYG-04: the session must not outlive this process. A kill too hard to
+    // run the exit handler is caught by `reapOrphanRuntime` on the next status/resume.
+    killOnExit(child);
 
     let stdout = '';
     let stderr = '';
@@ -2290,11 +2293,14 @@ function spawnRuntime(args: {
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        // best-effort
-      }
+      const why = killTree(child);
+      if (!why) return;
+      // The tree survived, so 'close' may never come: settle now, and say which process to end.
+      const msg = `[single-session] timed out and could NOT kill the runtime tree (pid ${child.pid}): ${why} — end it manually`;
+      process.stderr.write(`${msg}\n`);
+      appendProgress(args.addDir, 'error', msg);
+      clearInterval(heartbeat);
+      resolve({ stdout, stderr: `${stderr}\n${msg}`, exitCode: -1, timedOut });
     }, args.timeoutMs);
 
     // The orchestrator's own tool activity isn't observable from here (a plain

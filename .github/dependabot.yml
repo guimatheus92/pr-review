@@ -1,0 +1,57 @@
+# Version updates only.
+#
+# Dependabot *security* updates are a repository SETTING (Settings -> Advanced
+# Security), not a config option. They stay OUTSIDE every `groups:` block below
+# (`applies-to` defaults to `version-updates`): routine drift arrives as one
+# batched PR per ecosystem per week, a security fix arrives on its own,
+# immediately. `open-pull-requests-limit` does not apply to security updates.
+#
+# dist/cli.cjs is committed and CI's "Bundle freshness" step fails when it is
+# stale. esbuild inlines every production dependency, so any PR here that
+# moves one (or esbuild itself) goes red until it is rebuilt — and must:
+# merging it unbuilt ships the OLD code, security fixes included.
+#   gh pr checkout <n> && npm ci && npm run build && git commit -am "chore: rebuild bundle" && git push
+#
+# There are deliberately NO npm `ignore:` entries. An ignore on a package is
+# indistinguishable from an ignore on that package's next CVE.
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: sunday
+      time: '06:00'
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      prefix-development: chore
+      include: scope
+    groups:
+      # One PR for all routine drift, prod and dev together: one rebuild, one
+      # CI run. Majors are NOT grouped — each gets its own PR and review.
+      npm:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: sunday
+      time: '06:00'
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      # Actions majors are `v4` -> `v5` tag moves: routine and batchable.
+      github-actions:
+        patterns:
+          - '*'

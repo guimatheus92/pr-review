@@ -46,7 +46,7 @@ Every `pr-review review` writes artifacts to `~/.pr-review/runs/<provider>__<own
 
   The sweep kills every process whose argv carries this run dir together with a flag only pr-review's own runtime argv has: `--add-dir <dir>` with `--strict-mcp-config` (claude) or `--disable-builtin-mcps` (copilot), or codex's `-C <dir>` with `--skip-git-repo-check`. Your own `claude --add-dir <run dir>`, opened to read a run, has neither flag and is left alone. Each target, and `run.pid`, is re-read just before the kill. `--resume` runs the same sweep before it claims `run.pid`, and refuses to continue while a session survives.
 - **What the sweep did is in the `status` text and in `progress.ndjson`** under the `reap` phase, which the snapshot headline skips (it keeps showing where the run got to): `killed its orphaned runtime session (<image> pid N)`, `could NOT kill orphaned runtime <image> pid N (<reason>) — end it manually`, or `orphaned runtime sessions NOT checked — <reason>` (unreadable process table or `run.pid`).
-- **A kill that failed on a timeout is reported once, where it happened** — `[single-session]` or `[codex] timed out and could NOT kill …` on stderr, plus an `error` line in `progress.ndjson` with the pid — and `status` does not retry it once the run has finished.
+- **A kill that failed on a timeout is reported once, where it happened** — `[single-session]` or `[codex] timed out and could NOT kill …` on stderr, plus an `error` line in `progress.ndjson` with the pid (companion detection is given no run dir to write to, so its `[companions]` line is stderr only; a kill that fails while the CLI exits is `[pr-review] exiting — could NOT kill …` on stderr) — and `status` does not retry it once the run has finished.
 
 ## Common issues
 

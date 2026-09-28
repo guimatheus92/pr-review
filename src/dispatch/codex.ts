@@ -1,5 +1,6 @@
 import { exec } from 'node:child_process';
 import { killOnExit, killTree, spawnCli } from '../util/spawn.js';
+import { appendProgress } from '../util/progress.js';
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ReviewerOutput } from '../types.js';
@@ -237,6 +238,7 @@ export async function runCodexReviewer(opts: CodexReviewOptions): Promise<Review
       // The tree survived, so 'close' may never come: settle now, and say which process to end.
       const msg = `[codex] timed out and could NOT kill its process tree (pid ${child.pid}): ${why} — end it manually`;
       process.stderr.write(`${msg}\n`);
+      appendProgress(opts.outDir, 'error', msg);
       res({ exitCode: -1, timedOut, stderr: `${stderrCap.value()}\n${msg}`, stdout: stdoutCap.value() });
     }, opts.timeoutMs ?? CODEX_TIMEOUT_MS);
 

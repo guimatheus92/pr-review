@@ -1,5 +1,5 @@
 import { execFileSync, spawn, type ChildProcess, type ChildProcessByStdio, type StdioOptions } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, writeSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { appendProgress } from './progress.js';
 import { foldPath } from './realpath.js';
@@ -148,16 +148,29 @@ function subtree(pid: number, table: ProcessRow[]): number[] {
 }
 
 /**
- * Kill `pid` with everything it started. Returns null once `pid` is gone, or
- * why it is not — a refusal (access denied, a protected process) must never
- * read as a kill. win32: `taskkill /T` walks the tree itself. POSIX: SIGKILL to
- * the pid, then to each descendant the process table lists under it, which
- * would otherwise be re-parented to init and outlive it; a descendant is
- * killed, not re-checked. Blocks for at most ~12 s: taskkill's timeout, then
- * `waitGone`.
+ * POSIX: what to SIGKILL for `pid` — it and every descendant `table` lists
+ * under it. When the table could not be read, only `pid`, together with why
+ * its descendants were not reached: they would be re-parented to init and
+ * outlive it, so that kill must never be reported as complete.
+ */
+export function posixKillTargets(pid: number, table: ProcessRow[] | string): { targets: number[]; unreached: string | null } {
+  return typeof table === 'string'
+    ? { targets: [pid], unreached: `its descendants were NOT killed — the process table could not be read: ${table}` }
+    : { targets: subtree(pid, table), unreached: null };
+}
+
+/**
+ * Kill `pid` with everything it started. Returns null once `pid` is gone and
+ * every descendant was reached, or why not — a refusal (access denied, a
+ * protected process) or an unread process table must never read as a kill.
+ * win32: `taskkill /T` walks the tree itself. POSIX: SIGKILL to the targets
+ * `posixKillTargets` names; a descendant is killed, not re-checked. Blocks for
+ * at most ~12 s on win32 (taskkill's timeout, then `waitGone`); on POSIX the
+ * `ps` reads carry their own timeouts (30 s for the table, 5 s per zombie check).
  */
 function killPidTree(pid: number): string | null {
   let why = '';
+  let unreached: string | null = null;
   if (process.platform === 'win32') {
     try {
       execFileSync(join(SYSTEM32, 'taskkill.exe'), ['/PID', String(pid), '/T', '/F'], {
@@ -169,8 +182,9 @@ function killPidTree(pid: number): string | null {
       why = execFailure('taskkill', err);
     }
   } else {
-    const table = processTable();
-    for (const p of typeof table === 'string' ? [pid] : subtree(pid, table)) {
+    const plan = posixKillTargets(pid, processTable());
+    unreached = plan.unreached;
+    for (const p of plan.targets) {
       try {
         process.kill(p, 'SIGKILL');
       } catch (err) {
@@ -178,7 +192,8 @@ function killPidTree(pid: number): string | null {
       }
     }
   }
-  return waitGone(pid) ? null : why || 'still running 2 s after the kill';
+  if (!waitGone(pid)) return why || 'still running 2 s after the kill';
+  return unreached;
 }
 
 const liveChildren = new Set<ChildProcess>();
@@ -195,9 +210,32 @@ export function killTree(child: ChildProcess): string | null {
   // pid may already belong to someone else.
   if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return null;
   const why = killPidTree(child.pid);
-  // Killed is killed: the exit sweep must not hit a pid the OS may since have handed on.
-  if (!why) liveChildren.delete(child);
+  // Gone is gone — even when its descendants were not reached: the exit sweep
+  // must not hit a pid the OS may since have handed on.
+  if (!why || pidGone(child.pid)) liveChildren.delete(child);
   return why;
+}
+
+/**
+ * The `exit` hook's body: kill each child still running, and name every one
+ * that survived with its image, pid and the reason. On fd 2 synchronously —
+ * nothing asynchronous runs after `exit`, and a detached run's fd 2 is its log.
+ */
+export function exitSweep(
+  children: Iterable<ChildProcess>,
+  kill: (child: ChildProcess) => string | null = killTree,
+  write: (line: string) => void = (line) => {
+    try {
+      writeSync(2, line);
+    } catch {
+      // fd 2 closed: nowhere left to say it
+    }
+  },
+): void {
+  for (const child of [...children]) { // killTree removes from the set as it goes
+    const why = kill(child);
+    if (why) write(`[pr-review] exiting — could NOT kill ${imageName(child.spawnfile ?? '')} pid ${child.pid} and what it started: ${why} — end it manually\n`);
+  }
 }
 
 /**
@@ -211,7 +249,7 @@ export function killTree(child: ChildProcess): string | null {
 export function killOnExit(child: ChildProcess): void {
   if (!exitHooked) {
     exitHooked = true;
-    process.once('exit', () => liveChildren.forEach((c) => killTree(c)));
+    process.once('exit', () => exitSweep(liveChildren));
     for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]] as const) {
       process.once(signal, () => process.exit(code));
     }

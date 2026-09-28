@@ -7,11 +7,13 @@ import { basename, join, posix, win32 } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   describeReap,
+  exitSweep,
   killOnExit,
   killTree,
   namesRunDir,
   parseProcessTable,
   pidAlive,
+  posixKillTargets,
   reapOrphanRuntime,
   reapThenClaimRunPid,
   spawnCli,
@@ -442,4 +444,27 @@ test('INV-HYG-04 — describeReap reports what happened, never a kill that did n
   const mixed = describeReap({ killed: [{ name: 'node', pid: 7 }], survived: [{ name: 'codex', pid: 9, why: 'SIGKILL EPERM' }] })!;
   assert.match(mixed, /killed its orphaned runtime session \(node pid 7\); could NOT kill orphaned runtime codex pid 9 \(SIGKILL EPERM\)/);
   assert.match(describeReap({ scanError: 'could not read the process table: ps ENOENT' })!, /NOT checked — could not read the process table: ps ENOENT/);
+});
+
+test('INV-HYG-04 — POSIX: an unread process table kills the root only, and never reads as a complete kill', () => {
+  const table: ProcessRow[] = [
+    { pid: process.pid, ppid: 1, cmd: 'node test' },
+    { pid: 10, ppid: 1, cmd: 'claude' },
+    { pid: 11, ppid: 10, cmd: 'rg' },
+    { pid: 12, ppid: 11, cmd: 'rg worker' },
+    { pid: 13, ppid: 1, cmd: 'unrelated' },
+  ];
+  assert.deepEqual(posixKillTargets(10, table), { targets: [10, 11, 12], unreached: null });
+  const unread = posixKillTargets(10, 'ps ENOENT: spawn ps ENOENT');
+  assert.deepEqual(unread.targets, [10]);
+  assert.match(unread.unreached ?? '', /descendants were NOT killed.*ps ENOENT/);
+});
+
+test('INV-HYG-04 — the exit sweep names every child it could not kill', () => {
+  const child = (pid: number, spawnfile: string) => ({ pid, spawnfile }) as unknown as import('node:child_process').ChildProcess;
+  const lines: string[] = [];
+  const reasons = new Map([[21, null], [22, 'taskkill exit 1: ERROR: Access is denied.']]);
+  exitSweep([child(21, 'claude'), child(22, 'C:\\WINDOWS\\system32\\cmd.exe')], (c) => reasons.get(c.pid!) ?? null, (l) => lines.push(l));
+  assert.equal(lines.length, 1, lines.join(''));
+  assert.match(lines[0]!, /could NOT kill cmd\.exe pid 22 .*Access is denied.*end it manually/);
 });

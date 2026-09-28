@@ -2,15 +2,16 @@
 #
 # Dependabot *security* updates are a repository SETTING (Settings -> Advanced
 # Security), not a config option. They stay OUTSIDE every `groups:` block below
-# (`applies-to` defaults to `version-updates`): routine drift arrives as one
-# batched PR per ecosystem per week, a security fix arrives on its own,
-# immediately. `open-pull-requests-limit` does not apply to security updates.
+# (`applies-to` defaults to `version-updates`) and ignore `cooldown`: routine
+# drift arrives as one batched PR per ecosystem per week, a security fix
+# arrives on its own, immediately.
 #
 # dist/cli.cjs is committed and CI's "Bundle freshness" step fails when it is
 # stale. esbuild inlines every production dependency, so any PR here that
-# moves one (or esbuild itself) goes red until it is rebuilt — and must:
-# merging it unbuilt ships the OLD code, security fixes included.
-#   gh pr checkout <n> && npm ci && npm run build && git commit -am "chore: rebuild bundle" && git push
+# moves one (or esbuild itself) goes red until the bundle is rebuilt. That
+# failure is correct: merging it unbuilt ships the OLD dependency code,
+# security fixes included. To fix (--ignore-scripts, as CI installs):
+#   gh pr checkout <n> && npm ci --ignore-scripts && npm run build && git commit -am "chore: rebuild bundle" && git push
 #
 # There are deliberately NO npm `ignore:` entries. An ignore on a package is
 # indistinguishable from an ignore on that package's next CVE.
@@ -24,10 +25,12 @@ updates:
       day: sunday
       time: '06:00'
       timezone: Etc/UTC
-    open-pull-requests-limit: 5
+    # A hijacked maintainer account ships as a patch; a week lets the registry
+    # pull it before it reaches the bundle. Security updates skip this.
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: chore
-      prefix-development: chore
       include: scope
     groups:
       # One PR for all routine drift, prod and dev together: one rebuild, one
@@ -35,6 +38,10 @@ updates:
       npm:
         patterns:
           - '*'
+        # esbuild is 0.x, where a minor is a breaking change, and it is what
+        # writes dist/cli.cjs. It always gets its own PR.
+        exclude-patterns:
+          - esbuild
         update-types:
           - minor
           - patch
@@ -46,12 +53,15 @@ updates:
       day: sunday
       time: '06:00'
       timezone: Etc/UTC
-    open-pull-requests-limit: 5
     commit-message:
       prefix: ci
       include: scope
     groups:
-      # Actions majors are `v4` -> `v5` tag moves: routine and batchable.
+      # Majors ungrouped: acceptance.yml (upload-artifact) is workflow_dispatch
+      # only, so a PR's green CI never runs it — each major needs its own look.
       github-actions:
         patterns:
           - '*'
+        update-types:
+          - minor
+          - patch

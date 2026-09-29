@@ -139,7 +139,7 @@ jobs:
 
       - name: Upload run artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: acceptance-${{ matrix.provider }}-copilot
           path: ${{ runner.temp }}/acc
@@ -197,7 +197,7 @@ jobs:
         run: cat "$RUNNER_TEMP/acc/acceptance-report.md" >> "$GITHUB_STEP_SUMMARY" || true
       # The one artifact that says WHICH of the 501 rows carried a patch is
       # nofetch-gather.json, and a failing cell is exactly when it is needed.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: acceptance-nofetch

@@ -22,13 +22,19 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run build
       - run: npm run test
-      - name: Live mod — validate and test with the Claude Code CLI (offline; no credential)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          npm install -g @anthropic-ai/claude-code
-          claude --version
-          npm run validate:mod
-          npm run test:mod
       - name: Bundle freshness — dist/cli.cjs must match src/
         if: matrix.os == 'ubuntu-latest'
         run: git diff --exit-code dist/cli.cjs || (echo '::error::dist/cli.cjs is stale — run `npm run build` and commit the bundle' && exit 1)
+      # The mods API is marked early access, so the CLI is pinned to the version the kit tests
+      # were validated against and bumped on purpose; the step runs last so a CLI failure never
+      # hides the freshness check above.
+      - name: Live mod — validate and test with the Claude Code CLI (offline; no credential)
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 5
+        env:
+          DISABLE_AUTOUPDATER: '1'
+        run: |
+          npm install -g @anthropic-ai/claude-code@2.1.291
+          claude --version
+          npm run validate:mod
+          npm run test:mod

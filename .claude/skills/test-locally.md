@@ -132,7 +132,7 @@ The plugin layout loads in both hosts; under Claude Code the slash command finds
 
 ```bash
 npm run validate:mod                            # claude plugin validate — the module's hooks:/calls: lines (read-only calls only)
-npm run test:mod                                # claude plugin test mods/live — 13 kit tests, offline, ~1 s
+npm run test:mod                                # claude plugin test mods/live — 32 kit tests, offline, ~6 s
 claude --plugin-dir . --debug-file mod.log      # a terminal session that hot-reloads mods/live on save
 ```
 

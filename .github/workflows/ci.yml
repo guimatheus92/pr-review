@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   build-test:
     strategy:
@@ -25,16 +28,30 @@ jobs:
       - name: Bundle freshness — dist/cli.cjs must match src/
         if: matrix.os == 'ubuntu-latest'
         run: git diff --exit-code dist/cli.cjs || (echo '::error::dist/cli.cjs is stale — run `npm run build` and commit the bundle' && exit 1)
-      # The mods API is marked early access, so the CLI is pinned to the version the kit tests
-      # were validated against and bumped on purpose; the step runs last so a CLI failure never
-      # hides the freshness check above.
-      - name: Live mod — validate and test with the Claude Code CLI (offline; no credential)
-        if: matrix.os == 'ubuntu-latest'
-        timeout-minutes: 5
-        env:
-          DISABLE_AUTOUPDATER: '1'
-        run: |
-          npm install -g @anthropic-ai/claude-code@2.1.291
-          claude --version
-          npm run validate:mod
-          npm run test:mod
+
+  # The Claude Code mod (mods/live) is checked by the Claude Code CLI itself: `claude plugin
+  # validate` reads the module's events and $ calls from its source, `claude plugin test` runs
+  # the kit tests under mods/live. Offline, no credential, no node_modules (the tests import
+  # only their fixture). The mods API is early access, so the CLI is pinned to the version the
+  # kit tests were validated against and bumped on purpose. Its own job, so a CLI install
+  # failure never hides the build-test matrix, and the global install keeps its lifecycle
+  # scripts (the npm package fetches the CLI binary in postinstall).
+  live-mod:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DISABLE_AUTOUPDATER: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Install the pinned Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code@2.1.291
+      - run: claude --version
+      - name: Validate the plugin manifest and the hooks module
+        run: npm run validate:mod
+      - name: Run the mod test kit
+        run: npm run test:mod

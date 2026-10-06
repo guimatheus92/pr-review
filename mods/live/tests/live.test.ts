@@ -287,7 +287,7 @@ test('a launch that found no checkout prints the bare banner and attaches too', 
   await band.unmount();
 });
 
-test('the band shows the phase, the delivered counts, the counts by source and the project rules in context', async ($, on) => {
+test('the band is a box: title and status, a bar with one cell per reviewer, its legend, the counts and the sources', async ($, on) => {
   const clock = mock.clock(on, { now: CUTOFF_MS });
   stubSession(on);
   stubRunDir(on, RUNNING);
@@ -295,14 +295,52 @@ test('the band shows the phase, the delivered counts, the counts by source and t
 
   for (const surface of SURFACES) {
     const band = await $.ui.mount({ ...BAND, surface });
+    const box = await band.find({ key: 'pr-review-band' });
+    expect(box?.props.borderStyle).toBe('round');
+    expect(await band.find({ type: 'Text', text: '◆ ' })).toBeDefined();
+    expect(await band.find({ type: 'Text', text: `pr-review · ${PR_LABEL}` })).toBeDefined();
     expect(await band.find({ type: 'Text', text: `${mmss(CUTOFF_MS + 2000 - RUN_STARTED_MS)} · running — orchestrator 360s` })).toBeDefined();
+    // 16 reviewers in 96 inner columns: 4 cells each; 7 delivered (cyan █), 9 running (yellow ▓), nothing valid yet.
+    const delivered = await band.find({ type: 'Text', text: /^(████)+$/ });
+    expect(delivered?.props.color).toBe('cyan');
+    const running = await band.find({ type: 'Text', text: /^(▓▓▓▓)+$/ });
+    expect(running?.props.color).toBe('yellow');
+    expect(await band.find({ type: 'Text', text: /░/ })).toBeUndefined();
+    expect(await band.find({ type: 'Text', text: '7/16 delivered' })).toBeDefined();
+    expect(await band.find({ type: 'Text', text: 'delivered 7' })).toBeDefined();
+    expect(await band.find({ type: 'Text', text: 'running 9' })).toBeDefined();
+    expect(await band.find({ type: 'Text', text: /^pending \d+$/ })).toBeUndefined();
     expect(await band.find({ type: 'Text', text: 'passes 7/10 delivered · companions 0/6 delivered · codex off · verifier pending' })).toBeDefined();
-    expect(await band.find({ type: 'Text', text: /^packs 10 · repo rules 0 · plugins 0 · companions 6 · context: 41 project rules in every pass · 3 on-demand/ })).toBeDefined();
+    // Zero counts are left out: no `repo rules 0`, no `plugins 0`.
+    expect(await band.find({ type: 'Text', text: /^packs 10 · companions 6 · 41 project rules in every pass · 3 on-demand/ })).toBeDefined();
     await band.unmount();
   }
 });
 
-test('the pane lists every reviewer with its state, its time and where it came from', async ($, on) => {
+test('a narrow band shortens the PR label, and a short one drops the legend and the sources', async ($, on) => {
+  const clock = mock.clock(on, { now: CUTOFF_MS });
+  stubSession(on);
+  stubRunDir(on, RUNNING);
+  await attachViaLaunch($, clock);
+
+  const medium = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, bodyColumns: 70 } });
+  expect(await medium.find({ type: 'Text', text: 'pr-review · backend #798' })).toBeDefined();
+  expect(await medium.find({ type: 'Text', text: /acme/ })).toBeUndefined();
+  await medium.unmount();
+
+  const narrow = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, bodyColumns: 50 } });
+  expect(await narrow.find({ type: 'Text', text: 'pr-review · #798' })).toBeDefined();
+  await narrow.unmount();
+
+  const short = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, maxRows: 4 } });
+  expect(await short.find({ type: 'Text', text: /running — orchestrator 360s/ })).toBeDefined();
+  expect(await short.find({ type: 'Text', text: '7/16 delivered' })).toBeDefined();
+  expect(await short.find({ type: 'Text', text: 'delivered 7' })).toBeUndefined();
+  expect(await short.find({ type: 'Text', text: /^packs 10/ })).toBeUndefined();
+  await short.unmount();
+});
+
+test('the pane groups the reviewers under their source, one row each: state, time, short name, how it matched', async ($, on) => {
   const clock = mock.clock(on, { now: CUTOFF_MS });
   stubSession(on);
   stubRunDir(on, RUNNING);
@@ -310,11 +348,20 @@ test('the pane lists every reviewer with its state, its time and where it came f
 
   for (const surface of SURFACES) {
     const pane = await $.ui.mount({ ...PANE, surface });
-    expect(await pane.find({ type: 'Text', text: /owasp\/logging/ })).toBeDefined();
-    expect(await pane.find({ type: 'Text', text: 'pack owasp · baseline' })).toBeDefined();
-    expect(await pane.find({ type: 'Text', text: 'pack awesome-copilot · glob' })).toBeDefined();
-    expect(await pane.find({ type: 'Text', text: /pr-review-toolkit\/code-reviewer/ })).toBeDefined();
+    // Two header lines, then the bar.
+    expect(await pane.find({ type: 'Text', text: PR_LABEL })).toBeDefined();
+    expect(await pane.find({ type: 'Text', text: `${mmss(CUTOFF_MS + 2000 - RUN_STARTED_MS)} · running — orchestrator 360s` })).toBeDefined();
+    expect(await pane.find({ type: 'Text', text: '7/16 delivered' })).toBeDefined();
+    // Group labels carry the source; rows carry the short name and the match kind.
+    expect(await pane.find({ type: 'Text', text: 'pack awesome-copilot' })).toBeDefined();
+    expect(await pane.find({ type: 'Text', text: 'pack owasp' })).toBeDefined();
     expect(await pane.find({ type: 'Text', text: 'plugin pr-review-toolkit' })).toBeDefined();
+    expect(await pane.find({ type: 'Text', text: /^logging$/ })).toBeDefined();
+    expect(await pane.find({ type: 'Text', text: /^nestjs$/ })).toBeDefined();
+    expect(await pane.find({ type: 'Text', text: /^code-reviewer$/ })).toBeDefined();
+    expect(await pane.find({ type: 'Text', text: /^baseline$/ })).toBeDefined();
+    expect(await pane.find({ type: 'Text', text: /^glob$/ })).toBeDefined();
+    expect(await pane.find({ type: 'Text', text: /owasp\/logging/ })).toBeUndefined();
     expect(await pane.find({ type: 'Text', text: /^◐ +\d+:\d\d$/ })).toBeDefined();
     expect(await pane.find({ type: 'Text', text: /^● +\d+:\d\d$/ })).toBeDefined();
     expect(await pane.find({ type: 'Text', text: /^context in every pass \(41\): rule-01, rule-02, rule-03, … \+38$/ })).toBeDefined();
@@ -340,7 +387,9 @@ test('a repo rule running as a pass and an installed-plugin pass are labelled an
   await band.unmount();
   const pane = await $.ui.mount({ ...PANE, surface: 'terminal' });
   expect(await pane.find({ type: 'Text', text: 'repo rule' })).toBeDefined();
+  expect(await pane.find({ type: 'Text', text: /^team-rules$/ })).toBeDefined();
   expect(await pane.find({ type: 'Text', text: 'plugin validate' })).toBeDefined();
+  expect(await pane.find({ type: 'Text', text: /^validate$/ })).toBeDefined();
   await pane.unmount();
 });
 
@@ -525,6 +574,11 @@ test('when the run finishes while attached, the band freezes on the outcome and 
   band = await $.ui.mount({ ...BAND, surface: 'terminal' });
   expect(await band.find({ type: 'Text', text: `${mmss(doneTs - RUN_STARTED_MS)} · done — 33 posted, 33 findings` })).toBeDefined();
   expect(await band.find({ type: 'Text', text: /passes 10\/10 ✓ · companions 6\/6 ✓/ })).toBeDefined();
+  // The bar is one green run of 16 × 4 cells, the legend one entry.
+  const bar = await band.find({ type: 'Text', text: /^█{64}$/ });
+  expect(bar?.props.color).toBe('green');
+  expect(await band.find({ type: 'Text', text: 'done 16' })).toBeDefined();
+  expect(await band.find({ type: 'Text', text: '16/16 ✓' })).toBeDefined();
   await band.unmount();
 
   // No more reads and no more redraws: the timer is gone, not just idle.
@@ -719,7 +773,8 @@ test('where nothing draws (the VS Code chat panel), /pr-review-live answers in t
   const text = (answer as { text?: string }).text ?? '';
   expect(text).toMatch(new RegExp(PR_LABEL.replace('/', '\\/')));
   expect(text).toMatch(/passes 7\/10 delivered/);
-  expect(text).toMatch(/owasp\/logging\s+pack owasp · baseline/);
+  expect(text).toMatch(/7\/16 delivered/);
+  expect(text).toMatch(/\n\s+pack owasp\n[\s\S]*?\d+:\d\d\s+logging\s+baseline/);
   expect(opened).toEqual([]);
 });
 

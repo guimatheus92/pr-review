@@ -53,6 +53,17 @@ const GLYPH = {
   retry: { glyph: '↻', color: 'yellow', dim: false },
   failed: { glyph: '✗', color: 'red', dim: false },
 };
+/** The bar above the prompt: one stretch of cells per reviewer, coloured by state; the legend uses the same colours. */
+const BAR = {
+  done: { cell: '█', color: 'green', dim: false },
+  delivered: { cell: '█', color: 'cyan', dim: false },
+  running: { cell: '▓', color: 'yellow', dim: false },
+  retry: { cell: '▓', color: 'magenta', dim: false },
+  failed: { cell: '█', color: 'red', dim: false },
+  pending: { cell: '░', color: undefined, dim: true },
+};
+const STATE_ORDER = ['done', 'delivered', 'running', 'retry', 'failed', 'pending'];
+const BAND_ROWS = 7; // border (2) + title, bar, legend, counts, sources: below this the band keeps title, bar and counts only
 
 let interactive = false;
 let surface = null;
@@ -130,7 +141,7 @@ export function register(on) {
     const theirs = await next(e);
     let mine;
     try {
-      mine = band(Box, Text, r, e.props.bodyColumns || 80);
+      mine = band(Box, Text, r, e.props.bodyColumns || 80, e.props.maxRows || 10);
     } catch (err) {
       debug($, 'band: ' + message(err));
       mine = Text({ dimColor: true, children: ['pr-review live: could not draw ' + clean(r.id) + ' — /pr-review-live off'] });
@@ -578,11 +589,18 @@ function lastEvent(r) {
   return null;
 }
 
-function prLabel(r) {
+/** `owner/repo #n` from the plan (or the run id); a narrow band gets `repo #n`, a narrower one `#n`. */
+function prLabel(r, columns) {
   const pr = r.plan && r.plan.pr;
-  if (pr && pr.owner && pr.repo) return clean(pr.owner + '/' + pr.repo + ' #' + pr.number);
   const parts = r.id.split('__');
-  return clean(parts.length >= 5 ? parts[1] + '/' + parts[2] + ' #' + parts[3] : r.id);
+  const fromId = parts.length >= 5;
+  const owner = pr && pr.owner ? pr.owner : fromId ? parts[1] : '';
+  const repo = pr && pr.repo ? pr.repo : fromId ? parts[2] : '';
+  const number = pr && pr.number != null ? pr.number : fromId ? parts[3] : '';
+  if (!repo) return clean(r.id);
+  if (columns === undefined || columns >= 96) return clean(owner + '/' + repo + ' #' + number);
+  if (columns >= 64) return clean(repo + ' #' + number);
+  return clean('#' + number);
 }
 
 /** Since the run started — or since the newest `resume` event, when the run was resumed — until it settled. */
@@ -607,16 +625,27 @@ function fmt(ms) {
   return h > 0 ? h + ':' + String(m).padStart(2, '0') + ':' + ss : m + ':' + ss;
 }
 
-/** Where a reviewer came from, in the words the band counts by (`matchedBy` is src/dispatch/pass-select.ts's). */
-function sourceLabel(reviewer) {
+/**
+ * Where a reviewer came from: the group the pane lists it under, and the match kind shown
+ * beside a pack row (`matchedBy` is src/dispatch/pass-select.ts's; a plugin, companion or
+ * repo rule says it all in the group).
+ */
+function sourceOf(reviewer) {
   const name = clean(reviewer.name);
   const source = clean(reviewer.source);
-  if (reviewer.kind === 'companion-agent') return 'plugin ' + (source || 'companion');
-  if (reviewer.matchedBy === 'plugin') return 'plugin ' + name.split('/')[0];
+  if (reviewer.kind === 'companion-agent') return { group: 'plugin ' + (source || 'companion'), tag: '' };
+  if (reviewer.matchedBy === 'plugin') return { group: 'plugin ' + name.split('/')[0], tag: '' };
   const pack = PACK_RE.exec(source);
-  if (pack) return 'pack ' + pack[1] + (reviewer.matchedBy ? ' · ' + clean(reviewer.matchedBy) : '');
-  if (reviewer.matchedBy === 'forced') return 'forced skill';
-  return 'repo rule';
+  if (pack) return { group: 'pack ' + pack[1], tag: clean(reviewer.matchedBy ?? '') };
+  if (reviewer.matchedBy === 'forced') return { group: 'forced skill', tag: '' };
+  return { group: 'repo rule', tag: '' };
+}
+
+/** `<pack>/<skill>` and `<plugin>/<agent>` lose their prefix inside their group; a repo rule keeps its plain name. */
+function shortName(name, group) {
+  const shown = clean(name).replace(/^companion:/, '');
+  const slash = shown.indexOf('/');
+  return slash > 0 && (group.startsWith('pack ') || group.startsWith('plugin ')) ? shown.slice(slash + 1) : shown;
 }
 
 function has(list, name) {
@@ -658,15 +687,50 @@ function reviewerRows(r) {
     if (state === 'done' || state === 'delivered') endMs = seenTs ?? (batch ? Date.parse(batch.endedAt) : r.nowMs);
     else if (state === 'failed' || state === 'retry') endMs = batch ? Date.parse(batch.endedAt) : r.nowMs;
     const elapsed = state !== 'pending' && Number.isFinite(startMs) && Number.isFinite(endMs) ? fmt(endMs - startMs) : '';
+    const { group, tag } = sourceOf(reviewer);
     return {
       name,
-      shown: clean(name).replace(/^companion:/, ''),
+      short: shortName(name, group),
       kind: reviewer.kind === 'companion-agent' ? 'companion' : 'pass',
       state,
-      source: sourceLabel(reviewer),
+      group,
+      tag,
+      source: group + (tag ? ' · ' + tag : ''),
       elapsed,
     };
   });
+}
+
+/** The rows under their source, in order of first appearance. */
+function groupRows(rows) {
+  const groups = [];
+  for (const row of rows) {
+    const last = groups.find((g) => g.label === row.group);
+    if (last) last.rows.push(row);
+    else groups.push({ label: row.group, rows: [row] });
+  }
+  return groups;
+}
+
+/** One cell run per stretch of same-state reviewers, in plan order, `cells` wide per reviewer. */
+function barRuns(rows, cells) {
+  const runs = [];
+  for (const row of rows) {
+    const last = runs[runs.length - 1];
+    if (last && last.state === row.state) last.count += 1;
+    else runs.push({ state: row.state, count: 1 });
+  }
+  return runs.map((run) => ({ ...BAR[run.state], text: BAR[run.state].cell.repeat(run.count * cells) }));
+}
+
+/** Cells per reviewer so the bar and its count fit the room: 1 to 4. */
+function barCells(rowCount, inner) {
+  return Math.max(1, Math.min(4, Math.floor((inner - 20) / Math.max(1, rowCount))));
+}
+
+/** The states present, with their counts, in a fixed order. */
+function legend(rows) {
+  return STATE_ORDER.map((state) => ({ state, ...BAR[state], count: rows.filter((row) => row.state === state).length })).filter((item) => item.count > 0);
 }
 
 function tally(rows) {
@@ -757,55 +821,125 @@ function countsLine(r, c) {
   return progressLine('passes', c.passes, settled) + ' · ' + progressLine('companions', c.companions, settled) + ' · ' + codexLabel(r) + ' · ' + verifierLabel(r);
 }
 
+/** Where the roster came from; a zero is left out, the project rules in context are always said. */
 function sourcesLine(c) {
-  return 'packs ' + c.packs + ' · repo rules ' + c.repoRules + ' · plugins ' + c.plugins + ' · companions ' + c.companions.total +
-    ' · context: ' + c.context.length + ' project rules in every pass · ' + c.onDemand + ' on-demand';
+  const parts = [];
+  if (c.packs > 0) parts.push('packs ' + c.packs);
+  if (c.repoRules > 0) parts.push('repo rules ' + c.repoRules);
+  if (c.plugins > 0) parts.push('plugins ' + c.plugins);
+  if (c.companions.total > 0) parts.push('companions ' + c.companions.total);
+  parts.push(c.context.length + ' project rules in every pass');
+  if (c.onDemand > 0) parts.push(c.onDemand + ' on-demand');
+  return parts.join(' · ');
+}
+
+/** `7/16 delivered` while the run is live, `16/16 ✓` once it settled. */
+function totalLabel(r, c) {
+  return isLive(r) ? c.delivered + '/' + c.planned + ' delivered' : c.valid + '/' + c.planned + ' ✓';
 }
 
 // Drawing
 
-function band(Box, Text, r, columns) {
-  const h = headline(r);
-  const c = counts(r, reviewerRows(r));
-  const line = (children) => Text({ wrap: 'truncate-end', children });
+/** The status: the state glyph in its colour, then the headline text, truncated to the room. */
+function statusRow(Box, Text, h) {
   return Box({
-    flexDirection: 'column',
-    paddingX: 1,
-    width: columns,
+    flexDirection: 'row',
+    flexShrink: 1,
     children: [
-      Box({
-        flexDirection: 'row',
-        children: [
-          Text({ bold: true, children: ['pr-review · ' + prLabel(r) + ' · '] }),
-          Text({ color: h.glyph.color, dimColor: h.glyph.dim, children: [h.glyph.glyph + ' '] }),
-          line([h.text]),
-        ],
-      }),
-      line([countsLine(r, c)]),
-      Text({ dimColor: true, wrap: 'truncate-end', children: [sourcesLine(c) + ' · /pr-review-live'] }),
+      Text({ color: h.glyph.color, dimColor: h.glyph.dim, children: [h.glyph.glyph + ' '] }),
+      Text({ wrap: 'truncate-end', children: [h.text] }),
     ],
   });
 }
 
+/** The bar — one coloured run per stretch of same-state reviewers — and the delivered count beside it. */
+function barRow(Box, Text, r, rows, c, inner) {
+  const runs = barRuns(rows, barCells(rows.length, inner));
+  return Box({
+    flexDirection: 'row',
+    columnGap: 2,
+    children: [
+      Box({ flexDirection: 'row', flexShrink: 0, children: runs.map((run) => Text({ color: run.color, dimColor: run.dim, children: [run.text] })) }),
+      Text({ dimColor: true, wrap: 'truncate-end', children: [totalLabel(r, c)] }),
+    ],
+  });
+}
+
+/** `■ delivered 7   ■ running 9`: one square per state present, flowing onto a second row when narrow. */
+function legendRow(Box, Text, rows) {
+  return Box({
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    columnGap: 3,
+    children: legend(rows).map((item) =>
+      Box({
+        flexDirection: 'row',
+        flexShrink: 0,
+        children: [Text({ color: item.color, dimColor: item.dim, children: ['■ '] }), Text({ children: [item.state + ' ' + item.count] })],
+      }),
+    ),
+  });
+}
+
+/**
+ * The band above the prompt: a rounded box with the title and the status on one row, the
+ * bar, its legend, the counts and the sources. A band with fewer than BAND_ROWS rows of room
+ * keeps the title, the bar and the counts; a narrow one shortens the PR label.
+ */
+function band(Box, Text, r, columns, maxRows) {
+  const h = headline(r);
+  const rows = reviewerRows(r);
+  const c = counts(r, rows);
+  const inner = Math.max(20, columns - 4);
+  const compact = maxRows < BAND_ROWS;
+  const line = (children, props) => Text({ wrap: 'truncate-end', ...props, children });
+  const children = [
+    Box({
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      columnGap: 2,
+      children: [
+        Box({
+          flexDirection: 'row',
+          flexShrink: 0,
+          children: [Text({ color: h.glyph.color, dimColor: h.glyph.dim, children: ['◆ '] }), Text({ bold: true, children: ['pr-review · ' + prLabel(r, columns)] })],
+        }),
+        statusRow(Box, Text, h),
+      ],
+    }),
+  ];
+  if (rows.length > 0) children.push(barRow(Box, Text, r, rows, c, inner));
+  if (!compact && rows.length > 0) children.push(legendRow(Box, Text, rows));
+  children.push(line([countsLine(r, c)]));
+  if (!compact) children.push(line([sourcesLine(c) + ' · /pr-review-live'], { dimColor: true }));
+  return Box({ key: 'pr-review-band', flexDirection: 'column', borderStyle: 'round', borderDimColor: true, paddingX: 1, width: columns, children });
+}
+
+/**
+ * The pane: two header lines and the bar, then the reviewers grouped under their source —
+ * one row each with the state glyph, the time, the short name and how it matched — the
+ * siblings, and the project rules in context.
+ */
 function pane(Box, Text, r, columns) {
   const h = headline(r);
   const rows = reviewerRows(r);
   const c = counts(r, rows);
   const settled = !isLive(r);
-  const nameWidth = Math.max(12, Math.min(44, columns - 36));
   const row = (x) => {
     const g = GLYPH[x.state] || GLYPH.pending;
     return Box({
       flexDirection: 'row',
-      columnGap: 1,
+      paddingLeft: 2,
+      columnGap: 2,
       children: [
-        Text({ color: g.color, dimColor: g.dim, children: [g.glyph + ' ' + x.elapsed.padStart(5)] }),
-        Text({ wrap: 'truncate-end', children: [x.shown.length > nameWidth ? x.shown.slice(0, nameWidth - 1) + '…' : x.shown.padEnd(nameWidth)] }),
-        Text({ dimColor: true, wrap: 'truncate-end', children: [x.source] }),
+        Box({ width: 7, flexShrink: 0, children: [Text({ color: g.color, dimColor: g.dim, children: [g.glyph + ' ' + x.elapsed.padStart(5)] })] }),
+        Box({ flexGrow: 1, flexShrink: 1, children: [Text({ wrap: 'truncate-end', children: [x.short] })] }),
+        ...(x.tag ? [Box({ flexShrink: 0, children: [Text({ dimColor: true, children: [x.tag] })] })] : []),
       ],
     });
   };
   const section = (title) => Text({ bold: true, children: [title] });
+  const grouped = (list) => groupRows(list).flatMap((g) => [Text({ dimColor: true, children: ['  ' + g.label] }), ...g.rows.map(row)]);
   const passes = rows.filter((x) => x.kind === 'pass');
   const companions = rows.filter((x) => x.kind === 'companion');
   const siblings = [];
@@ -816,19 +950,14 @@ function pane(Box, Text, r, columns) {
   return Box({
     flexDirection: 'column',
     children: [
-      Box({
-        flexDirection: 'row',
-        children: [
-          Text({ bold: true, children: [prLabel(r) + ' · '] }),
-          Text({ color: h.glyph.color, dimColor: h.glyph.dim, children: [h.glyph.glyph + ' '] }),
-          Text({ wrap: 'truncate-end', children: [h.text] }),
-        ],
-      }),
+      Text({ bold: true, wrap: 'truncate-end', children: [prLabel(r)] }),
+      statusRow(Box, Text, h),
+      ...(rows.length > 0 ? [barRow(Box, Text, r, rows, c, Math.max(30, columns))] : []),
       Text({ children: [' '] }),
       section(progressLine('passes', c.passes, settled)),
-      ...passes.map(row),
+      ...grouped(passes),
       section(progressLine('companions', c.companions, settled)),
-      ...(companions.length > 0 ? companions.map(row) : [Text({ dimColor: true, children: ['  none installed for this runtime'] })]),
+      ...(companions.length > 0 ? grouped(companions) : [Text({ dimColor: true, children: ['  none installed for this runtime'] })]),
       ...(siblings.length > 0 ? [section('siblings'), ...siblings] : []),
       Text({ children: [' '] }),
       Text({ children: ['context in every pass (' + c.context.length + '): ' + contextText] }),
@@ -844,7 +973,18 @@ function renderText(r) {
   const h = headline(r);
   const rows = reviewerRows(r);
   const c = counts(r, rows);
-  const lines = ['pr-review · ' + prLabel(r) + ' · ' + h.glyph.glyph + ' ' + h.text, countsLine(r, c), sourcesLine(c), ''];
-  for (const x of rows) lines.push((GLYPH[x.state] || GLYPH.pending).glyph + ' ' + x.elapsed.padStart(5) + '  ' + x.shown + '  ' + x.source);
+  const settled = !isLive(r);
+  const lines = ['pr-review · ' + prLabel(r) + ' · ' + h.glyph.glyph + ' ' + h.text];
+  if (rows.length > 0) lines.push(barRuns(rows, barCells(rows.length, 80)).map((run) => run.text).join('') + '  ' + totalLabel(r, c));
+  lines.push(countsLine(r, c), sourcesLine(c), '');
+  const listed = (title, list) => {
+    lines.push(title);
+    for (const g of groupRows(list)) {
+      lines.push('  ' + g.label);
+      for (const x of g.rows) lines.push('  ' + (GLYPH[x.state] || GLYPH.pending).glyph + ' ' + x.elapsed.padStart(5) + '  ' + x.short + (x.tag ? '  ' + x.tag : ''));
+    }
+  };
+  listed(progressLine('passes', c.passes, settled), rows.filter((x) => x.kind === 'pass'));
+  listed(progressLine('companions', c.companions, settled), rows.filter((x) => x.kind === 'companion'));
   return lines.join('\n');
 }

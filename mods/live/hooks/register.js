@@ -72,21 +72,40 @@ export function register(on) {
 
   // The slash command (and the personal alias) launch `node "$CLI" review <url> --detach`,
   // whose output names the run; `status <id>` polls and `--resume <id>` name it up front.
+  // An observer, never a gate: every command goes through unchanged, and a failure in the
+  // bookkeeping around it must neither block the command nor run it twice.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     if (!interactive) return next(e);
     const cmd = String(e.command ?? '');
-    const status = /(?:cli\.cjs"?|\bpr-review)\s+status\s+(\S+)/.exec(cmd);
-    if (status && !run) await attach($, status[1], null);
+    try {
+      const status = /(?:cli\.cjs"?|\bpr-review)\s+status\s+(\S+)/.exec(cmd);
+      if (status && !run) await attach($, status[1], null);
+    } catch {
+      // The poll still runs; the band simply does not appear.
+    }
     if (!/(?:cli\.cjs"?|\bpr-review)\s+review\b/.test(cmd)) return next(e);
-    const resume = /--resume\s+(\S+)/.exec(cmd);
-    const runDir = /--run-dir\s+"?([^"\s]+)"?/.exec(cmd);
-    if (resume) await attach($, resume[1], runDir ? runDir[1] : null);
+    try {
+      const resume = /--resume\s+(\S+)/.exec(cmd);
+      const runDir = /--run-dir\s+"?([^"\s]+)"?/.exec(cmd);
+      if (resume) await attach($, resume[1], runDir ? runDir[1] : null);
+    } catch {
+      // Same: the resume still runs.
+    }
     const result = await next(e);
-    const out = String((result && result.result && result.result.stdout) || (result && result.text) || '');
-    const id = /run-id:\s*(\S+)/.exec(out);
-    const dir = /^[ \t]*dir:[ \t]*(.+?)[ \t]*$/m.exec(out);
-    if (id) await attach($, id[1], dir ? dir[1] : null);
+    try {
+      const out = String((result && result.result && result.result.stdout) || (result && result.text) || '');
+      const id = /run-id:\s*(\S+)/.exec(out);
+      const dir = /^[ \t]*dir:[ \t]*(.+?)[ \t]*$/m.exec(out);
+      if (id) await attach($, id[1], dir ? dir[1] : null);
+    } catch {
+      // The result below is the command's; the band is a bonus.
+    }
     return result;
+  }).catch(async ($, e, next) => {
+    // Fail open: a hook that broke before calling next lets the command run as usual; one
+    // that broke after it keeps the result Claude Code already holds and runs nothing again.
+    if (next.called) return undefined;
+    return next(e);
   });
 
   on('command.run', { command: 'pr-review-live' }, async ($, e) => {

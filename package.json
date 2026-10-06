@@ -15,6 +15,8 @@
     "acceptance": "node scripts/acceptance.mjs",
     "acceptance:seed": "node scripts/acceptance-seed.mjs",
     "test": "node scripts/test.mjs",
+    "test:mod": "claude plugin test mods/live",
+    "validate:mod": "claude plugin validate .claude-plugin/plugin.json",
     "clean": "rimraf dist",
     "prepare": "npm run build"
   },

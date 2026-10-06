@@ -8,7 +8,7 @@
 // nothing shows, and /pr-review-live answers in text; in `claude -p` it is inert):
 //   AbovePrompt — three lines: PR + phase + timer; delivered counts; counts by source.
 //   Pane        — one row per reviewer (state, time, source), the project rules in context.
-//   Spinner     — ` · pr-review m:ss · delivered/planned…` while the run is alive.
+//   Spinner     — ` · pr-review m:ss · delivered/planned…` while the run is live.
 //   /pr-review-live [run-id | off] — attach (newest run by default) or detach.
 //
 // How a run gets attached — always a validated id that exists under the runs root:
@@ -22,6 +22,11 @@
 //   dispatch-plan.json       the roster: reviewers[] {name, kind, source, matchedBy, maxAttempts}
 //   delivery-state.json      valid/invalid/missing, reviewerAttempts, runtimeAttempts[]
 //   passes.json              {name, source, matchedBy}[] — `context` rows are the project rules
+//   error.txt                the failure, when the run died before or without a terminal phase
+//
+// The run directory is written by the CLI, under the user's own account; the mod shows what
+// it finds there and decides nothing from it. `pr-review status` and the summary stay the
+// authoritative readings.
 //
 // The host reads on("<event>", …) and $.noun.method(…) from the source text, so every call
 // is spelled out in full and helpers that take $ are top-level functions.
@@ -31,11 +36,14 @@ const REFRESH_EVERY_TICKS = 2; // one tick per second; the feeds change slower t
 const HEARTBEAT_SILENCE_MS = 90_000; // 1.5x the 60 s `running` heartbeat the CLI appends
 const RUN_CEILING_MS = 2 * 60 * 60 * 1000; // stop polling a run that outlives any realistic review (30 min session, recovery, verifier)
 const STAMP_RE = /__(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/; // the UTC stamp ensureRunDir() ends a run id with
-const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/; // a run id is one path segment: letters, digits, `_`, `.`, `-` (`..` is refused separately)
 const PACK_RE = /[\\/]\.pr-review[\\/]packs[\\/]([^\\/]+)[\\/]/; // <home>/.pr-review/packs/<pack>/… in a reviewer's source → the pack name
-const BANNER = 'Review started in the background'; // the first line of a --detach launch (src/cli.ts)
+const BANNER = 'Review started in the background'; // the first line a --detach launch prints (src/cli.ts)
+const PREAMBLE_RE = /^(?:repo: [^\n]*\n|project skills discoverable: [^\n]*\n)*/; // what the slash command's Step 1 block echoes before the CLI runs (commands/pr-review.md)
+const RUN_ID_LINE_RE = /^ {2}run-id: (.+?)\r?$/m; // the banner's second line; an Azure DevOps id can hold a space
 const TERMINAL_PHASES = new Set(['done', 'error']);
-const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/g; // C0, DEL and C1 controls: no escape sequence from a skill name reaches the terminal
+// C0, DEL and C1 controls, zero-width and bidi format characters, line/paragraph separators:
+// nothing from a skill name or a phase detail can move the cursor or reorder the terminal.
+const UNSAFE_RE = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g;
 
 const GLYPH = {
   pending: { glyph: '·', color: undefined, dim: true },
@@ -48,7 +56,11 @@ const GLYPH = {
 
 let interactive = false;
 let surface = null;
-/** The attached run, or null. Module state: a reload drops it, and the next poll re-attaches. */
+/**
+ * The attached run, or null. Module state: a reload drops it, and the next poll re-attaches.
+ * `state` is `live` (polling) until the run settles as `done`, `failed`, `preview` (a
+ * --context-only run) or `stale` (the polling ceiling); a settled run has no timer.
+ */
 let run = null;
 
 export function register(on) {
@@ -65,14 +77,16 @@ export function register(on) {
         argumentHint: '[run-id | off]',
         immediate: true,
       });
-    } catch {
+    } catch (err) {
       // A taken name or a host without commands: the band and pane still work.
+      debug($, 'command.register: ' + message(err));
     }
     return next(e);
   });
 
   on('session.end', async ($, e, next) => {
     stopTimer(run);
+    run = null;
     return next(e);
   });
 
@@ -83,52 +97,30 @@ export function register(on) {
     const cmd = String(e.command ?? '');
     try {
       await attachFromCommand($, cmd);
-    } catch {
-      // The command still runs; the band simply does not appear.
+    } catch (err) {
+      debug($, 'attach from command: ' + message(err));
     }
     const result = await next(e);
     try {
       await attachFromBanner($, cmd, result);
-    } catch {
-      // The result below is the command's; the band is a bonus.
+    } catch (err) {
+      debug($, 'attach from banner: ' + message(err));
     }
     return result;
   }).catch(async ($, e, next) => {
-    // Fail open: a hook that broke before calling next lets the command run as usual; one
-    // that broke after it keeps the result Claude Code already holds and runs nothing again.
-    if (next.called) return undefined;
+    // Fail open. `next` is replay-safe here: when the hook already called it, this resolves
+    // to the result Claude Code holds and runs nothing again; otherwise the command runs now.
     return next(e);
   });
 
   on('command.run', { command: 'pr-review-live' }, async ($, e) => {
     const arg = clean(String(e.args ?? '').trim());
-    if (arg === 'off') {
-      const id = run ? run.id : null;
-      await detachRun($);
-      return { text: id ? 'pr-review live: detached from ' + id : 'pr-review live: nothing was attached' };
-    }
-    const id = arg || (await newestRunId($));
-    if (!id) return { text: 'pr-review live: no run found under ' + (await runsRoot($)) };
-    let attached = false;
     try {
-      attached = await attach($, id, false);
-    } catch {
-      attached = false;
+      return await liveCommand($, arg);
+    } catch (err) {
+      debug($, 'command: ' + message(err));
+      return { text: 'pr-review live: could not run — ' + message(err) };
     }
-    if (!attached) return { text: 'pr-review live: no run ' + id + ' under ' + (await runsRoot($)) };
-    if (surface === 'terminal' || surface === 'desktop') {
-      let placed = true;
-      try {
-        const opened = await $.ui.open({ id: PANE, title: 'pr-review live', focus: true, closeOnEscape: true });
-        placed = !(opened && opened.isPlaced === false);
-      } catch {
-        placed = false;
-      }
-      // A pane the surface could not place (a narrow terminal, an older Desktop app) still
-      // leaves the band above the prompt; the text reply carries the same rows meanwhile.
-      return placed ? {} : { text: renderText(run) };
-    }
-    return { text: renderText(run) };
   });
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -139,7 +131,8 @@ export function register(on) {
     let mine;
     try {
       mine = band(Box, Text, r, e.props.bodyColumns || 80);
-    } catch {
+    } catch (err) {
+      debug($, 'band: ' + message(err));
       mine = Text({ dimColor: true, children: ['pr-review live: could not draw ' + clean(r.id) + ' — /pr-review-live off'] });
     }
     return theirs != null ? Box({ flexDirection: 'column', children: [mine, theirs] }) : mine;
@@ -152,68 +145,126 @@ export function register(on) {
     if (!r) return Text({ dimColor: true, children: ['No pr-review run attached. /pr-review-live [run-id], or start a review.'] });
     try {
       return pane(Box, Text, r, e.props.bodyColumns || 80);
-    } catch {
+    } catch (err) {
+      debug($, 'pane: ' + message(err));
       return Text({ dimColor: true, children: ['pr-review live: could not draw ' + clean(r.id) + ' — /pr-review-live off'] });
     }
   });
 
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
     const r = run;
-    if (!r || r.done) return next(e);
+    if (!r || !isLive(r)) return next(e);
     try {
-      const c = counts(r);
+      const c = counts(r, reviewerRows(r));
       return next({ ...e, props: { ...e.props, suffix: ' · pr-review ' + fmt(elapsedMs(r)) + ' · ' + c.delivered + '/' + c.planned + '…' } });
-    } catch {
+    } catch (err) {
+      debug($, 'spinner: ' + message(err));
       return next(e);
     }
   });
+}
+
+// The command
+
+async function liveCommand($, arg) {
+  if (arg === 'off') {
+    const id = run ? run.id : null;
+    await detachRun($);
+    return { text: id ? 'pr-review live: detached from ' + clean(id) : 'pr-review live: nothing was attached' };
+  }
+  let id = arg;
+  if (!id) {
+    id = await newestRunId($);
+    if (!id) {
+      const root = await runsRoot($);
+      return { text: root ? 'pr-review live: no run found under ' + root : 'pr-review live: no home directory (USERPROFILE or HOME) to find ~/.pr-review/runs' };
+    }
+  }
+  const problem = await attach($, id, false);
+  if (problem) return { text: 'pr-review live: ' + problem };
+  if (surface === 'terminal' || surface === 'desktop') {
+    let placed = true;
+    try {
+      const opened = await $.ui.open({ id: PANE, title: 'pr-review live', focus: true, closeOnEscape: true });
+      placed = !(opened && opened.isPlaced === false);
+    } catch (err) {
+      debug($, 'ui.open: ' + message(err));
+      placed = false;
+    }
+    // A pane the surface could not place (a narrow terminal, an older Desktop app) still
+    // leaves the band above the prompt; the text reply carries the same rows meanwhile.
+    return placed ? {} : { text: renderText(run) };
+  }
+  return { text: renderText(run) };
 }
 
 // Attach and poll
 
 /** `status <id>` polls and `--resume <id>` name the run up front, before the command runs. */
 async function attachFromCommand($, cmd) {
-  const status = /\bstatus\s+"?([A-Za-z0-9][A-Za-z0-9_.-]*)"?/.exec(cmd);
-  if (status && !run) await attach($, status[1], false);
-  const resume = /--resume\s+"?([A-Za-z0-9][A-Za-z0-9_.-]*)"?/.exec(cmd);
-  if (resume) await attach($, resume[1], true);
+  const status = /\bstatus\s+(?:"([^"]+)"|'([^']+)'|(\S+))/.exec(cmd);
+  if (status && (!run || !isLive(run))) await attach($, status[1] ?? status[2] ?? status[3], false);
+  const resume = /--resume\s+(?:"([^"]+)"|'([^']+)'|(\S+))/.exec(cmd);
+  if (resume) await attach($, resume[1] ?? resume[2] ?? resume[3], true);
 }
 
 /**
- * A `--detach` launch prints a fixed banner first (src/cli.ts); only that banner, at the
- * very start of stdout, names a run. A foreground summary (`--resume`, `--context-only`)
- * starts otherwise, and the finding bodies inside it are model output about PR content.
+ * A `--detach` launch prints a fixed banner first (src/cli.ts). The slash command's launch
+ * block echoes two lines of its own before it (`repo: …`, `project skills discoverable: …`);
+ * past those, only that banner at the very start of stdout names a run. A foreground
+ * summary (`--resume`, `--context-only`) starts otherwise, and the finding bodies inside it
+ * are model output about PR content.
  */
 async function attachFromBanner($, cmd, result) {
   if (!/\breview\b[\s\S]*--detach\b/.test(cmd)) return;
-  const out = String((result && result.result && result.result.stdout) || '');
+  const out = String((result && result.result && result.result.stdout) || '').replace(PREAMBLE_RE, '');
   if (!out.startsWith(BANNER)) return;
-  const id = /^ {2}run-id: ([A-Za-z0-9][A-Za-z0-9_.-]*)$/m.exec(out);
+  const id = RUN_ID_LINE_RE.exec(out);
   if (id) await attach($, id[1], false);
 }
 
-/** Follow one run. Resolves true once attached (or already followed), false for an id that is not a run directory. */
+/**
+ * A run id is one directory name under the runs root (`<provider>__<owner>__<repo>__<n>__<stamp>`,
+ * src/util/tmp.ts), so anything that could leave that directory, or hide in a terminal, is out.
+ */
+function validId(id) {
+  return (
+    id.length > 0 &&
+    id.length <= 255 &&
+    !id.includes('/') &&
+    !id.includes('\\') &&
+    !id.includes('..') &&
+    !id.startsWith('.') &&
+    !id.startsWith('-') &&
+    clean(id) === id
+  );
+}
+
+/** Follow one run. Resolves null once attached (or already followed live), else the problem, worded for the user. */
 async function attach($, id, resume) {
-  if (!ID_RE.test(id) || id.includes('..')) return false;
-  if (run && run.id === id && !resume && !run.done && !run.stale) return true;
+  if (!validId(id)) return 'not a run id — ' + clean(id);
+  if (run && run.id === id && !resume && isLive(run)) return null;
   const root = await runsRoot($);
+  if (!root) return 'no home directory (USERPROFILE or HOME) to find ~/.pr-review/runs';
   const dir = root + sepOf(root) + id;
   let exists = false;
   try {
     exists = await $.fs.exists(dir);
-  } catch {
-    exists = false;
+  } catch (err) {
+    return 'cannot read ' + dir + ': ' + message(err);
   }
-  if (!exists) return false;
-  if (run && run.id === id && !resume && !run.done && !run.stale) return true;
+  if (!exists) return 'no run ' + id + ' under ' + root;
+  if (run && run.id === id && !resume && isLive(run)) return null;
   stopTimer(run);
   const r = {
     id,
     dir,
     resume,
+    state: 'live',
     startedAtMs: stampMs(id),
     attachedAtMs: 0,
     nowMs: 0,
+    endedAtMs: null,
     ticks: 0,
     timer: null,
     plan: null,
@@ -225,32 +276,34 @@ async function attach($, id, resume) {
     eventsAtAttach: -1,
     sizes: {},
     lastChangeMs: 0,
-    done: false,
-    preview: false,
-    stale: false,
+    failure: null,
+    problems: new Map(),
   };
   run = r;
   r.nowMs = await $.clock.now();
-  if (run !== r) return true;
+  if (run !== r) return null;
   r.attachedAtMs = r.nowMs;
   r.lastChangeMs = r.nowMs;
   await refresh($, r);
-  if (run !== r) return true;
-  if (!r.done) {
+  if (run !== r) return null;
+  if (isLive(r)) {
     r.timer = $.clock.every(1000, () => {
-      tick($, r).catch(() => {});
+      tick($, r).catch((err) => {
+        debug($, 'tick: ' + message(err));
+      });
     });
   }
   if (surface === 'terminal' || surface === 'desktop') {
     try {
       // Unasked, the pane waits for a wide terminal (>= 144 columns); the band shows anyway.
       await $.ui.open({ id: PANE, title: 'pr-review live' });
-    } catch {
+    } catch (err) {
       // Nothing to do: the band carries the headline.
+      debug($, 'ui.open: ' + message(err));
     }
   }
   $.ui.invalidate('ui.render');
-  return true;
+  return null;
 }
 
 async function detachRun($) {
@@ -258,10 +311,22 @@ async function detachRun($) {
   run = null;
   try {
     await $.ui.close({ id: PANE });
-  } catch {
+  } catch (err) {
     // Already closed.
+    debug($, 'ui.close: ' + message(err));
   }
   $.ui.invalidate('ui.render');
+}
+
+function isLive(r) {
+  return r.state === 'live';
+}
+
+/** The run is over for the mod: freeze the clock at `endedAtMs` and stop polling. */
+function settle(r, state, endedAtMs) {
+  r.state = state;
+  r.endedAtMs = endedAtMs;
+  stopTimer(r);
 }
 
 function stopTimer(r) {
@@ -272,17 +337,21 @@ function stopTimer(r) {
 }
 
 async function tick($, r) {
-  if (run !== r) return;
+  if (run !== r || !isLive(r)) return;
   r.ticks += 1;
   r.nowMs = await $.clock.now();
-  if (run !== r) return;
-  if (!r.done && r.ticks % REFRESH_EVERY_TICKS === 0) await refresh($, r);
-  if (run !== r) return;
-  if (r.done) stopTimer(r);
-  else if (r.nowMs - r.attachedAtMs > RUN_CEILING_MS) {
-    r.stale = true;
-    stopTimer(r);
+  if (run !== r || !isLive(r)) return;
+  if (r.ticks % REFRESH_EVERY_TICKS === 0) {
+    try {
+      await refresh($, r);
+      r.problems.delete('refresh');
+    } catch (err) {
+      // Shown on the band until a refresh succeeds; the timer keeps trying.
+      r.problems.set('refresh', 'cannot refresh: ' + message(err));
+    }
   }
+  if (run !== r) return;
+  if (isLive(r) && r.nowMs - r.attachedAtMs > RUN_CEILING_MS) settle(r, 'stale', r.nowMs);
   $.ui.invalidate('ui.render');
 }
 
@@ -307,17 +376,35 @@ async function refresh($, r) {
   if (r.resume && r.eventsAtAttach < 0) r.eventsAtAttach = r.progress.length;
   const fresh = !r.resume || r.progress.length > r.eventsAtAttach;
   const last = lastEvent(r);
-  const terminal = last !== null && TERMINAL_PHASES.has(last.phase);
-  let finalized = false;
-  try {
-    const stat = await $.fs.stat(pathOf(r, 'finalization.json'));
-    finalized = !r.resume || stat.mtimeMs > r.attachedAtMs;
-  } catch {
-    finalized = false;
+  if (last && TERMINAL_PHASES.has(last.phase) && fresh) {
+    settle(r, last.phase === 'error' ? 'failed' : 'done', last.ts);
+    return;
   }
+  const finalization = await freshStat($, r, 'finalization.json');
   if (run !== r) return;
-  r.preview = !r.plan && !terminal && !finalized && (await fileExists($, r, 'pr-review-summary.md'));
-  r.done = r.preview || ((terminal || finalized) && fresh);
+  if (finalization) {
+    settle(r, 'done', last ? last.ts : finalization.mtimeMs);
+    return;
+  }
+  // The CLI writes error.txt where it fails (a gather, auth or runtime failure appends no
+  // terminal phase at all); one older than the newest progress line belongs to an attempt a
+  // resume already superseded.
+  const failure = await freshStat($, r, 'error.txt');
+  if (run !== r) return;
+  if (failure && !(last && failure.mtimeMs < last.ts)) {
+    const text = await readText($, r, 'error.txt');
+    if (run !== r) return;
+    r.failure = text === null ? 'see error.txt' : firstLine(text);
+    settle(r, 'failed', failure.mtimeMs);
+    return;
+  }
+  // A --context-only preview writes a summary with no plan and dispatches nothing. A plan
+  // that exists but cannot be read is a problem the band names, not a preview.
+  const dispatched = r.progress.some((ev) => ev.phase === 'dispatch');
+  if (!r.plan && !r.problems.has('dispatch-plan.json') && !dispatched && (await pathExists($, pathOf(r, 'pr-review-summary.md')))) {
+    if (run !== r) return;
+    settle(r, 'preview', last ? last.ts : r.nowMs);
+  }
 }
 
 /** Re-read an append-only NDJSON feed only when its size changed; skip a torn last line. */
@@ -326,96 +413,147 @@ async function readFeed($, r, file, key) {
   try {
     stat = await $.fs.stat(pathOf(r, file));
   } catch {
-    return;
+    return; // not written yet
   }
   if (r.sizes[file] === stat.size) return;
-  let text;
-  try {
-    text = await $.fs.read(pathOf(r, file));
-  } catch {
-    return;
-  }
+  const text = await readText($, r, file);
+  if (text === null) return;
   r.sizes[file] = stat.size;
   r.lastChangeMs = r.nowMs;
   const events = [];
   for (const line of text.split('\n')) {
     const t = line.trim();
     if (!t) continue;
-    try {
-      const ev = JSON.parse(t);
-      if (typeof ev.ts === 'number') events.push(ev);
-    } catch {
-      // The writer is mid-line; the next size change brings the rest.
-    }
+    const ev = parseJson(t);
+    // A line that does not parse is the writer's, mid-line; the next size change brings the rest.
+    if (ev && typeof ev.ts === 'number') events.push(ev);
   }
   r[key] = events;
 }
 
 /** A write-once JSON artifact: null until it exists and parses (a torn write is retried). */
 async function readJson($, r, file) {
-  try {
-    return JSON.parse(await $.fs.read(pathOf(r, file)));
-  } catch {
-    return null;
-  }
+  if (!(await pathExists($, pathOf(r, file)))) return null;
+  const text = await readText($, r, file);
+  return text === null ? null : parseJson(text);
 }
 
-/** delivery-state.json is replaced atomically; re-read on a new stamp, and again after a torn read. */
+/**
+ * delivery-state.json is replaced atomically; re-read on a new stamp. Only a parsed read of
+ * the canonical file retires the stamp — the backup is shown meanwhile, and the canonical
+ * file is read again next refresh.
+ */
 async function readDelivery($, r) {
   let stat;
   try {
     stat = await $.fs.stat(pathOf(r, 'delivery-state.json'));
   } catch {
-    return;
+    return; // not written yet
   }
   const stamp = stat.mtimeMs + ':' + stat.size;
   if (stamp === r.deliveryStamp) return;
-  for (const file of ['delivery-state.json', '.delivery-state.json.bak']) {
-    try {
-      const state = JSON.parse(await $.fs.read(pathOf(r, file)));
-      if (!Array.isArray(state.planned)) continue;
-      r.delivery = state;
-      // Only a parsed read retires the stamp: a torn one is read again next refresh.
-      r.deliveryStamp = stamp;
-      r.lastChangeMs = r.nowMs;
-      return;
-    } catch {
-      // Torn or absent; try the backup, then again next refresh.
-    }
+  const text = await readText($, r, 'delivery-state.json');
+  const state = text === null ? null : parseJson(text);
+  if (state && Array.isArray(state.planned)) {
+    r.delivery = state;
+    r.deliveryStamp = stamp;
+    r.lastChangeMs = r.nowMs;
+    return;
+  }
+  let backup = null;
+  try {
+    backup = parseJson(await $.fs.read(pathOf(r, '.delivery-state.json.bak')));
+  } catch {
+    backup = null; // no backup: keep what was shown
+  }
+  if (backup && Array.isArray(backup.planned)) r.delivery = backup;
+}
+
+/** The file's text, or null when it cannot be read — named on the band, since the caller saw it exist. */
+async function readText($, r, file) {
+  try {
+    const text = await $.fs.read(pathOf(r, file));
+    r.problems.delete(file);
+    return text;
+  } catch (err) {
+    r.problems.set(file, 'cannot read ' + file + ': ' + message(err));
+    return null;
   }
 }
 
-async function fileExists($, r, file) {
+/** The stat of a run artifact that counts for this attach: present, and written after a resume's attach. */
+async function freshStat($, r, file) {
+  let stat;
   try {
-    return await $.fs.exists(pathOf(r, file));
+    stat = await $.fs.stat(pathOf(r, file));
+  } catch {
+    return null;
+  }
+  return !r.resume || stat.mtimeMs > r.attachedAtMs ? stat : null;
+}
+
+async function pathExists($, path) {
+  try {
+    return await $.fs.exists(path);
   } catch {
     return false;
   }
 }
 
+/** `<home>/.pr-review/runs`, or null when the session has no home directory to find it under. */
 async function runsRoot($) {
-  const home = (await $.env.get('USERPROFILE')) || (await $.env.get('HOME')) || '.';
+  const home = (await $.env.get('USERPROFILE')) || (await $.env.get('HOME'));
+  if (!home) return null;
   const sep = sepOf(home);
   return home + sep + '.pr-review' + sep + 'runs';
 }
 
 /** The newest run by the UTC stamp in its name (`<provider>__<owner>__<repo>__<n>__<stamp>`). */
 async function newestRunId($) {
+  const root = await runsRoot($);
+  if (!root) return null;
   let entries;
   try {
-    entries = await $.fs.list(await runsRoot($));
-  } catch {
+    entries = await $.fs.list(root);
+  } catch (err) {
+    debug($, 'fs.list: ' + message(err));
     return null;
   }
-  const ids = entries.filter((x) => x.kind === 'dir' && STAMP_RE.test(x.name)).map((x) => x.name);
+  const ids = entries.filter((x) => x.kind === 'dir' && STAMP_RE.test(x.name) && validId(x.name)).map((x) => x.name);
   ids.sort((a, b) => (STAMP_RE.exec(a)[0] < STAMP_RE.exec(b)[0] ? -1 : 1));
   return ids.length > 0 ? ids[ids.length - 1] : null;
+}
+
+/** A line for the debug log (`claude --debug-file`); never the transcript, never a throw. */
+function debug($, text) {
+  try {
+    Promise.resolve($.ui.log('pr-review live: ' + text, { to: 'debug' })).catch(() => {});
+  } catch {
+    // A host without a debug log: nothing to say it to.
+  }
 }
 
 // Derivation
 
 function clean(value) {
-  return String(value ?? '').replace(CONTROL_RE, '');
+  return String(value ?? '').replace(UNSAFE_RE, '');
+}
+
+function message(err) {
+  return firstLine(err && err.message ? err.message : String(err));
+}
+
+function firstLine(text) {
+  const line = clean(String(text).split('\n')[0]);
+  return line.length > 120 ? line.slice(0, 119) + '…' : line;
+}
+
+function parseJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 }
 
 function sepOf(path) {
@@ -447,17 +585,16 @@ function prLabel(r) {
   return clean(parts.length >= 5 ? parts[1] + '/' + parts[2] + ' #' + parts[3] : r.id);
 }
 
-/** Since the run started — or since the newest `resume` event, when the run was resumed. */
+/** Since the run started — or since the newest `resume` event, when the run was resumed — until it settled. */
 function elapsedMs(r) {
-  let start = r.startedAtMs !== null ? r.startedAtMs : r.attachedAtMs;
+  let start = r.startedAtMs ?? r.attachedAtMs;
   for (let i = r.progress.length - 1; i >= 0; i -= 1) {
     if (r.progress[i].phase === 'resume') {
       start = Math.max(start, r.progress[i].ts);
       break;
     }
   }
-  const last = lastEvent(r);
-  const end = r.done && last ? last.ts : r.nowMs;
+  const end = r.endedAtMs ?? r.nowMs;
   return Math.max(0, end - start);
 }
 
@@ -470,6 +607,7 @@ function fmt(ms) {
   return h > 0 ? h + ':' + String(m).padStart(2, '0') + ':' + ss : m + ':' + ss;
 }
 
+/** Where a reviewer came from, in the words the band counts by (`matchedBy` is src/dispatch/pass-select.ts's). */
 function sourceLabel(reviewer) {
   const name = clean(reviewer.name);
   const source = clean(reviewer.source);
@@ -478,8 +616,23 @@ function sourceLabel(reviewer) {
   const pack = PACK_RE.exec(source);
   if (pack) return 'pack ' + pack[1] + (reviewer.matchedBy ? ' · ' + clean(reviewer.matchedBy) : '');
   if (reviewer.matchedBy === 'forced') return 'forced skill';
-  if (reviewer.matchedBy === 'configured') return 'configured dir';
   return 'repo rule';
+}
+
+function has(list, name) {
+  return Array.isArray(list) && list.includes(name);
+}
+
+/** One reviewer's state from the delivery record and its newest batch. */
+function reviewerState(d, name, status, attempt, maxAttempts, seen) {
+  if (d && has(d.valid, name)) return 'done';
+  if (status === 'spawn-rejected') return 'failed';
+  if (status === 'completed') {
+    if (!has(d.invalid, name) && !has(d.missing, name)) return 'pending';
+    return attempt < maxAttempts && d.kind !== 'terminal-incomplete' ? 'retry' : 'failed';
+  }
+  if (status === 'started') return seen ? 'delivered' : 'running';
+  return 'pending';
 }
 
 /** One row per planned reviewer: state, time and source, from the plan, delivery and timeline. */
@@ -493,22 +646,16 @@ function reviewerRows(r) {
   }
   return plan.reviewers.map((reviewer) => {
     const name = String(reviewer.name ?? '');
-    const attempt = d && d.reviewerAttempts ? d.reviewerAttempts[name] || 0 : 0;
-    const batches = d && Array.isArray(d.runtimeAttempts) ? d.runtimeAttempts.filter((a) => Array.isArray(a.reviewers) && a.reviewers.includes(name)) : [];
+    const attempt = (d && d.reviewerAttempts && d.reviewerAttempts[name]) || 0;
+    const batches = d && Array.isArray(d.runtimeAttempts) ? d.runtimeAttempts.filter((a) => has(a.reviewers, name)) : [];
     const batch = batches.length > 0 ? batches[batches.length - 1] : null;
     // Attempts written before lifecycle tracking carry no status: they are over unless the run says otherwise.
     const status = batch ? batch.status || (d.kind === 'running' ? 'started' : 'completed') : null;
     const seenTs = firstSeen.get(name + '#' + attempt);
-    let state = 'pending';
-    if (d && d.valid && d.valid.includes(name)) state = 'done';
-    else if (status === 'spawn-rejected') state = 'failed';
-    else if (status === 'completed') {
-      const unresolved = (d.invalid && d.invalid.includes(name)) || (d.missing && d.missing.includes(name));
-      state = unresolved ? (attempt < (reviewer.maxAttempts || 1) && d.kind !== 'terminal-incomplete' ? 'retry' : 'failed') : 'pending';
-    } else if (status === 'started') state = seenTs ? 'delivered' : 'running';
+    const state = reviewerState(d, name, status, attempt, reviewer.maxAttempts || 1, seenTs !== undefined);
     const startMs = batch ? Date.parse(batch.startedAt) : NaN;
     let endMs = r.nowMs;
-    if (state === 'done' || state === 'delivered') endMs = seenTs || (batch ? Date.parse(batch.endedAt) : r.nowMs);
+    if (state === 'done' || state === 'delivered') endMs = seenTs ?? (batch ? Date.parse(batch.endedAt) : r.nowMs);
     else if (state === 'failed' || state === 'retry') endMs = batch ? Date.parse(batch.endedAt) : r.nowMs;
     const elapsed = state !== 'pending' && Number.isFinite(startMs) && Number.isFinite(endMs) ? fmt(endMs - startMs) : '';
     return {
@@ -522,22 +669,26 @@ function reviewerRows(r) {
   });
 }
 
-function counts(r) {
-  const rows = reviewerRows(r);
-  const by = (kind) => rows.filter((row) => row.kind === kind);
-  const delivered = (list) => list.filter((row) => row.state === 'done' || row.state === 'delivered').length;
-  const valid = (list) => list.filter((row) => row.state === 'done').length;
-  const passes = by('pass');
-  const companions = by('companion');
+function tally(rows) {
+  return {
+    total: rows.length,
+    delivered: rows.filter((row) => row.state === 'done' || row.state === 'delivered').length,
+    valid: rows.filter((row) => row.state === 'done').length,
+  };
+}
+
+function counts(r, rows) {
+  const all = tally(rows);
+  const passes = rows.filter((row) => row.kind === 'pass');
   const passesJson = Array.isArray(r.passes) ? r.passes : [];
   return {
-    planned: rows.length,
-    delivered: delivered(rows),
-    valid: valid(rows),
-    passes: { total: passes.length, delivered: delivered(passes), valid: valid(passes) },
-    companions: { total: companions.length, delivered: delivered(companions), valid: valid(companions) },
+    planned: all.total,
+    delivered: all.delivered,
+    valid: all.valid,
+    passes: tally(passes),
+    companions: tally(rows.filter((row) => row.kind === 'companion')),
     packs: passes.filter((row) => row.source.startsWith('pack ')).length,
-    repoRules: passes.filter((row) => row.source === 'repo rule' || row.source === 'forced skill' || row.source === 'configured dir').length,
+    repoRules: passes.filter((row) => row.source === 'repo rule' || row.source === 'forced skill').length,
     plugins: passes.filter((row) => row.source.startsWith('plugin ')).length,
     context: passesJson.filter((p) => p && p.matchedBy === 'context'),
     onDemand: passesJson.filter((p) => p && p.matchedBy === 'index').length,
@@ -570,20 +721,40 @@ function codexLabel(r) {
 
 function headline(r) {
   const last = lastEvent(r);
-  if (r.preview) return { glyph: GLYPH.done, text: fmt(elapsedMs(r)) + ' · preview — no dispatch' };
-  if (!last) return { glyph: GLYPH.running, text: fmt(elapsedMs(r)) + ' · starting…' };
-  const phase = clean(last.phase) + (last.detail ? ' — ' + clean(last.detail) : '');
-  if (r.done) return { glyph: last.phase === 'error' ? GLYPH.failed : GLYPH.done, text: fmt(elapsedMs(r)) + ' · ' + phase };
-  if (r.stale) return { glyph: GLYPH.pending, text: fmt(elapsedMs(r)) + ' · ' + phase + ' · polling stopped after ' + fmt(RUN_CEILING_MS) + ', /pr-review-live ' + clean(r.id) + ' to reattach' };
-  const silent = r.nowMs - r.lastChangeMs;
-  const note = silent > HEARTBEAT_SILENCE_MS ? ' · no heartbeat for ' + fmt(silent) : '';
-  return { glyph: GLYPH.running, text: fmt(elapsedMs(r)) + ' · ' + phase + note };
+  const time = fmt(elapsedMs(r));
+  const phase = last ? clean(last.phase) + (last.detail ? ' — ' + clean(last.detail) : '') : 'starting…';
+  let glyph = GLYPH.running;
+  let text;
+  if (r.state === 'preview') {
+    glyph = GLYPH.done;
+    text = time + ' · preview — no dispatch';
+  } else if (r.state === 'failed' && r.failure !== null) {
+    glyph = GLYPH.failed;
+    text = time + ' · failed — ' + r.failure + ' · pr-review status ' + clean(r.id);
+  } else if (r.state === 'failed') {
+    glyph = GLYPH.failed;
+    text = time + ' · ' + phase;
+  } else if (r.state === 'done') {
+    glyph = GLYPH.done;
+    text = time + ' · ' + phase;
+  } else if (r.state === 'stale') {
+    glyph = GLYPH.pending;
+    text = time + ' · ' + phase + ' · polling stopped after ' + fmt(RUN_CEILING_MS) + ', /pr-review-live ' + clean(r.id) + ' to reattach';
+  } else {
+    const silent = r.nowMs - r.lastChangeMs;
+    text = time + ' · ' + phase + (silent > HEARTBEAT_SILENCE_MS ? ' · no heartbeat for ' + fmt(silent) : '');
+  }
+  for (const problem of r.problems.values()) text += ' · ' + problem;
+  return { glyph, text };
+}
+
+function progressLine(label, t, settled) {
+  return settled ? label + ' ' + t.valid + '/' + t.total + ' ✓' : label + ' ' + t.delivered + '/' + t.total + ' delivered';
 }
 
 function countsLine(r, c) {
-  const passes = r.done ? 'passes ' + c.passes.valid + '/' + c.passes.total + ' ✓' : 'passes ' + c.passes.delivered + '/' + c.passes.total + ' delivered';
-  const companions = r.done ? 'companions ' + c.companions.valid + '/' + c.companions.total + ' ✓' : 'companions ' + c.companions.delivered + '/' + c.companions.total + ' delivered';
-  return passes + ' · ' + companions + ' · ' + codexLabel(r) + ' · ' + verifierLabel(r);
+  const settled = !isLive(r);
+  return progressLine('passes', c.passes, settled) + ' · ' + progressLine('companions', c.companions, settled) + ' · ' + codexLabel(r) + ' · ' + verifierLabel(r);
 }
 
 function sourcesLine(c) {
@@ -595,7 +766,7 @@ function sourcesLine(c) {
 
 function band(Box, Text, r, columns) {
   const h = headline(r);
-  const c = counts(r);
+  const c = counts(r, reviewerRows(r));
   const line = (children) => Text({ wrap: 'truncate-end', children });
   return Box({
     flexDirection: 'column',
@@ -618,8 +789,9 @@ function band(Box, Text, r, columns) {
 
 function pane(Box, Text, r, columns) {
   const h = headline(r);
-  const c = counts(r);
   const rows = reviewerRows(r);
+  const c = counts(r, rows);
+  const settled = !isLive(r);
   const nameWidth = Math.max(12, Math.min(44, columns - 36));
   const row = (x) => {
     const g = GLYPH[x.state] || GLYPH.pending;
@@ -653,9 +825,9 @@ function pane(Box, Text, r, columns) {
         ],
       }),
       Text({ children: [' '] }),
-      section(r.done ? 'passes ' + c.passes.valid + '/' + c.passes.total + ' ✓' : 'passes ' + c.passes.delivered + '/' + c.passes.total + ' delivered'),
+      section(progressLine('passes', c.passes, settled)),
       ...passes.map(row),
-      section(r.done ? 'companions ' + c.companions.valid + '/' + c.companions.total + ' ✓' : 'companions ' + c.companions.delivered + '/' + c.companions.total + ' delivered'),
+      section(progressLine('companions', c.companions, settled)),
       ...(companions.length > 0 ? companions.map(row) : [Text({ dimColor: true, children: ['  none installed for this runtime'] })]),
       ...(siblings.length > 0 ? [section('siblings'), ...siblings] : []),
       Text({ children: [' '] }),
@@ -670,8 +842,9 @@ function pane(Box, Text, r, columns) {
 function renderText(r) {
   if (!r) return 'pr-review live: nothing attached';
   const h = headline(r);
-  const c = counts(r);
+  const rows = reviewerRows(r);
+  const c = counts(r, rows);
   const lines = ['pr-review · ' + prLabel(r) + ' · ' + h.glyph.glyph + ' ' + h.text, countsLine(r, c), sourcesLine(c), ''];
-  for (const x of reviewerRows(r)) lines.push((GLYPH[x.state] || GLYPH.pending).glyph + ' ' + x.elapsed.padStart(5) + '  ' + x.shown + '  ' + x.source);
+  for (const x of rows) lines.push((GLYPH[x.state] || GLYPH.pending).glyph + ' ' + x.elapsed.padStart(5) + '  ' + x.shown + '  ' + x.source);
   return lines.join('\n');
 }

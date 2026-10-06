@@ -659,14 +659,27 @@ test('verify — a dispatched run that lost reviewer-progress.ndjson fails INV-O
   }
 });
 
-test('verify — a run with no authenticated dispatch plan is not asked for the reviewer timeline', async () => {
+test('verify — an authenticated plan whose runtime never started is not asked for the reviewer timeline', async () => {
+  // The timeline starts with the first runtime attempt; a plan killed before its spawn has none.
+  const f = healthyRun({ mutateState: (state) => { state.runtimeAttempts = []; } });
+  try {
+    rmSync(join(f.runDir, 'reviewer-progress.ndjson'));
+    const result = row(await rowsFor(f), 'INV-OUT-02');
+    assert.equal(result.status, 'pass', result.evidence);
+    assert.doesNotMatch(result.evidence, /reviewer-progress\.ndjson/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('verify — a run with no authenticated dispatch plan is not asked for the reviewer timeline either', async () => {
   // A docs-only or preview run writes a summary but never dispatches, so the timeline cannot exist.
   const f = healthyRun();
   try {
     rmSync(join(f.runDir, 'reviewer-progress.ndjson'));
     rmSync(controlDirForRun(f.runDir, f.home), { recursive: true, force: true });
     const result = row(await rowsFor(f), 'INV-OUT-02');
-    assert.notEqual(result.status, 'fail', result.evidence);
+    assert.equal(result.status, 'pass', result.evidence);
     assert.doesNotMatch(result.evidence, /reviewer-progress\.ndjson/);
   } finally {
     f.cleanup();

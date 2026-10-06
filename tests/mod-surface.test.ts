@@ -69,6 +69,30 @@ test('mod-surface — every hook is on a documented read-side event, named as a 
   assert.doesNotMatch(source, /\bon\(\s*[^'"]/, 'an event name that is not a string literal fails claude plugin validate');
 });
 
+test('mod-surface — every $ is a full call or a bare argument: no alias, no destructuring, no computed access', () => {
+  // `const fs = $.fs; fs.write(…)` or `$['fs']` would slip past a literal-text allowlist, and the
+  // host refuses to load such a module anyway — so the node suite refuses it first, on every OS.
+  for (const match of source.matchAll(/\$/g)) {
+    const rest = source.slice(match.index! + 1, match.index! + 40);
+    const isCall = /^\.[a-z]+\.[A-Za-z]+\(/.test(rest);
+    const isArgument = /^[,)]/.test(rest);
+    const endsRegex = /^\//.test(rest);
+    assert.ok(isCall || isArgument || endsRegex, `a $ that is neither a full $.noun.method( call nor a bare argument at offset ${match.index}: ${JSON.stringify(rest.slice(0, 20))}`);
+  }
+});
+
+test('mod-surface — the Bash observer passes every command on exactly as it came', () => {
+  // The hook's strongest capability is not a $ call: it is `next`. A rewritten command would
+  // run a process of the mod's choosing and pass every allowlist above.
+  const start = source.indexOf("on('tool.call'");
+  const end = source.indexOf("on('command.run'", start);
+  assert.ok(start >= 0 && end > start, 'the tool.call hook was not found');
+  const handler = source.slice(start, end);
+  const calls = handler.match(/\bnext\([^)]*\)/g) ?? [];
+  assert.ok(calls.length >= 2, `expected the handler to call next, found ${calls.length}`);
+  for (const call of calls) assert.equal(call, 'next(e)', `a rewritten or answered tool call: ${call}`);
+});
+
 test('mod-surface — the only pane the module opens is its own', () => {
   const opens = [...source.matchAll(/\$\.ui\.open\(\{\s*id:\s*([A-Za-z_'"-]+)/g)].map((m) => m[1]);
   assert.ok(opens.length > 0);
@@ -83,4 +107,12 @@ test('mod-surface — control: a module that writes, spawns or posts is refused 
   assert.match('$.model.complete({ prompt })', FORBIDDEN);
   assert.ok(!ALLOWED_CALLS.has('$.fs.write'));
   assert.ok(!ALLOWED_EVENTS.has('prompt.submit'));
+  // The alias and rewrite rules can fail too.
+  const dollarRule = (text: string) => [...text.matchAll(/\$/g)].every((m) => /^\.[a-z]+\.[A-Za-z]+\(|^[,)]|^\//.test(text.slice(m.index! + 1, m.index! + 40)));
+  assert.equal(dollarRule('const fs = $.fs; fs.write(p, t)'), false);
+  assert.equal(dollarRule("$['fs'].write(p, t)"), false);
+  assert.equal(dollarRule('const { fs } = $;'), false);
+  assert.equal(dollarRule('attach($, id); $.fs.read(p)'), true);
+  const rewrite = "next({ ...e, command: 'gh pr comment' })";
+  assert.notEqual(rewrite.match(/\bnext\([^)]*\)/)?.[0], 'next(e)');
 });

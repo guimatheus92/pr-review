@@ -47,6 +47,8 @@ Under Claude Code the plugin command is `/pr-review:pr-review <url>`; since the 
 
 Posting line comments back to the PR is the default. Add `--dry-run` to preview findings without posting.
 
+Under Claude Code 2.1.287 or later, in a terminal, the plugin's live mod shows the run as it happens: a band above the prompt with the phase, a timer, what each reviewer delivered and the counts by source (packs, repo rules, installed plugins, companions, Codex, verifier); a pane with one row per reviewer — state, time since its batch started, and `pack owasp · baseline` / `plugin pr-review-toolkit` / `repo rule` — that opens on its own in a wide terminal or with `/pr-review-live [run-id]` (`off` detaches); and the timer beside the spinner. In the VS Code extension's chat panel nothing draws, so `/pr-review-live` answers in text there.
+
 `--publish-min-severity high` publishes only CRITICAL/HIGH findings, without
 reducing analysis or removing any deduplicated finding from local evidence.
 Allowed values are case-insensitive `critical|high|medium|low|nit`, inclusive;

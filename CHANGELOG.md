@@ -4,6 +4,10 @@ Notable changes, [keep-a-changelog](https://keepachangelog.com/en/1.1.0/) format
 
 ## [Unreleased]
 
+### Added
+- **A live view of a running review inside Claude Code — a mod.** While `/pr-review` runs, the plugin's hooks module (`mods/live/hooks/register.js`, Claude Code 2.1.287 or later, in a terminal or the Desktop app) draws a band above the prompt — the PR, the phase and a timer; passes and companions delivered; counts by source (packs, repo rules, installed plugins, companions, Codex, verifier) and the project rules injected into every pass — opens a pane with one row per reviewer (state, time since its batch started, and `pack owasp · baseline` / `plugin pr-review-toolkit` / `repo rule`), and adds the timer beside the spinner. `/pr-review-live [run-id | off]` opens the pane at any width, and answers in text where nothing draws (the VS Code chat panel, `claude -p`). It attaches from the `run-id:` a `--detach` launch prints, from `status <id>` polls and from `--resume <id>`; it reads only the run directory (`progress.ndjson`, `reviewer-progress.ndjson`, `dispatch-plan.json`, `delivery-state.json`, `passes.json`, `companions.json`, each re-read only when it changes), never calls `status`, writes nothing, and stays inert in pr-review's own headless reviewer sessions. The module is declared by the `hooks` field of `.claude-plugin/plugin.json`, so Copilot CLI and older Claude Code load the rest of the plugin and ignore it. Its read-only surface is pinned by `tests/mod-surface.test.ts`; its 13 kit tests (`npm run test:mod`) run offline on fixtures copied from a real run, locally and in CI.
+- **`reviewer-progress.ndjson` is a contract artifact (INV-OUT-02).** The per-reviewer timeline had no reader in production; the mod reads it, so `pr-review verify` now fails a dispatched run that lost it and leaves a preview or docs-only run alone.
+
 ## [0.15.1] — 2026-09-25
 
 ### Fixed

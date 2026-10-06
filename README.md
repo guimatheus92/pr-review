@@ -33,6 +33,7 @@
 - **Stack-aware routing.** GitHub Linguist languages plus manifest dependencies rank passes by evidence tier. Preview the selection with `--context-only`.
 - **Untrusted by default.** A rule file the PR itself added or changed cannot instruct its own review; a changed `.pr-review.yaml` or repository MCP config is ignored too.
 - **Background-friendly and resumable.** `--detach` returns a run-id, `status` polls it, and `--resume` re-dispatches only what is missing under authenticated run state. Partial findings never post.
+- **Live view in Claude Code.** While a review runs, a plugin mod draws a band above the prompt (phase, timer, what each reviewer delivered, counts by source), a pane with one row per reviewer and the project rules in context, and the timer beside the spinner; `/pr-review-live` opens the pane or answers in text. See [live view](#live-view-in-claude-code-mod).
 - **Two runtimes, one command.** Host the session in Copilot CLI or Claude Code (`--runtime`), same `/pr-review`.
 - **Second opinions.** Optional Codex sibling, plus companion plugins (pr-review-toolkit, code-review) when installed.
 
@@ -117,7 +118,7 @@ No `npm install` needed. The plugin ships a pre-bundled `dist/cli.cjs`; the slas
 <summary><b>How the plugin finds its CLI, and why the manifest lives in two places</b></summary>
 <br>
 
-The slash command finds the bundle via `$CLAUDE_PLUGIN_ROOT` under Claude Code (falling back to `~/.copilot/installed-plugins/`) and runs it with `node`. The plugin layout (`commands/`, `skills/`) loads in both hosts; the manifest lives in two places on purpose — `.claude-plugin/plugin.json` (Claude Code's canonical location) and a root `plugin.json` (which Copilot CLI requires).
+The slash command finds the bundle via `$CLAUDE_PLUGIN_ROOT` under Claude Code (falling back to `~/.copilot/installed-plugins/`) and runs it with `node`. The plugin layout (`commands/`, `skills/`) loads in both hosts; the manifest lives in two places on purpose — `.claude-plugin/plugin.json` (Claude Code's canonical location) and a root `plugin.json` (which Copilot CLI requires). Only the Claude Code manifest declares the live-view mod (`mods/live/`, through its `hooks` field), so Copilot CLI and Claude Code older than 2.1.287 load the rest of the plugin and ignore it.
 
 </details>
 
@@ -358,6 +359,16 @@ Installed plugins — from Copilot CLI or Claude Code alike — provide an addit
 ## Background runs, status and resume
 
 A full review takes roughly 6–10 minutes. `pr-review review <url> --detach` returns a run-id immediately; `pr-review status <run-id>` shows the live progress feed, or the summary once done. `status` exits `0` when done, `20` while running, `21` when authenticated recovery is available (it prints the exact `--resume` command), `22` on a terminal failure, and `1` when the run-id is unknown.
+
+### Live view in Claude Code (mod)
+
+Under Claude Code 2.1.287 or later the plugin also ships a [mod](https://code.claude.com/docs/en/plugins/mods/overview): `mods/live/hooks/register.js`, declared by the `hooks` field of `.claude-plugin/plugin.json`. It reads the run directory the way `status` does — never `status` itself, and it writes nothing anywhere — and while a review runs it:
+
+- draws a three-line band above the prompt: the PR, the phase and a timer; passes and companions delivered; counts by source (packs, repo rules, installed plugins, companions, Codex, verifier) and the project rules injected into every pass;
+- opens a pane with one row per reviewer — its state, the time since its batch started, and where it came from (`pack owasp · baseline`, `plugin pr-review-toolkit`, `repo rule`) — on its own in a terminal at least 144 columns wide, or with `/pr-review-live [run-id]` at any width (`off` detaches);
+- adds ` · pr-review m:ss · delivered/planned…` beside the spinner.
+
+It attaches from the `run-id:` the slash command's launch prints, from a `status <id>` poll, or from `--resume <id>`. A finished run keeps its outcome on the band until the next review attaches; a run whose files stop changing for 90 s says so. Mods draw in the `claude` terminal (an editor's integrated terminal included) and in the Desktop app; in the VS Code extension's chat panel and under `claude -p` nothing draws, so `/pr-review-live` answers in text there. In pr-review's own headless reviewer sessions the mod stays inert.
 
 <details>
 <summary><b>Delivery, recovery and resume in detail</b></summary>

@@ -126,7 +126,17 @@ node ./dist/cli.js post <pr-url> --findings <path>            # actually post (d
 /pr-review --help
 ```
 
-The plugin layout loads in both hosts; under Claude Code the slash command finds the bundle via `$CLAUDE_PLUGIN_ROOT/dist/cli.cjs`.
+The plugin layout loads in both hosts; under Claude Code the slash command finds the bundle via `$CLAUDE_PLUGIN_ROOT/dist/cli.cjs`. The `mods/live` hooks module is declared only by the Claude Code manifest (`.claude-plugin/plugin.json` → `hooks`), so Copilot ignores it.
+
+## Live mod (Claude Code 2.1.287+)
+
+```bash
+npm run validate:mod                            # claude plugin validate — the module's hooks:/calls: lines (read-only calls only)
+npm run test:mod                                # claude plugin test mods/live — 35 kit tests, offline, ~8 s
+claude --plugin-dir . --debug-file mod.log      # a terminal session that hot-reloads mods/live on save
+```
+
+In that session, start a review (`/pr-review:pr-review <url> --dry-run`, or `node dist/cli.cjs review <url> --detach --dry-run` from the Bash tool) and watch the band above the prompt; `/pr-review-live` opens the pane at any width. `grep 'hooks module pr-review@inline' mod.log` proves the module loaded from the manifest path. If the installed `pr-review@pr-review` refuses the inline copy as a duplicate name, disable it for that session from `/plugin`. The kit has no file access: fixtures are the TypeScript module `mods/live/tests/fixtures/run-798.ts`, regenerated from a real run dir with `node scripts/mod-fixtures.mjs <run-dir> mods/live/tests/fixtures/run-798.ts`. The VS Code chat panel draws no mod — prove a change in a terminal.
 
 ## Verifying what would run
 

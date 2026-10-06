@@ -625,9 +625,11 @@ sometimes means "no review" cannot gate anything.
 `companions.json`, `capabilities.json` (plus `capability-<pass>.json` per
 installed-plugin pass), one `raw-<reviewer>.json` per pass and companion,
 `pr-review-findings.json`, `pr-review-summary.md`, `progress.ndjson`,
-`error.txt` on any failure, and `posted.marker` on any publish attempt.
-Authenticated mirrors live under `~/.pr-review/control/`. A change that stops
-writing one of these is a behaviour change.
+`reviewer-progress.ndjson` on every run that dispatched (the per-reviewer
+timeline: attempt starts, first-seen outputs, promotions, invalidations,
+recoveries and verifier steps), `error.txt` on any failure, and `posted.marker`
+on any publish attempt. Authenticated mirrors live under `~/.pr-review/control/`.
+A change that stops writing one of these is a behaviour change.
 
 After complete delivery, `pr-review-findings.json` retains every deduplicated
 finding before any publication attempt, including suppressed findings. Its
@@ -638,14 +640,16 @@ the retained set from authenticated review inputs and the original gather,
 separately from publication progress; promotion is recorded without rewriting
 the original plan. Legacy artifacts without publication metadata remain readable.
 
-**Why:** `--resume`, `status`, the operational-failure checks, `verify` and the
-eval harness all read them. They are the only record of what a run actually did.
+**Why:** `--resume`, `status`, the operational-failure checks, `verify`, the
+eval harness and the live mod (`mods/live/hooks/register.js`, which draws
+per-reviewer progress from the timeline) all read them. They are the only record of what a
+run actually did.
 
 **Enforced:** `src/commands/review.ts`, `src/dispatch/single-session.ts`,
-`src/dispatch/delivery.ts`, `src/util/tmp.ts`
+`src/dispatch/delivery.ts`, `src/dispatch/reviewer-progress.ts`, `src/util/tmp.ts`
 
 **Verified:** `tests/zero-passes.test.ts`, `tests/status.test.ts`,
-`tests/delivery.test.ts`
+`tests/delivery.test.ts`, `tests/single-session-retry.test.ts`, `tests/verify.test.ts`
 
 **Check:** run
 

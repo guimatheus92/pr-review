@@ -952,6 +952,9 @@ export const CHECKS: InvariantCheck[] = [
       if (ctx.finalization || existsSync(join(ctx.runDir, 'pr-review-summary.md'))) {
         required.push('pr-review-summary.md', 'pr-review-findings.json', 'progress.ndjson');
       }
+      // The per-reviewer timeline starts with the first runtime attempt, so a run that
+      // authenticated one must have it; a preview or docs-only run never dispatched.
+      if (ctx.plan && (ctx.state?.runtimeAttempts.length ?? 0) > 0) required.push('reviewer-progress.ndjson');
       const absent = required.filter((f) => !existsSync(join(ctx.runDir, f)));
       if (absent.length > 0) return fail(`missing run artifact(s): ${sample(absent)}`);
       const raw = readdirSync(ctx.runDir).filter((f) => f.startsWith('raw-') && f.endsWith('.json'));

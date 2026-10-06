@@ -29,18 +29,22 @@ export interface ReviewerProgressEvent {
   detail?: string;
 }
 
+/** Run directories whose timeline could not be appended: each is named on stderr once, not once per event. */
+const unwritable = new Set<string>();
+
 export function appendReviewerProgress(
   outDir: string,
   event: Omit<ReviewerProgressEvent, 'ts'> & { ts?: number },
 ): void {
+  const path = join(outDir, REVIEWER_PROGRESS_FILE);
   try {
-    appendFileSync(
-      join(outDir, REVIEWER_PROGRESS_FILE),
-      JSON.stringify({ ts: event.ts ?? Date.now(), ...event }) + '\n',
-      'utf8',
-    );
-  } catch {
-    // Observability must never break reviewer delivery.
+    appendFileSync(path, JSON.stringify({ ts: event.ts ?? Date.now(), ...event }) + '\n', 'utf8');
+  } catch (error) {
+    // Observability must never break reviewer delivery — but the timeline is a contract
+    // artifact (INV-OUT-02, read by `verify` and the live mod), so its loss is said once.
+    if (unwritable.has(outDir)) return;
+    unwritable.add(outDir);
+    process.stderr.write(`[reviewer-progress] could not append ${path}: ${(error as Error).message}\n`);
   }
 }
 

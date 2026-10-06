@@ -157,6 +157,8 @@ pr-review/                        # plugin root (loads in Copilot CLI and Claude
 ├── .claude-plugin/plugin.json    # Claude Code manifest (its canonical location). NOTE: the plugin no longer ships agents/, so current Claude Code should mint the bare /pr-review alias; if it doesn't, use /pr-review:pr-review or a personal ~/.claude/commands/pr-review.md as a fallback
 ├── plugin.json                   # root manifest — Copilot CLI requires it here; kept in sync by scripts/release.mjs
 ├── .claude-plugin/marketplace.json  # single-plugin marketplace entry
+├── mods/live/hooks/              # Claude Code mod (hooks.json + register.js): the live band, pane and spinner timer — declared by the "hooks" field of .claude-plugin/plugin.json; Copilot's root plugin.json never names it
+├── mods/live/tests/              # claude plugin test mods/live (npm run test:mod); fixtures/run-798.ts is a pruned real run dir
 ├── commands/pr-review.md         # /pr-review slash command
 ├── skills/help/SKILL.md          # single documentation skill → one /pr-review:help palette entry
 │   └── reference/*.md            #   per-topic docs the help skill points to (not SKILL.md → not separate skills)
@@ -165,6 +167,8 @@ pr-review/                        # plugin root (loads in Copilot CLI and Claude
 ```
 
 The slash command finds the bundle via `$CLAUDE_PLUGIN_ROOT/dist/cli.cjs` under Claude Code, falling back to `~/.copilot/installed-plugins/`.
+
+The live mod is a reader of the run directory (the same feeds `status` reads, never `status` itself, and no write anywhere), declared only from the Claude Code manifest: Copilot CLI and Claude Code older than 2.1.287 ignore it. It is deliberately not a root `hooks/` dir — `claude plugin test <dir>` takes the mod's folder and runs every `*.test.ts` beneath it, and the repo root would include the node:test suite. It stays inert in headless sessions, which is how it survives being loaded into pr-review's own `claude -p` reviewer sessions.
 
 ## Key design decisions
 

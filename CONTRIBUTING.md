@@ -7,6 +7,7 @@ git clone <repo> && cd pr-review
 npm install
 npm run build          # tsc + esbuild → dist/cli.cjs
 npm run test           # node scripts/test.mjs → node --test over tests/**/*.test.ts
+npm run test:mod       # claude plugin test mods/live → the live mod's kit tests (needs Claude Code >= 2.1.287)
 ```
 
 Iterative dev: `npm run build:watch` (tsc only; re-run `npm run bundle` for the esbuild output).
@@ -73,7 +74,9 @@ npm run test
 
 Tests in `tests/` mirror `src/` structure (`tests/**/*.test.ts`). Every one of them is hermetic — provider tests inject a stub client or `fetch`, and none needs a credential or the network. That is also their limit: nothing in `npm run test` proves a real Azure DevOps or GitLab API call works.
 
-CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs build, tests, and a bundle-freshness check on ubuntu and windows.
+The live mod (`mods/live/`) is tested with the Claude Code mod kit instead: `npm run test:mod` runs `claude plugin test mods/live` (offline, no sign-in) and `npm run validate:mod` prints the module's `hooks:`/`calls:` lines. Keep its tests under `mods/live/tests/` — the kit runs every `*.test.ts` under the mod's folder, and `claude-code/testing` does not load under node:test. `tests/mod-surface.test.ts` pins the module to read-only calls from the node suite, on every platform.
+
+CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs build, tests, and a bundle-freshness check on ubuntu and windows, and a separate `live-mod` job on ubuntu that installs the pinned Claude Code CLI from npm and runs the mod's validate and kit tests (no node_modules, no credential).
 
 ### Auditing a run
 

@@ -49,9 +49,11 @@ const detachBanner = (id: string) =>
   `  run-id: ${id}\n  dir:    ${RUNS_ROOT}\\${id}\n\n` +
   `Poll for progress and the final summary:\n  pr-review status ${id}\n`;
 const DETACH_OUT = detachBanner(RUN_ID);
-// ...and what the whole Step 1 block prints when it found the PR's checkout first: two
-// lines of its own on stdout, then the CLI's banner. The no-checkout warnings go to stderr.
-const PREAMBLE = 'repo: C:/Users/dev/repos/backend\nproject skills discoverable: 41 (the CLI reports the exact count it loads)\n';
+// ...and what the whole Step 1 block prints when it found the PR's checkout first: a few
+// `key: value` lines of its own on stdout, then the CLI's banner (copied from a session
+// transcript on 2026-10-06; the `cli:` line was not in the block this file pins, and the
+// mod missed a real launch over it). The no-checkout warnings go to stderr.
+const PREAMBLE = 'cli: C:/Users/dev/.claude/plugins/cache/pr-review/pr-review/0.16.0/dist/cli.cjs\nrepo: /c/Users/dev/repos/backend\nproject skills discoverable: 41 (the CLI reports the exact count it loads)\n';
 const LAUNCH_OUT = PREAMBLE + DETACH_OUT;
 
 // The Step 1 block of commands/pr-review.md, verbatim. `$CLI` is a shell variable, so it
@@ -260,7 +262,7 @@ test('the band yields to Claude Code while no review is attached', async ($, on)
   await ui.unmount();
 });
 
-test("the slash command's own launch block attaches through the two lines it echoes before the banner, and the Bash result reaches Claude untouched", async ($, on) => {
+test("the slash command's own launch block attaches through the key: value lines it prints before the banner, and the Bash result reaches Claude untouched", async ($, on) => {
   const clock = mock.clock(on, { now: CUTOFF_MS });
   stubSession(on);
   stubRunDir(on, RUNNING);
@@ -273,6 +275,32 @@ test("the slash command's own launch block attaches through the two lines it ech
     expect(await band.find({ type: 'Text', text: PR_LABEL })).toBeDefined();
     await band.unmount();
   }
+});
+
+test('a launch block that grows another key: value line before the banner still attaches', async ($, on) => {
+  // The slash command's preamble is not pinned to two names: any short `key: value` line
+  // before the banner is its own, as `cli:` turned out to be.
+  const clock = mock.clock(on, { now: CUTOFF_MS });
+  stubSession(on, 'shell: bash 5.2\nchecked plugin root: yes\n' + PREAMBLE + DETACH_OUT);
+  stubRunDir(on, RUNNING);
+
+  await attachViaLaunch($, clock);
+
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' });
+  expect(await band.find({ type: 'Text', text: PR_LABEL })).toBeDefined();
+  await band.unmount();
+});
+
+test('a launch whose output starts with anything but key: value lines or the banner never attaches', async ($, on) => {
+  const clock = mock.clock(on, { now: CUTOFF_MS });
+  stubSession(on, '# PR Review Context Preview\nrepo: x\n' + DETACH_OUT);
+  const counters = stubRunDir(on, RUNNING);
+  await $.session.start(INTERACTIVE);
+
+  await $.tool.call({ tool: 'Bash', command: LAUNCH });
+  await clock.advance(5000);
+
+  expect(counters).toEqual({ stat: 0, read: 0, list: 0 });
 });
 
 test('a launch that found no checkout prints the bare banner and attaches too', async ($, on) => {

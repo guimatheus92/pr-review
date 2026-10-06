@@ -38,7 +38,12 @@ const RUN_CEILING_MS = 2 * 60 * 60 * 1000; // stop polling a run that outlives a
 const STAMP_RE = /__(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/; // the UTC stamp ensureRunDir() ends a run id with
 const PACK_RE = /[\\/]\.pr-review[\\/]packs[\\/]([^\\/]+)[\\/]/; // <home>/.pr-review/packs/<pack>/… in a reviewer's source → the pack name
 const BANNER = 'Review started in the background'; // the first line a --detach launch prints (src/cli.ts)
-const PREAMBLE_RE = /^(?:repo: [^\n]*\n|project skills discoverable: [^\n]*\n)*/; // what the slash command's Step 1 block echoes before the CLI runs (commands/pr-review.md)
+// The launch block the model runs prints a few `key: value` lines of its own before the CLI's
+// banner (`cli:`, `repo:`, `project skills discoverable:`) — the model composes that block
+// from commands/pr-review.md, so their names, order and count vary. A line that is not one of
+// those ends the preamble; a foreground summary starts with `# PR Review …`, never a key.
+const PREAMBLE_LINE_RE = /^[a-z][a-z0-9 -]{0,40}: .*$/;
+const PREAMBLE_MAX_LINES = 8;
 const RUN_ID_LINE_RE = /^ {2}run-id: (.+?)\r?$/m; // the banner's second line; an Azure DevOps id can hold a space
 const TERMINAL_PHASES = new Set(['done', 'error']);
 // C0, DEL and C1 controls, zero-width and bidi format characters, line/paragraph separators:
@@ -214,24 +219,50 @@ async function liveCommand($, arg) {
 /** `status <id>` polls and `--resume <id>` name the run up front, before the command runs. */
 async function attachFromCommand($, cmd) {
   const status = /\bstatus\s+(?:"([^"]+)"|'([^']+)'|(\S+))/.exec(cmd);
-  if (status && (!run || !isLive(run))) await attach($, status[1] ?? status[2] ?? status[3], false);
+  if (status && (!run || !isLive(run))) {
+    const problem = await attach($, status[1] ?? status[2] ?? status[3], false);
+    if (problem) debug($, 'status poll: ' + problem);
+  }
   const resume = /--resume\s+(?:"([^"]+)"|'([^']+)'|(\S+))/.exec(cmd);
-  if (resume) await attach($, resume[1] ?? resume[2] ?? resume[3], true);
+  if (resume) {
+    const problem = await attach($, resume[1] ?? resume[2] ?? resume[3], true);
+    if (problem) debug($, 'resume: ' + problem);
+  }
+}
+
+/** The output past the launch block's own `key: value` lines (and blank lines), at most PREAMBLE_MAX_LINES of them. */
+function pastPreamble(out) {
+  const lines = out.split('\n');
+  let i = 0;
+  while (i < lines.length && i < PREAMBLE_MAX_LINES) {
+    const line = lines[i].replace(/\r$/, '');
+    if (line.trim() !== '' && !PREAMBLE_LINE_RE.test(line)) break;
+    i += 1;
+  }
+  return lines.slice(i).join('\n');
 }
 
 /**
- * A `--detach` launch prints a fixed banner first (src/cli.ts). The slash command's launch
- * block echoes two lines of its own before it (`repo: …`, `project skills discoverable: …`);
- * past those, only that banner at the very start of stdout names a run. A foreground
+ * A `--detach` launch prints a fixed banner first (src/cli.ts). Past the launch block's own
+ * `key: value` lines, only that banner at the start of stdout names a run. A foreground
  * summary (`--resume`, `--context-only`) starts otherwise, and the finding bodies inside it
- * are model output about PR content.
+ * are model output about PR content. Every reason not to attach goes to the debug file:
+ * a launch the band missed must be explainable from `claude --debug-file`.
  */
 async function attachFromBanner($, cmd, result) {
   if (!/\breview\b[\s\S]*--detach\b/.test(cmd)) return;
-  const out = String((result && result.result && result.result.stdout) || '').replace(PREAMBLE_RE, '');
-  if (!out.startsWith(BANNER)) return;
+  const out = pastPreamble(String((result && result.result && result.result.stdout) || ''));
+  if (!out.startsWith(BANNER)) {
+    debug($, 'launch without the detach banner at the start of its output: ' + firstLine(out));
+    return;
+  }
   const id = RUN_ID_LINE_RE.exec(out);
-  if (id) await attach($, id[1], false);
+  if (!id) {
+    debug($, 'detach banner without a run-id line');
+    return;
+  }
+  const problem = await attach($, id[1], false);
+  if (problem) debug($, 'attach from banner: ' + problem);
 }
 
 /**

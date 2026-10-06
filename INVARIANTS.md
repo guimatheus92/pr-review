@@ -641,8 +641,8 @@ separately from publication progress; promotion is recorded without rewriting
 the original plan. Legacy artifacts without publication metadata remain readable.
 
 **Why:** `--resume`, `status`, the operational-failure checks, `verify`, the
-eval harness and the live mod (`hooks/register.js`, which draws per-reviewer
-progress from the timeline) all read them. They are the only record of what a
+eval harness and the live mod (`mods/live/hooks/register.js`, which draws
+per-reviewer progress from the timeline) all read them. They are the only record of what a
 run actually did.
 
 **Enforced:** `src/commands/review.ts`, `src/dispatch/single-session.ts`,

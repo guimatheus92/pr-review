@@ -25,6 +25,11 @@
 /pr-review https://dev.azure.com/org/proj/_git/repo/pullrequest/456 --dry-run
 ```
 
+<p align="center">
+  <img src="assets/live-demo.gif" width="880" alt="A dry-run review of a pull request in Claude Code with the live mod: the band above the prompt shows the phase, the timer and one bar cell per reviewer; the pane groups every reviewer under its source; the findings close the clip" />
+</p>
+<p align="center"><sub>A dry run on a real pull request, in Claude Code with the live mod (0.16.0). <a href="https://github.com/guimatheus92/pr-review/releases/download/v0.16.0/pr-review-live-demo.mp4">Watch the full video (MP4)</a> · regenerated from one recording by <code>scripts/demo-video.mjs</code> (see <a href="CONTRIBUTING.md#the-demo-video">CONTRIBUTING</a>).</sub></p>
+
 ## Highlights
 
 - **Full retention, eligible-only publication.** Every deduplicated finding remains in local evidence. Eligible findings post as GitHub review comments, Azure DevOps threads or GitLab discussions — never a top-level comment. See [publication controls](#publication-controls) and [posting guarantees](#posting-guarantees).

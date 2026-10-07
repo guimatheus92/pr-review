@@ -134,6 +134,7 @@ The plugin layout loads in both hosts; under Claude Code the slash command finds
 npm run validate:mod                            # claude plugin validate — the module's hooks:/calls: lines (read-only calls only)
 npm run test:mod                                # claude plugin test mods/live — 35 kit tests, offline, ~8 s
 claude --plugin-dir . --debug-file mod.log      # a terminal session that hot-reloads mods/live on save
+node scripts/demo-video.mjs all --work <dir> --pr <url> --checkout <dir> --plugin-dir . --out assets/live-demo.gif   # the README clip, remade from one recording (see CONTRIBUTING)
 ```
 
 In that session, start a review (`/pr-review:pr-review <url> --dry-run`, or `node dist/cli.cjs review <url> --detach --dry-run` from the Bash tool) and watch the band above the prompt; `/pr-review-live` opens the pane at any width. `grep 'hooks module pr-review@inline' mod.log` proves the module loaded from the manifest path. If the installed `pr-review@pr-review` refuses the inline copy as a duplicate name, disable it for that session from `/plugin`. The kit has no file access: fixtures are the TypeScript module `mods/live/tests/fixtures/run-798.ts`, regenerated from a real run dir with `node scripts/mod-fixtures.mjs <run-dir> mods/live/tests/fixtures/run-798.ts`. The VS Code chat panel draws no mod — prove a change in a terminal.

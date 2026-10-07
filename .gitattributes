@@ -1,4 +1,6 @@
 * text=auto eol=lf
 *.png binary
 *.jpg binary
+*.gif binary
+*.mp4 binary
 dist/cli.cjs linguist-generated

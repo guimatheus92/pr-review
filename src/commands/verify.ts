@@ -15,6 +15,7 @@ import type { PrProvider } from '../providers/types.js';
 import type { ExistingComment, Finding, GatherOutput, PrMetadata, PrRef } from '../types.js';
 import { canonicalJson, sha256File } from '../util/atomic-json.js';
 import { companionRuntimeDirective } from '../plugins/companions.js';
+import { DESCRIPTION_REVIEWER } from '../dispatch/single-session.js';
 import { partitionFindingsForPublication, type PublicationMetadata } from '../util/severity.js';
 import { dedupeFindings } from '../dedupe.js';
 
@@ -682,7 +683,12 @@ export const CHECKS: InvariantCheck[] = [
         ctx.routes.filter((r) => !['context', 'index', 'skipped'].includes(r.matchedBy)).map((r) => r.name),
       );
       const unrouted = ctx.state.planned.filter(
-        (name) => !dispatchNames.has(name) && name !== 'verifier' && name !== 'codex' && !name.startsWith('companion:'),
+        (name) =>
+          !dispatchNames.has(name) &&
+          name !== 'verifier' &&
+          name !== 'codex' &&
+          name !== DESCRIPTION_REVIEWER &&
+          !name.startsWith('companion:'),
       );
       return unrouted.length === 0
         ? pass(`${dispatchNames.size} dispatched pass(es), ${contextNames.length} project skill(s) as shared context`)

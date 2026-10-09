@@ -9,6 +9,7 @@ import type { PassSelection } from '../src/dispatch/pass-select.js';
 import type { Finding, GatherOutput, PrRef } from '../src/types.js';
 import type { PrProvider } from '../src/providers/types.js';
 import { companionReviewerNames } from '../src/plugins/companions.js';
+import { DESCRIPTION_REVIEWER } from '../src/dispatch/single-session.js';
 import { runStatus } from '../src/commands/status.js';
 import { RUNS_ROOT } from '../src/util/tmp.js';
 
@@ -544,6 +545,40 @@ for (const runtime of ['copilot', 'claude'] as const) {
   });
 }
 
+test('runReview — every dispatched review plans the PR-description check; --skip pr-description removes it', async () => {
+  for (const skip of [undefined, ['pr-description']]) {
+    const s = setup(['src/app.ts']);
+    try {
+      let planned: string[] = [];
+      const result = await runReview({
+        ...BASE,
+        skip,
+        homeOverride: s.home,
+        runDir: s.runDir,
+        fromGather: s.gatherFile,
+        provider: fakeProvider(),
+        selectPassesFn: () => ({
+          passes: [{ name: 'p/generic', source: '/x.md', body: 'review', matchedBy: 'baseline', matchedOn: [] }],
+          projectSkills: [], indexEntries: [], stackTags: ['typescript'],
+          routes: [{ name: 'p/generic', source: '/x.md', matchedBy: 'baseline' }], missingBaseline: [],
+        }),
+        runSingleSessionFn: async (_sessionOpts, ctx) => {
+          planned = ctx.dispatchPlan!.reviewers.map((reviewer) => reviewer.name);
+          return {
+            outputs: planned.map((reviewerName) => ({ reviewerName, model: 'm', findings: [], rawOutput: '[]', durationMs: 1, exitCode: 0 })),
+            rawOrchestratorOutput: '', rawOrchestratorStderr: '', exitCode: 0, durationMs: 1,
+            findingsUnavailable: false,
+          };
+        },
+      });
+      assert.equal(result.exitCode, 0, result.summary);
+      assert.deepEqual(planned, skip ? ['p/generic'] : ['p/generic', DESCRIPTION_REVIEWER]);
+    } finally {
+      s.restore();
+    }
+  }
+});
+
 test('runReview — missing and duplicate ordinary pass outputs fail operationally', async () => {
   const s = setup(['src/app.ts']);
   try {
@@ -685,7 +720,7 @@ test('runReview — gather receives the provider resolved from trusted config, n
 // only review-shaped prompt text in the repo is PASS_RULES, VERIFIER_BRIEF, the
 // orchestrator scaffold, and the codex prompt — none may hardcode a framework.
 test('prompt text in the repo stays stack-agnostic (no framework names)', async () => {
-  const { PASS_RULES, VERIFIER_BRIEF } = await import('../src/dispatch/single-session.js');
+  const { PASS_RULES, VERIFIER_BRIEF, DESCRIPTION_BRIEF } = await import('../src/dispatch/single-session.js');
   const { fileURLToPath } = await import('node:url');
   const srcDir = fileURLToPath(new URL('../src/dispatch/', import.meta.url));
   const codexSrc = readFileSync(join(srcDir, 'codex.ts'), 'utf8');
@@ -697,6 +732,7 @@ test('prompt text in the repo stays stack-agnostic (no framework names)', async 
   for (const [label, text] of [
     ['PASS_RULES', PASS_RULES],
     ['VERIFIER_BRIEF', VERIFIER_BRIEF],
+    ['DESCRIPTION_BRIEF', DESCRIPTION_BRIEF],
     ['single-session.ts', singleSrc],
     ['codex.ts', codexSrc],
     ['call-sites.ts', callSitesSrc],

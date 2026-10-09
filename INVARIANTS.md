@@ -434,7 +434,7 @@ ran. A claim is checkable from the context every pass already has; it needs one
 dispatch that is asked to check it.
 
 **Enforced:** `src/dispatch/pass-select.ts`, `src/dispatch/single-session.ts`,
-`src/commands/review.ts`, `src/commands/verify.ts`
+`src/commands/review.ts`, `src/commands/verify.ts`, `src/cli.ts`
 
 **Verified:** `tests/pass-select.test.ts`, `tests/session-context.test.ts`,
 `tests/verify.test.ts`, `tests/zero-passes.test.ts`

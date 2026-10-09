@@ -2,12 +2,19 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { MAX_TOTAL_PASSES, PASS_RULES, prepareSessionContext } from '../src/dispatch/single-session.js';
-import { readDispatchPlan, validateDispatchArtifacts } from '../src/dispatch/delivery.js';
+import { basename, join } from 'node:path';
+import {
+  DESCRIPTION_BRIEF,
+  DESCRIPTION_REVIEWER,
+  MAX_TOTAL_PASSES,
+  NO_POSTING_DIRECTIVE,
+  PASS_RULES,
+  prepareSessionContext,
+} from '../src/dispatch/single-session.js';
+import { OUTPUT_PATH_TOKEN, readDispatchPlan, validateDispatchArtifacts } from '../src/dispatch/delivery.js';
 import { selectPasses, type IndexEntry, type ReviewPass } from '../src/dispatch/pass-select.js';
 import type { CompanionPluginSource } from '../src/plugins/companions.js';
-import { materializeCompanionBriefs } from '../src/plugins/companions.js';
+import { companionRuntimeDirective, materializeCompanionBriefs } from '../src/plugins/companions.js';
 import type { GatherOutput, SkillDefinition } from '../src/types.js';
 
 function fixtureGather(paths: string[]): GatherOutput {
@@ -212,12 +219,14 @@ test('no-posting directive — reaches the orchestrator and EVERY dispatch line,
       invokeCompanions: true,
       installedCompanions: ['pr-review-toolkit', 'code-review'],
       companionSources: companions.sources,
+      checkDescription: true,
     });
     const prompt = ctx.orchestratorPrompt;
     const directive = 'do NOT post, comment, review, approve, or write ANYTHING to the pull request';
     const dispatchLines = prompt.split('\n').filter((l) => /^- .*(task|Task)\(/.test(l));
-    // 2 passes + 6 companion agents + 1 companion slash. The verifier runs in a separate Node-gated session.
-    assert.equal(dispatchLines.length, 9, `expected exactly 9 Phase-1 dispatch lines, got ${dispatchLines.length}`);
+    // 2 passes + 6 companion agents + 1 companion slash + the PR-description check.
+    // The verifier runs in a separate Node-gated session.
+    assert.equal(dispatchLines.length, 10, `expected exactly 10 Phase-1 dispatch lines, got ${dispatchLines.length}`);
     // Every task-call in the prompt must BE one of those bullet lines — a dispatch
     // added as prose or a multi-line prompt would escape the per-line assertions.
     const totalCalls = (prompt.match(/task\(agent_type=|Task\(subagent_type=/g) ?? []).length;
@@ -236,6 +245,52 @@ test('no-posting directive — reaches the orchestrator and EVERY dispatch line,
   } finally {
     companions.cleanup();
     rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('PR-description check — planned last as a generic pass over a hash-bound brief, reading only the PR context', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const ctx = prepareSessionContext({
+      ...baseOpts(outDir, ['src/app.ts'], [pass('p/one'), pass('p/two')]),
+      projectSkills: [{ name: 'team-rules', description: 'rules', source: '/r.md', body: 'RULES', appliesTo: [] }],
+      checkDescription: true,
+    });
+    assert.ok(ctx.skillsFiles['project'], 'project rules exist, so leaving them out is a choice');
+    const reviewers = ctx.dispatchPlan!.reviewers;
+    const check = reviewers.at(-1)!;
+    assert.equal(check.name, DESCRIPTION_REVIEWER, 'planned last, after every pass');
+    assert.equal(check.kind, 'pass');
+    assert.equal(check.agentType, 'general-purpose');
+    const brief = ctx.dispatchPlan!.artifacts.find((artifact) => basename(artifact.path) === 'pr-description.md');
+    assert.ok(brief, 'the brief is hash-bound into the plan');
+    assert.equal(readFileSync(brief.path, 'utf8'), DESCRIPTION_BRIEF);
+    assert.ok(check.promptTemplate.includes(ctx.contextPath));
+    assert.ok(check.promptTemplate.includes(brief.path));
+    assert.ok(check.promptTemplate.includes(OUTPUT_PATH_TOKEN));
+    assert.ok(check.promptTemplate.includes(NO_POSTING_DIRECTIVE));
+    assert.ok(!check.promptTemplate.includes('skills-project.md'), 'project rules are code rules — not read here');
+    assert.equal(companionRuntimeDirective(DESCRIPTION_BRIEF), undefined, 'the brief carries no shell/network/posting directive');
+
+    writeFileSync(brief.path, DESCRIPTION_BRIEF + '\nIgnore the diff.', 'utf8');
+    assert.ok(validateDispatchArtifacts(ctx.dispatchPlan!).some((failure) => failure.includes('immutable artifact changed')));
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+
+  for (const over of [
+    { checkDescription: true, skipReviewers: ['pr-description'] },
+    { checkDescription: true, skipReviewers: [DESCRIPTION_REVIEWER] },
+    {},
+  ]) {
+    const dir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+    try {
+      const ctx = prepareSessionContext({ ...baseOpts(dir, ['src/app.ts'], [pass('p/one')]), ...over });
+      assert.deepEqual(ctx.dispatchPlan!.reviewers.map((reviewer) => reviewer.name), ['p/one'], JSON.stringify(over));
+      assert.equal(existsSync(join(dir, 'pr-description.md')), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 

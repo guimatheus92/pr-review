@@ -1671,6 +1671,7 @@ async function reviewPipeline(opts: ReviewCmdOptions, where: { outDir?: string }
     includeCodex,
     repoRoot: cwd,
     callSites: callSites.section,
+    checkDescription: true, // INV-CTX-04
     mcpServers: mcpCapabilities.servers,
     trustedMcpConfig: mcpCapabilities.trustedRepoConfig,
     controlDir: controlDirForRun(outDir, opts.homeOverride),

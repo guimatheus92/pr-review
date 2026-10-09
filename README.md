@@ -28,7 +28,7 @@
 ## Highlights
 
 - **Full retention, eligible-only publication.** Every deduplicated finding remains in local evidence. Eligible findings post as GitHub review comments, Azure DevOps threads or GitLab discussions — never a top-level comment. See [publication controls](#publication-controls) and [posting guarantees](#posting-guarantees).
-- **Passes, not built-in reviewers.** Every pass is one skill applied by a generic agent. Review knowledge lives in versioned [skill packs](#review-passes--skill-packs) (`awesome-copilot`, `owasp`, …) and in your repo's own skill dirs.
+- **Passes, not built-in reviewers.** Every pass is one skill applied by a generic agent; the only built-in check is whether the PR's own title and description match the diff. Review knowledge lives in versioned [skill packs](#review-passes--skill-packs) (`awesome-copilot`, `owasp`, …) and in your repo's own skill dirs.
 - **Your rules in every pass.** Matched `.claude/skills`, `.github/instructions`, `.agents/skills`… files become authoritative project rules for every pass — no cap, never truncated. See [add your own rules](#add-your-own-rules).
 - **Stack-aware routing.** GitHub Linguist languages plus manifest dependencies rank passes by evidence tier. Preview the selection with `--context-only`.
 - **Untrusted by default.** A rule file the PR itself added or changed cannot instruct its own review; a changed `.pr-review.yaml` or repository MCP config is ignored too.
@@ -46,7 +46,7 @@ flowchart TD
     P --> T{"anything to dispatch?<br/>(a docs-only PR keeps only glob/forced passes)"}
     T -- "no pass matched" --> E0["exit 2 — nothing to review with<br/>(packs suggest hint)"]
     T -- "docs-only, nothing doc-scoped" --> E0b["exit 0 — nothing to review"]
-    T -- yes --> D["one dispatch-only agent session (Copilot CLI or Claude Code)<br/>one task() per pass and companion → attempt-N.json"]
+    T -- yes --> D["one dispatch-only agent session (Copilot CLI or Claude Code)<br/>one task() per pass, companion and the PR-description check → attempt-N.json"]
     D -. optional, parallel .-> C["Codex sibling (read-only)"]
     D --> N["Node validates and promotes write-once raw-#lt;reviewer#gt;.json<br/>one automatic recovery session for missing or invalid reviewers only"]
     C --> N
@@ -60,7 +60,7 @@ flowchart TD
     POST --> EX
 ```
 
-**Why a CLI, not just a skill?** LLMs are unreliable at gathering metadata, deduplicating findings, and posting comments. The Node CLI handles those deterministic tasks; review passes only do the actual reviewing. The orchestrator session is dispatch-only — it cannot assemble findings, decide the verifier, or post. See the [architecture](skills/help/reference/architecture.md) for the full execution model.
+**Why a CLI, not just a skill?** LLMs are unreliable at gathering metadata, deduplicating findings, and posting comments. The Node CLI handles those deterministic tasks; review passes only do the actual reviewing. The orchestrator session is dispatch-only — it cannot assemble findings, decide the verifier, or post. Node also prepares what a confined pass cannot fetch: the shared `pr-context.md` names every excluded file, digests a changed `package-lock.json` (packages that lost `resolved`/`integrity`, changed version or dev/optional flags), and lists where the declarations the PR touches are called. See the [architecture](skills/help/reference/architecture.md) for the full execution model.
 
 Every run reports which skills it used — a progress brief at dispatch (`N pass(es) · M project rule(s) · K on-demand`) and a `## Skills` section in the final summary (with a `**Skipped:** S` segment when any pass was skipped):
 
@@ -207,7 +207,7 @@ hosts:
 ```bash
 /pr-review <pr-url>                        # review with auto-discovered skills; posts line comments (default)
 /pr-review <pr-url> --dry-run              # preview findings without posting
-/pr-review <pr-url> --skip owasp/logging   # skip passes (full pack/skill or bare name; also: verifier, codex)
+/pr-review <pr-url> --skip owasp/logging   # skip passes (full pack/skill or bare name; also: verifier, codex, pr-description)
 /pr-review <pr-url> --context-only         # prepare context + the pass files, print stack + pass table, don't dispatch
 /pr-review <pr-url> --lang pt-BR           # language for finding titles/bodies (default: en)
 /pr-review <pr-url> --fail-on high         # exit 1 if any high/critical finding survives dedupe
@@ -305,7 +305,7 @@ Configure packs with the `skill_packs:` yaml key. Unlike every other list key (w
 
 **Security note:** packs are third-party prompt content read by agents with tool access. Pin `ref:` for reproducibility, and know the only install paths are `packs add` and editing `skill_packs` — `packs suggest` never installs anything.
 
-Skip any pass with `--skip <names>` (full `awesome-copilot/go` or bare `go`; also `verifier`, `codex`). The **verifier** remains a pipeline step: dispatched as a generic agent to reconcile across passes when phase 1 produces a CRITICAL/HIGH finding.
+Skip any pass with `--skip <names>` (full `awesome-copilot/go` or bare `go`; also `verifier`, `codex`, `pr-description`). The **verifier** remains a pipeline step: dispatched as a generic agent to reconcile across passes when phase 1 produces a CRITICAL/HIGH finding. The **PR-description check** (`internal/pr-description`) is the other brief pr-review ships: planned beside the skill passes on every review, it checks the PR's title and description against the diff and reports contradicted claims at MEDIUM or LOW.
 
 ## Add your own rules
 
@@ -385,7 +385,8 @@ pr-review review <pr-url> [flags]            # full pipeline
 #   --context-only          prepare pr-context.md + the pass files,
 #                           print the stack + pass table, exit
 #   --skip <names>          comma-separated pass names to skip (full pack/skill
-#                           or bare skill name; also: verifier, codex)
+#                           or bare skill name; also: verifier, codex,
+#                           pr-description)
 #   --lang <code>           output language for findings (yaml: language, env: PR_REVIEW_LANG)
 #   --fail-on <severity>    critical|high|medium|low|nit → exit 1 on surviving findings
 #   --publish-min-severity <severity>  publish this severity and above;

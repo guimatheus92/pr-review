@@ -1,0 +1,46 @@
+diff --git a/package-lock.json b/package-lock.json
+index bf1e662..bf2bc55 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -15,14 +15,14 @@
+       "devDependencies": {
+         "@types/node": "^22.10.5",
+         "tsx": "^4.19.2",
+-        "typescript": "^5.7.2",
++        "typescript": "^5.7.3",
+         "vitest": "^3.0.5"
+       }
+     },
+     "node_modules/typescript": {
+-      "version": "5.7.2",
+-      "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.7.2.tgz",
+-      "integrity": "sha512-i5t66RHxDvVN40HfDd1PsEThGNnlMCMT3jMUuoh9/0TaqWevNontacunWyN02LA9/fIbEWlcHZcgTKb9QoaLfg==",
++      "version": "5.7.3",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.7.3.tgz",
++      "integrity": "sha512-84MVSjMEHP+FQRPy3pX9sTVV/INIex71s9TL2Gm5FG/WG1SqXeKyZ0k7/blY/4FdOzI12CBy1vGc4og/eus0fw==",
+       "dev": true,
+       "license": "Apache-2.0",
+       "bin": {
+diff --git a/package.json b/package.json
+index 6f7552a..e2078ad 100644
+--- a/package.json
++++ b/package.json
+@@ -11,7 +11,7 @@
+   "devDependencies": {
+     "@types/node": "^22.10.5",
+     "tsx": "^4.19.2",
+-    "typescript": "^5.7.2",
++    "typescript": "^5.7.3",
+     "vitest": "^3.0.5"
+   }
+ }
+diff --git a/src/greet.ts b/src/greet.ts
+index eaf285e..5dbc3a6 100644
+--- a/src/greet.ts
++++ b/src/greet.ts
+@@ -1,4 +1,4 @@
+-/** Retrun the greeting shown on the start page. */
++/** Return the greeting shown on the start page. */
+ export function greet(name: string): string {
+   return `Hello, ${name}!`;
+ }

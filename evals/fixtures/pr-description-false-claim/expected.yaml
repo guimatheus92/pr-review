@@ -1,0 +1,8 @@
+# Distilled from the guimatheus92/mcp-video-analyzer#79 review, which took the
+# description at its word: it claimed "no behavior change" while a user-visible
+# warning was reworded and a dependency moved. The internal/pr-description pass
+# must report both contradicted claims (its titles start with "PR description:").
+pr_description: "Refactor of the slow-request warning helper. No behavior change in user-visible output, and no dependency changes."
+must_find:
+  - "^PR description(?=.*(?:behavio|user-visible|output|warning|message))"
+  - "^PR description(?=.*(?:depend|version|2\\.6\\.0))"

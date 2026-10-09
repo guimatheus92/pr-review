@@ -1,0 +1,7 @@
+# Distilled from the guimatheus92/mcp-video-analyzer#79 review: the PR adds
+# `duration` to an exported result type with the comment "Lets the caller skip a
+# redundant probe", but the only caller (repo/src/tools/analyze.ts, outside the
+# diff) still probes and never reads it. Only the `## Call sites` section can
+# show that, so `repo/` is committed as the PR head and the CLI runs inside it.
+must_find:
+  - "(?=.*\\bduration\\b)(?=.*(?:unused|never (?:read|used|consumed)|not (?:read|used|consumed)|no (?:caller|consumer)|still (?:calls?|probes?)|redundant|dead))"

@@ -6,6 +6,7 @@ import { matchesAny } from '../util/globs.js';
 import { sanitizeForFilename } from '../util/tmp.js';
 import { printable, safeRuntimeDiagnostic } from '../util/text.js';
 import { parseReviewerOutput } from './parsers.js';
+import { renderLockfileDigests } from './lockfile-digest.js';
 import {
   GENERIC_AGENT,
   normalizeModel,
@@ -345,6 +346,7 @@ function writeContextFile(
       metaLines.push(`- … ${excluded.length - MAX_EXCLUDED_LISTED} more excluded path(s) not listed`);
     }
   }
+  metaLines.push(...renderLockfileDigests(gather));
 
   if (index && index.count > 0) {
     metaLines.push(

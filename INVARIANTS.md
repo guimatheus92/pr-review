@@ -324,10 +324,11 @@ exclusions — otherwise the byte-size gate sees 0 bytes and passes.
 
 **Enforced:** `src/providers/azuredevops.ts`, `src/providers/github.ts`,
 `src/providers/gitlab.ts`, `src/commands/gather.ts`, `src/commands/review.ts`,
-`src/dispatch/diff-filter.ts`
+`src/dispatch/diff-filter.ts`, `src/dispatch/lockfile-digest.ts`
 
 **Verified:** `tests/providers/azuredevops.test.ts`, `tests/gather-cache.test.ts`,
-`tests/zero-passes.test.ts`
+`tests/zero-passes.test.ts`, `tests/lockfile-digest.test.ts`,
+`tests/providers/github.test.ts`, `tests/providers/gitlab.test.ts`
 
 **Check:** tests-only
 

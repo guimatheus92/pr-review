@@ -835,3 +835,111 @@ test('runGather — without patchesRequired the same PR is path-only: the guard 
   assert.ok(result.changedFiles.every((f) => f.patch === undefined));
   assert.equal(result.patchesOmitted, true);
 });
+
+// The exception: an excluded package-lock.json is read at base and head and
+// reduced to a digest (guimatheus92/mcp-video-analyzer#79). Every other excluded
+// file stays unread.
+
+const LOCK = {
+  base: JSON.stringify({ lockfileVersion: 3, packages: { '': {}, 'node_modules/a': { version: '1.0.0', resolved: 'https://r/a.tgz', integrity: 'sha512-a' } } }),
+  head: JSON.stringify({ lockfileVersion: 3, packages: { '': {}, 'node_modules/a': { version: '1.0.0' } } }),
+};
+
+/** Adds a recording `readFileAt` to a fake provider. */
+function reading(
+  provider: PrProvider,
+  read: NonNullable<PrProvider['readFileAt']> = async (_ref, _path, side) => LOCK[side],
+): { provider: PrProvider; reads: string[]; metas: PrMetadata[] } {
+  const reads: string[] = [];
+  const metas: PrMetadata[] = [];
+  return {
+    provider: {
+      ...provider,
+      readFileAt: async (ref, path, side, m) => {
+        reads.push(`${side}:${path}`);
+        metas.push(m);
+        return read(ref, path, side, m);
+      },
+    },
+    reads,
+    metas,
+  };
+}
+
+test('runGather — an excluded package-lock.json is read at base and head and digested; nothing else excluded is read', async () => {
+  const rows: ChangedFile[] = [
+    file('src/a.ts'),
+    { ...file('package-lock.json'), patch: '@@ -1 +1 @@\n-x\n+y' },
+    { ...file('apps/web/package-lock.json'), status: 'added' },
+    { ...file('apps/new/package-lock.json'), status: 'renamed', previousPath: 'apps/old/package-lock.json' },
+    file('yarn.lock'),
+    file('assets/logo.png'),
+    file('dist/bundle.js'),
+  ];
+  const { provider, reads, metas } = reading(fakeGithub({ ...META, changedFileCount: rows.length }, rows).provider);
+  let cached: GatherOutput | undefined;
+  const result = await runGather({ ...gatherOpts(provider), writeGatherCacheFn: (v) => (cached = v, 'x') });
+
+  assert.deepEqual(reads.sort(), [
+    'base:apps/old/package-lock.json', // a rename's base is at its old path
+    'base:package-lock.json',
+    'head:apps/new/package-lock.json',
+    'head:apps/web/package-lock.json', // added: no base to read
+    'head:package-lock.json',
+  ]);
+  assert.ok(metas.every((m) => m.headSha === META.headSha), 'the provider gets the gathered metadata to resolve its commits');
+  assert.deepEqual(result.lockfileDigests?.map((d) => [d.path, d.status]), [
+    ['package-lock.json', 'ok'],
+    ['apps/web/package-lock.json', 'ok'],
+    ['apps/new/package-lock.json', 'ok'],
+  ]);
+  assert.deepEqual(result.lockfileDigests?.[0]?.changes, { stripped: { total: 1, sample: ['a (resolved, integrity)'] } });
+  assert.equal(result.changedFiles.find((f) => f.path === 'package-lock.json')?.patch, undefined, 'still no patch — a digest is not a diff');
+  assert.deepEqual(cached?.lockfileDigests, result.lockfileDigests, 'the digest is cached with the entry');
+});
+
+test('runGather — past the file guard the lockfile is not read either', async () => {
+  const rows = [...srcPaths(501).map(file), file('package-lock.json')];
+  const { provider, reads } = reading(fakePaying({ ...META, changedFileCount: rows.length }, rows.map((f) => f.path)).provider);
+  const result = await withNoRepoDir(async (cwd) => runGather({ ...gatherOpts(provider), cwd, writeGatherCacheFn: () => 'x' }));
+  assert.equal(result.patchesOmitted, true);
+  assert.deepEqual(reads, [], 'the run is refused anyway: zero reads');
+  assert.equal(result.lockfileDigests, undefined);
+});
+
+test('runGather — a lockfile that cannot be read is stated unavailable, and the gather still succeeds', async () => {
+  const rows = [file('src/a.ts'), file('package-lock.json')];
+  const failing = reading(fakeGithub({ ...META, changedFileCount: 2 }, rows).provider, async () => {
+    throw Object.assign(new Error('HTTP 404 Not Found\nstack noise'), { status: 404 });
+  });
+  const failed = await runGather({ ...gatherOpts(failing.provider), writeGatherCacheFn: () => 'x' });
+  assert.deepEqual(failed.lockfileDigests, [
+    { path: 'package-lock.json', status: 'unavailable', reason: 'could not read it from github: HTTP 404 Not Found' },
+  ]);
+
+  const unable = await runGather({ ...gatherOpts(fakeGithub({ ...META, changedFileCount: 2 }, rows).provider), writeGatherCacheFn: () => 'x' });
+  assert.deepEqual(unable.lockfileDigests, [
+    { path: 'package-lock.json', status: 'unavailable', reason: 'the github provider cannot read file content' },
+  ]);
+});
+
+test('runGather — a cache entry holding a lockfile but no digest predates it and is refetched once; one without a lockfile is served', async () => {
+  const rows = [file('src/a.ts'), file('package-lock.json')];
+  const stale = { pr: GH_REF, metadata: META, changedFiles: rows, existingComments: [], gatheredAt: '', changedFilesComplete: true as const };
+  const first = fakeGithub(META, rows);
+  const { provider } = reading(first.provider);
+  const refetched = await runGather({ ...gatherOpts(provider), readGatherCacheFn: () => ({ data: stale, path: 'hit.json', ageMs: 1 }), writeGatherCacheFn: () => 'x' });
+  assert.equal(first.fetches(), 1);
+  assert.equal(refetched.lockfileDigests?.[0]?.status, 'ok');
+
+  const digested = { ...stale, lockfileDigests: refetched.lockfileDigests };
+  const second = fakeGithub(META, rows);
+  const served = await runGather({ ...gatherOpts(second.provider), readGatherCacheFn: () => ({ data: digested, path: 'hit.json', ageMs: 1 }), writeGatherCacheFn: () => 'x' });
+  assert.equal(second.fetches(), 0, 'an entry carrying its digest is served');
+  assert.deepEqual(served.lockfileDigests, refetched.lockfileDigests, 'as stored');
+
+  const plain = { ...stale, changedFiles: [file('src/a.ts')] };
+  const third = fakeGithub(META, [file('src/a.ts')]);
+  await runGather({ ...gatherOpts(third.provider), readGatherCacheFn: () => ({ data: plain, path: 'hit.json', ageMs: 1 }), writeGatherCacheFn: () => 'x' });
+  assert.equal(third.fetches(), 0, 'no lockfile, nothing to digest: not invalidated');
+});

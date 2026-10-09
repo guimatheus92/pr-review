@@ -1,7 +1,7 @@
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { resolvePr } from '../providers/index.js';
-import type { ChangedFile, ChangedFilesOptions, GatherOutput, PrMetadata, PrRef } from '../types.js';
+import type { ChangedFile, ChangedFilesOptions, GatherOutput, LockfileDigest, PrMetadata, PrRef } from '../types.js';
 import {
   applyDiffExclusions,
   DEFAULT_EXCLUDES,
@@ -9,6 +9,7 @@ import {
   patchPolicy,
   summarizeExclusions,
 } from '../dispatch/diff-filter.js';
+import { digestPackageLock, isDigestibleLockfile, MAX_DIGESTED_LOCKFILES } from '../dispatch/lockfile-digest.js';
 import { changesRepoConfig } from '../config.js';
 import { lastCommentIdFrom } from '../cache/keys.js';
 import { readGatherCache, writeGatherCache } from '../cache/store.js';
@@ -17,6 +18,7 @@ import pLimit from 'p-limit';
 import { cwdMatchesPr } from '../stack/detect.js';
 import { countChangedLines } from '../util/diff-lines.js';
 import { gitOut, gitOutAsync, gitTopLevel, gitZ } from '../util/git.js';
+import { printable, safeRuntimeDiagnostic } from '../util/text.js';
 
 const PATCH_CONCURRENCY = 8;
 const HEX_ID = /^[0-9a-f]{7,64}$/i;
@@ -299,6 +301,48 @@ async function completeFromGit(
   return union;
 }
 
+/**
+ * INV-FETCH-04's one exception: each changed, excluded `package-lock.json` is
+ * read at the two commits the provider's own diff compares and reduced to a
+ * digest. Kept here, beside every other fetch decision gather takes; the
+ * format lives in `lockfile-digest.ts`. A lockfile that cannot be digested says
+ * why — a missing digest must never read as "nothing changed".
+ */
+async function digestLockfiles(
+  provider: PrProvider,
+  ref: PrRef,
+  metadata: PrMetadata,
+  changedFiles: ChangedFile[],
+): Promise<LockfileDigest[]> {
+  const targets = changedFiles.filter((file) => file.excluded && isDigestibleLockfile(file.path));
+  const digests = await Promise.all(
+    targets.map(async (file, i): Promise<LockfileDigest> => {
+      const unavailable = (reason: string): LockfileDigest => ({ path: file.path, status: 'unavailable', reason });
+      if (i >= MAX_DIGESTED_LOCKFILES) {
+        return unavailable(`more than ${MAX_DIGESTED_LOCKFILES} lockfiles changed; only the first ${MAX_DIGESTED_LOCKFILES} are digested`);
+      }
+      if (!provider.readFileAt) return unavailable(`the ${provider.name} provider cannot read file content`);
+      try {
+        // An added file has no base and a deleted one no head; a rename's base is at its old path.
+        const [base, head] = await Promise.all([
+          file.status === 'added' ? null : provider.readFileAt(ref, file.previousPath ?? file.path, 'base', metadata),
+          file.status === 'deleted' ? null : provider.readFileAt(ref, file.path, 'head', metadata),
+        ]);
+        return digestPackageLock(file.path, base, head);
+      } catch (err) {
+        const detail = safeRuntimeDiagnostic(String((err as Error)?.message ?? err).split('\n')[0] ?? '', 200) ?? 'unknown error';
+        return unavailable(`could not read it from ${provider.name}: ${detail}`);
+      }
+    }),
+  );
+  for (const digest of digests) {
+    if (digest.status !== 'ok') {
+      process.stderr.write(`[gather] lockfile digest ${digest.status} for ${printable(digest.path)}: ${digest.reason}\n`);
+    }
+  }
+  return digests;
+}
+
 export function refreshCachedGatherIdentity(gather: GatherOutput, ref: GatherOutput['pr']): GatherOutput {
   return { ...gather, pr: { ...gather.pr, ...ref } };
 }
@@ -344,9 +388,13 @@ export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
       // undecidable, so anything but a superset refetches.
       const current = new Set(patchOpts.excludes);
       const contentStale = (hit.data.contentExcludes ?? []).some((glob) => !current.has(glob));
+      // Written before the lockfile digest existed: served as-is, its lockfile
+      // would render as "not computed". An entry with no lockfile needs none.
+      const digestMissing =
+        hit.data.lockfileDigests === undefined && hit.data.changedFiles.some((file) => isDigestibleLockfile(file.path));
       // An entry without the completeness marker predates that gate (0.6–0.10 cached
       // ADO lists cut at 100 files raw) under a key the upgrade does not rotate.
-      if (!legacyFiltered && !contentStale && hit.data.changedFilesComplete === true) {
+      if (!legacyFiltered && !contentStale && !digestMissing && hit.data.changedFilesComplete === true) {
         const cachedRaw = refreshCachedGatherIdentity(hit.data, ref);
         const cached = { ...cachedRaw, changedFiles: applyDiffExclusions(cachedRaw.changedFiles, opts.extraExcludes) };
         process.stderr.write(
@@ -363,7 +411,9 @@ export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
           ? '[gather] filtered legacy cache entry ignored — refetching raw changed files\n'
           : contentStale
             ? '[gather] cache entry withheld content for globs this run does not exclude — refetching changed files\n'
-            : '[gather] cache entry predates the file-list completeness check — refetching changed files\n',
+            : hit.data.changedFilesComplete !== true
+              ? '[gather] cache entry predates the file-list completeness check — refetching changed files\n'
+              : '[gather] cache entry predates the lockfile digest — refetching changed files\n',
       );
     }
   }
@@ -403,6 +453,8 @@ export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
     (file) => file.status !== 'deleted' && file.patch === undefined && !policy.wants(file.path),
   );
   const changedFiles = applyDiffExclusions(changedFilesRaw, opts.extraExcludes);
+  // Past the file guard nothing is read, the digest's two reads included.
+  const lockfileDigests = policy.omitted ? [] : await digestLockfiles(provider, ref, metadata, changedFiles);
   const exc = summarizeExclusions(changedFiles);
   process.stderr.write(
     `[gather] ${exc.kept} files in-scope, ${exc.excluded} excluded; ${existingComments.length} existing comments.\n`,
@@ -421,6 +473,7 @@ export async function runGather(opts: GatherCmdOptions): Promise<GatherOutput> {
     // entry on any change to the exclude set, for rows that carry their patch
     // regardless — the saving does not exist there, so neither should the cost.
     ...(contentWithheld ? { contentExcludes: patchOpts.excludes ?? [] } : {}),
+    ...(lockfileDigests.length ? { lockfileDigests } : {}),
   };
 
   // Same discipline as changedFilesComplete: a list that could not be assembled

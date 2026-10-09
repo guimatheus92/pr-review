@@ -830,6 +830,32 @@ test('changed files — excluded paths are listed with status and counts, never 
   }
 });
 
+test('pr-context — an excluded package-lock.json gets its digest after Changed Files and before the diff', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const gather = fixtureGather(['src/app.ts']);
+    gather.changedFiles.push({ path: 'package-lock.json', status: 'modified', additions: 12, deletions: 886, excluded: true });
+    gather.lockfileDigests = [
+      {
+        path: 'package-lock.json',
+        status: 'ok',
+        packages: { base: 541, head: 541 },
+        changes: { stripped: { total: 419, sample: ['a (resolved, integrity)'] } },
+      },
+    ];
+    const ctx = prepareSessionContext({ ...baseOpts(outDir, [], [pass('pack/quality')]), gather });
+    const context = readFileSync(ctx.contextPath, 'utf8');
+    const changed = context.indexOf('## Changed Files');
+    const digest = context.indexOf('## Lockfile Digest');
+    const diff = context.indexOf('\n## Diff');
+    assert.ok(changed >= 0 && changed < digest && digest < diff, 'Changed Files, then the digest, then the diff');
+    assert.match(context, /### package-lock\.json\n- packages: 541 at base, 541 at head\n- Lost resolved\/integrity: 419 \(first 1\) — a \(resolved, integrity\)/);
+    assert.doesNotMatch(context.slice(diff), /package-lock/, 'the digest is context, never a diff');
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
 test('pr-context — the PR description is fenced as untrusted data and cannot close its own fence', () => {
   const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
   try {

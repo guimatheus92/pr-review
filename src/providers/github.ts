@@ -277,6 +277,27 @@ export class GitHubProvider implements PrProvider {
     return files;
   }
 
+  /**
+   * Base is the merge base, not `base.sha`: that is the base-branch TIP, and
+   * reading it would charge the PR with every change merged to base since it
+   * branched. A fork PR's commits are readable here — its head lives in the base
+   * repository under refs/pull.
+   */
+  async readFileAt(ref: PrRef, path: string, side: 'base' | 'head', m: PrMetadata): Promise<string> {
+    const octokit = this.client(ref);
+    // ponytail: one compare call per lockfile; memoize if monorepos make it show
+    const sha =
+      side === 'head'
+        ? m.headSha
+        : (await octokit.repos.compareCommitsWithBasehead({ owner: ref.owner, repo: ref.repo, basehead: `${m.baseSha}...${m.headSha}`, per_page: 1 }))
+            .data.merge_base_commit.sha;
+    const { data } = await octokit.repos.getContent({ owner: ref.owner, repo: ref.repo, path, ref: sha, mediaType: { format: 'raw' } });
+    // The raw media type answers a file with its bytes as a string; anything
+    // else (a directory listing, a submodule) is not a file to digest.
+    if (typeof (data as unknown) !== 'string') throw new Error(`${path} at ${sha.slice(0, 12)} is not a file`);
+    return data as unknown as string;
+  }
+
   async fetchExistingComments(ref: PrRef, since?: Date): Promise<ExistingComment[]> {
     // Both endpoints filter server-side on `since`, so a reconciliation read is
     // one small page instead of the PR's whole comment history — which matters

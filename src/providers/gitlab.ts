@@ -399,6 +399,15 @@ export class GitLabProvider implements PrProvider {
     return (await this.getDiffs(ref)).map(mapDiff);
   }
 
+  /** `diff_refs.base_sha` already IS the merge base the MR diffs against, so both sides come straight from the metadata. */
+  async readFileAt(ref: PrRef, path: string, side: 'base' | 'head', m: PrMetadata): Promise<string> {
+    const sha = side === 'head' ? m.headSha : m.baseSha;
+    if (!sha) throw new Error(`MR !${ref.number} reports no ${side} commit (diff_refs missing)`);
+    const url = `${this.projectBase(ref)}/repository/files/${encodeURIComponent(path)}/raw?ref=${encodeURIComponent(sha)}`;
+    const res = await withRetry(() => this.rawFetch(ref, url), isTransientGitLabError, `${path}@${sha.slice(0, 8)}`);
+    return res.text();
+  }
+
   async fetchExistingComments(ref: PrRef): Promise<ExistingComment[]> {
     const notes = await this.apiAll<GitLabNote>(ref, `/merge_requests/${ref.number}/notes`);
     return notes.filter((n) => !n.system).map(mapNote);

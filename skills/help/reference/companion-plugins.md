@@ -99,4 +99,4 @@ pr-review review <url> --no-companions --dry-run   # review passes only
 
 If a companion task fails, peer tasks can still finish and valid outputs are preserved. Node retries unresolved planned companions with the rest of the incomplete Phase 1 delta; if any remain missing or invalid, the review exits 2 and posts nothing.
 
-There is no per-companion skip (`--skip` takes pass names, plus `verifier` and `codex`); to turn companions off, use `--no-companions` or `invoke_companions: false`.
+There is no per-companion skip (`--skip` takes pass names, plus `verifier`, `codex` and `pr-description`); to turn companions off, use `--no-companions` or `invoke_companions: false`.

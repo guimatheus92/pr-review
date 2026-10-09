@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { AzureDevOpsProvider, orgUrlFor } from '../../src/providers/azuredevops.js';
+import type { PrMetadata } from '../../src/types.js';
 
 // Iteration changes are a paged endpoint: $top defaults to 100 (max 2000) and the
 // response carries nextSkip. 0.6–0.10 issued ONE unpaged call, so a PR with more
@@ -225,6 +226,8 @@ test('fetchChangedFiles — at the guard exactly, every in-scope file is still f
   assert.equal(files.length, 500);
 });
 
+// The lockfile digest reads an excluded package-lock.json through readFileAt, a
+// separate method gather calls on purpose; fetchChangedFiles still never does.
 test('fetchChangedFiles — an excluded path is listed but never fetched: its patch is discarded seconds later anyway', async () => {
   const { provider, ref, items } = stubbedProvider(() => ({
     changeEntries: [edited('/src/a.cs'), edited('/package-lock.json'), edited('/assets/logo.png'), edited('/vendor/dep.cs')],
@@ -256,4 +259,49 @@ test('fetchChangedFiles — with no options every file is fetched: the standalon
   const { provider, ref, items } = stubbedProvider(() => ({ changeEntries: [edited('/src/a.cs')], nextSkip: 0 }));
   await provider.fetchChangedFiles(ref);
   assert.deepEqual(items, ['/src/a.cs', '/src/a.cs']);
+});
+
+test('readFileAt — base is the latest iteration\'s commonRefCommit, never lastMergeTargetCommit (the target tip); absent throws', async () => {
+  // INV-FETCH-04's lockfile exception. The target tip moves with every merge to
+  // the target branch; the common commit is what the PR's own diff is taken from.
+  const provider = new AzureDevOpsProvider();
+  const ref = provider.parseUrl(PR_URL)!;
+  const reads: Array<[string, unknown]> = [];
+  const git = {
+    getPullRequestById: async () => PR, // lastMergeTargetCommit: 'base' — the tip
+    getPullRequestIterations: async () => [
+      { id: 1, commonRefCommit: { commitId: 'old-common' } },
+      { id: 2, commonRefCommit: { commitId: 'common-sha' }, targetRefCommit: { commitId: 'base' } },
+    ],
+    getItem: async (_repo: string, path: string, _project: unknown, _s: unknown, _r: unknown, _m: unknown, _l: unknown, _d: unknown, version: unknown) => {
+      reads.push([path, version]);
+      return path === '/gone.json' ? null : { content: `text@${(version as { version: string }).version}` };
+    },
+  };
+  (provider as unknown as { gitApis: Map<string, Promise<unknown>> }).gitApis.set(orgUrlFor(ref), Promise.resolve(git));
+  const meta = { headSha: 'head-sha', baseSha: 'base' } as PrMetadata;
+
+  assert.equal(await provider.readFileAt(ref, 'package-lock.json', 'base', meta), 'text@common-sha');
+  assert.equal(await provider.readFileAt(ref, 'package-lock.json', 'head', meta), 'text@head-sha');
+  assert.deepEqual(reads, [
+    ['/package-lock.json', { version: 'common-sha', versionType: 2 }],
+    ['/package-lock.json', { version: 'head-sha', versionType: 2 }],
+  ]);
+  // A null item is a side the file is absent on; read as "" it would turn every package into an add.
+  await assert.rejects(() => provider.readFileAt(ref, 'gone.json', 'head', meta), /absent at head-sha/);
+});
+
+test('readFileAt — no common commit is an error, not a guess at the target tip', async () => {
+  const provider = new AzureDevOpsProvider();
+  const ref = provider.parseUrl(PR_URL)!;
+  const git = {
+    getPullRequestById: async () => PR,
+    getPullRequestIterations: async () => [{ id: 1 }],
+    getItem: async () => { throw new Error('must not be called'); },
+  };
+  (provider as unknown as { gitApis: Map<string, Promise<unknown>> }).gitApis.set(orgUrlFor(ref), Promise.resolve(git));
+  await assert.rejects(
+    () => provider.readFileAt(ref, 'package-lock.json', 'base', { headSha: 'head-sha', baseSha: 'base' } as PrMetadata),
+    /Azure DevOps reported no common commit/,
+  );
 });

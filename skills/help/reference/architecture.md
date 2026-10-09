@@ -20,21 +20,22 @@ Node CLI (deterministic plumbing)
   2. resolveRuntime()           → copilot | claude | auto (probe PATH: copilot first, then claude)
   3. ensurePacks() + loadLinguist() → clone missing skill packs, load the Linguist language index (fail-soft, in parallel with gather)
   4. detectCompanions()         → check installed companion plugins (per runtime)
-  5. runGather()                → fetch metadata + comments in parallel, paginated file list checked against the provider's count and completed from the local checkout when short (cached only once complete). File CONTENT is fetched only where a pass could read it: never for an excluded path, and not at all once the in-scope count is already past the guard below
+  5. runGather()                → fetch metadata + comments in parallel, paginated file list checked against the provider's count and completed from the local checkout when short (cached only once complete). File CONTENT is fetched only where a pass could read it: never for an excluded path — except that a changed, excluded `package-lock.json` is read at both sides of the PR's own diff and reduced to a digest (INV-FETCH-04's one exception; the content itself is never stored) — and not at all once the in-scope count is already past the guard below
   6. earlyExitGate()            → abort if PR is malformed/too large (exit 2 + error.txt); reads the "content withheld" flag before applying exclusions, since a patch-less run measures 0 bytes
   7. loadAll({ skillsOnly })    → repo skills + pack skills + installed-plugin skills; rules the PR itself changed are dropped as untrusted
   8. detectStack()              → canonical Linguist languages + categorized ecosystem/dependency/token evidence from root and changed-file manifests
   9. selectPasses()             → project skills = context in every pass; passes ranked by evidence tier (glob > dependency > weak glob > tag, cap 6) + every baseline (on top of the cap); overflow/unmatched/index-mode → skills-index.md
- 10. prepareSessionContext()    → materialized inputs (including indexed skill and companion bodies) + HMAC-authenticated dispatch plan
- 11. runSingleSession()         → dispatch-only runtime; Node validates/promotes attempt files and exact Copilot task results
+ 10. callSitesSection()         → `## Call sites`: one read-only git grep for the changed declarations, at the PR head when present (INV-CTX-07)
+ 11. prepareSessionContext()    → materialized inputs (pr-context.md with excluded files named, the lockfile digest and call sites; indexed skill, companion and pr-description briefs) + HMAC-authenticated dispatch plan
+ 12. runSingleSession()         → dispatch-only runtime; Node validates/promotes attempt files and exact Copilot task results
      ├─ selective recovery     → one automatic session for unresolved reviewers only
      └─ runCodex()             → optional attempt-scoped read-only sibling
- 12. assemble Phase 1           → only after every planned reviewer is valid
- 13. direct verifier            → separate session only for CRITICAL/HIGH Phase 1 findings
- 14. dedupe + persist           → complete delivery only; all findings against the original comment snapshot
- 15. publication partition      → authenticated threshold; all findings stay in artifacts
- 16. runPost() / renderSummary  → eligible pending comments; complete body-only local summary
- 17. exit code                  → 0 complete, 1 any retained finding ≥ --fail-on, 2 incomplete/operational failure
+ 13. assemble Phase 1           → only after every planned reviewer is valid
+ 14. direct verifier            → separate session only for CRITICAL/HIGH Phase 1 findings
+ 15. dedupe + persist           → complete delivery only; all findings against the original comment snapshot
+ 16. publication partition      → authenticated threshold; all findings stay in artifacts
+ 17. runPost() / renderSummary  → eligible pending comments; complete body-only local summary
+ 18. exit code                  → 0 complete, 1 any retained finding ≥ --fail-on, 2 incomplete/operational failure
 ```
 
 The sections below describe how delivery, trust and recovery are *built*. What
@@ -126,6 +127,8 @@ src/
 │   ├── runtime.ts           # resolveRuntime, runtimeSpawnArgs, taskCall, normalizeModel (copilot | claude | auto)
 │   ├── codex.ts             # optional Codex second-opinion reviewer (sibling process, codex exec)
 │   ├── line-snap.ts         # buildValidLinesMap + snapLineToDiff (snap findings to valid diff lines)
+│   ├── lockfile-digest.ts   # package-lock.json base/head → LockfileDigest; renders ## Lockfile Digest (pure, never fetches)
+│   ├── call-sites.ts        # ## Call sites: changed declarations → one read-only git grep, bounded
 │   ├── parsers.ts           # JSON / bracketed-markdown / section-header parsers
 │   └── diff-filter.ts       # strip lockfiles, generated code, vendor dirs
 ├── plugins/
@@ -170,7 +173,7 @@ The slash command finds the bundle via `$CLAUDE_PLUGIN_ROOT/dist/cli.cjs` under 
 
 **Why a CLI, not just skills?** LLMs are unreliable at API calls, deduplication, and posting comments. The CLI handles deterministic plumbing; LLMs only do reviewing.
 
-**Why passes instead of built-in reviewers?** Review knowledge is content, not code: every pass is one skill applied by a `general-purpose` agent, so expertise lives in versioned git repos (skill packs) and the repo's own skill dirs instead of prompts baked into the plugin. Pass selection is deterministic (Linguist language tags + globs + dependency tags — no hand-written language table), and the only review-shaped text this repo still owns is the pipeline rules (`PASS_RULES`) and the verifier brief (`VERIFIER_BRIEF`).
+**Why passes instead of built-in reviewers?** Review knowledge is content, not code: every pass is one skill applied by a `general-purpose` agent, so expertise lives in versioned git repos (skill packs) and the repo's own skill dirs instead of prompts baked into the plugin. Pass selection is deterministic (Linguist language tags + globs + dependency tags — no hand-written language table), and the only review-shaped text this repo still owns is the pipeline rules (`PASS_RULES`), the verifier brief (`VERIFIER_BRIEF`), and the PR-description check (`DESCRIPTION_BRIEF`, dispatched as `internal/pr-description` on every review; `--skip pr-description` removes it) — all three stack-agnostic.
 
 **Why single-session?** One runtime process dispatches all Phase 1 passes via `task()` / `Task()`. Node opens another dispatch session only for an unresolved delta, and a direct verifier session only when severe findings require it. The Codex second-opinion reviewer remains the deliberate parallel sibling.
 

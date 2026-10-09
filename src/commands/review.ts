@@ -12,6 +12,7 @@ import {
   runSingleSession,
 } from '../dispatch/single-session.js';
 import { applyDiffExclusions, DEFAULT_EXCLUDES, MAX_FILES_GUARD, MAX_PATCH_BYTES } from '../dispatch/diff-filter.js';
+import { callSitesSection } from '../dispatch/call-sites.js';
 import { selectPasses, type PassRoute } from '../dispatch/pass-select.js';
 import { ensurePacks } from '../packs/sync.js';
 import { loadLinguist } from '../stack/linguist.js';
@@ -1638,6 +1639,18 @@ async function reviewPipeline(opts: ReviewCmdOptions, where: { outDir?: string }
     ...loaded.warnings.map((warning) => `skills: ${safeSummaryValue(warning)}`),
   ];
 
+  // How the changed declarations are consumed, computed here because passes
+  // never get the checkout (INV-CTX-07). A resume reuses pr-context.md as is.
+  const callSites = callSitesSection({
+    prRepo: stack.cwdIsPrRepo,
+    root: cwd,
+    headSha: gather.metadata.headSha,
+    files: inScopeFiles,
+    changedPaths,
+    excludes: config.diffExcludes,
+  });
+  process.stderr.write(`[context] ${callSites.summary}\n`);
+
   const sessionOpts = {
     prUrl: opts.prUrl,
     gather,
@@ -1657,6 +1670,8 @@ async function reviewPipeline(opts: ReviewCmdOptions, where: { outDir?: string }
     runtime,
     includeCodex,
     repoRoot: cwd,
+    callSites: callSites.section,
+    checkDescription: true, // INV-CTX-04
     mcpServers: mcpCapabilities.servers,
     trustedMcpConfig: mcpCapabilities.trustedRepoConfig,
     controlDir: controlDirForRun(outDir, opts.homeOverride),

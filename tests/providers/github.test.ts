@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { apiBaseFor, GitHubProvider } from '../../src/providers/github.js';
-import type { Finding, PrRef } from '../../src/types.js';
+import type { Finding, PrMetadata, PrRef } from '../../src/types.js';
 
 const REF: PrRef = {
   provider: 'github',
@@ -110,6 +110,34 @@ test('fetchMetadata — carries the PR\'s own changed-file count so gather can r
   const meta = await provider.fetchMetadata(REF);
   assert.equal(meta.changedFileCount, 3456);
   assert.equal(meta.changedFileListTruncated, undefined, 'GitHub never declares truncation; the count comparison does');
+});
+
+test('readFileAt — base is the merge base, never base.sha (the base-branch tip); content comes back raw', async () => {
+  // INV-FETCH-04's lockfile exception. base.sha drifts with every merge to the
+  // base branch, so reading it would charge the PR with changes it never made.
+  const meta = { headSha: 'head-sha', baseSha: 'base-tip-sha' } as PrMetadata;
+  const compares: unknown[] = [];
+  const contents: Record<string, unknown>[] = [];
+  const provider = new GitHubProvider();
+  (provider as unknown as { clients: Map<string, unknown> }).clients.set(apiBaseFor(REF), {
+    repos: {
+      compareCommitsWithBasehead: async (args: unknown) => {
+        compares.push(args);
+        return { data: { merge_base_commit: { sha: 'merge-base-sha' } } };
+      },
+      getContent: async (args: Record<string, unknown>) => {
+        contents.push(args);
+        return { data: args.path === 'dir' ? [{ name: 'x' }] : `text@${String(args.ref)}` };
+      },
+    },
+  });
+
+  assert.equal(await provider.readFileAt(REF, 'package-lock.json', 'base', meta), 'text@merge-base-sha');
+  assert.deepEqual(compares, [{ owner: 'o', repo: 'r', basehead: 'base-tip-sha...head-sha', per_page: 1 }]);
+  assert.equal(await provider.readFileAt(REF, 'package-lock.json', 'head', meta), 'text@head-sha');
+  assert.equal(compares.length, 1, 'head needs no compare');
+  assert.deepEqual(contents[0], { owner: 'o', repo: 'r', path: 'package-lock.json', ref: 'merge-base-sha', mediaType: { format: 'raw' } });
+  await assert.rejects(() => provider.readFileAt(REF, 'dir', 'head', meta), /not a file/, 'a directory listing is not file text');
 });
 
 test('fetchChangedFiles — maps every GitHub status at the call site, so re-adding the #29 cast fails here', async () => {

@@ -11,11 +11,18 @@
 //
 // Each fixture: evals/fixtures/<case>/diff.patch + expected.yaml
 //   expected.yaml: findings + optional pass/stack assertions (see fixtures).
+//     Optional `pr_title` / `pr_description` replace the synthetic PR's title and
+//     description (whose defaults make no checkable claim).
+//   lockfile-digests.json (optional): `GatherOutput.lockfileDigests` — what gather
+//     would read through the provider API for an excluded package-lock.json.
+//   repo/ (optional): the repository the PR targets. Copied to a temp git repo
+//     whose origin is the placeholder PR's, diff.patch applied and committed as
+//     the PR head; the CLI runs inside it, so `## Call sites` has callers to find.
 // Every regex (case-insensitive) must match `title\n body` of at least one
 // finding — in the named pass when `pass` is given, anywhere otherwise.
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,15 +48,50 @@ function parseArgs(argv) {
   return { caseName: own[0], extra };
 }
 
+// The fixture's repo/ as the PR head: a git repo the CLI recognizes as the PR's
+// (`stack.cwdIsPrRepo`), so the call-site search runs. Never inside the run dir —
+// passes may read that, and must learn about callers only from `## Call sites`.
+// Isolated from the user's and system git config (hooks, signing, autocrlf);
+// the global one points at a file that does not exist.
+function fixtureRepo(dir, name) {
+  if (!existsSync(join(dir, 'repo'))) return undefined;
+  const root = mkdtempSync(join(tmpdir(), `pr-review-eval-${name}-repo-`));
+  const cwd = join(root, 'repo');
+  cpSync(join(dir, 'repo'), cwd, { recursive: true });
+  const env = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(root, 'no-gitconfig') };
+  const git = (...args) =>
+    execFileSync('git', ['-c', 'user.name=pr-review eval', '-c', 'user.email=eval@pr-review.invalid', ...args], {
+      cwd, env, encoding: 'utf8', windowsHide: true,
+    }).trim();
+  git('init', '-q', '-b', 'main');
+  git('remote', 'add', 'origin', 'https://github.com/pr-review/eval.git');
+  git('apply', join(dir, 'diff.patch'));
+  git('add', '-A');
+  git('commit', '-q', '-m', 'eval fixture PR head');
+  return { root, cwd, headSha: git('rev-parse', 'HEAD') };
+}
+
 function runCase(name, extra) {
   const dir = join(FIXTURES, name);
   const patchText = readFileSync(join(dir, 'diff.patch'), 'utf8');
   const expected = parseYaml(readFileSync(join(dir, 'expected.yaml'), 'utf8'));
   const runDir = mkdtempSync(join(tmpdir(), `pr-review-eval-${name}-`));
+  const repo = fixtureRepo(dir, name);
+  const digestsPath = join(dir, 'lockfile-digests.json');
   const gatherFile = join(runDir, 'eval-gather.json');
   writeFileSync(
     gatherFile,
-    JSON.stringify(gatherFromPatch(patchText, { pr: { url: PLACEHOLDER_PR } }), null, 2),
+    JSON.stringify(
+      gatherFromPatch(patchText, {
+        pr: { url: PLACEHOLDER_PR },
+        title: expected.pr_title,
+        description: expected.pr_description,
+        headSha: repo?.headSha,
+        lockfileDigests: existsSync(digestsPath) ? JSON.parse(readFileSync(digestsPath, 'utf8')) : undefined,
+      }),
+      null,
+      2,
+    ),
     'utf8',
   );
 
@@ -70,7 +112,7 @@ function runCase(name, extra) {
   let exitCode = 0;
   let executionFailure = '';
   try {
-    execFileSync(process.execPath, argv, { stdio: ['ignore', 'inherit', 'inherit'], timeout: 30 * 60 * 1000 });
+    execFileSync(process.execPath, argv, { stdio: ['ignore', 'inherit', 'inherit'], timeout: 30 * 60 * 1000, cwd: repo?.cwd });
   } catch (err) {
     exitCode = err.status ?? 1;
     executionFailure = [
@@ -82,6 +124,8 @@ function runCase(name, extra) {
     ].join(', ');
     console.error(`  review process failed: ${executionFailure}`);
   }
+  // Rebuilt from the fixture on every run; what it contributed is in pr-context.md.
+  if (repo) rmSync(repo.root, { recursive: true, force: true });
 
   // Which runtime actually hosted the session. `--runtime auto` means the argv
   // above cannot answer that, so read it back from the artifact the run wrote —

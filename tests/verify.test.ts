@@ -15,7 +15,7 @@ import {
 import { writePostedMarker } from '../src/util/posted-marker.js';
 import { canonicalJson, sha256, sha256File } from '../src/util/atomic-json.js';
 import { CHECKS, TEST_ONLY, loadVerifyContext, runChecks, runVerify } from '../src/commands/verify.js';
-import { NO_POSTING_DIRECTIVE } from '../src/dispatch/single-session.js';
+import { DESCRIPTION_REVIEWER, NO_POSTING_DIRECTIVE } from '../src/dispatch/single-session.js';
 import type { PrProvider } from '../src/providers/types.js';
 import type { ExistingComment, Finding, PrMetadata, Severity } from '../src/types.js';
 import { partitionFindingsForPublication, SEVERITIES } from '../src/util/severity.js';
@@ -1234,6 +1234,23 @@ test('verify — INV-CTX-04 catches a project skill that consumed a pass slot', 
     assert.match(four.evidence, /consumed a pass slot/);
   } finally {
     f.cleanup();
+  }
+});
+
+test('verify INV-CTX-04 — the PR-description check is a planned reviewer without a pass route, not a leaked skill', async () => {
+  const healthy = healthyRun({ mutateState: (state) => { state.planned.push(DESCRIPTION_REVIEWER); } });
+  try {
+    assert.equal(row(await rowsFor(healthy), 'INV-CTX-04').status, 'pass');
+  } finally {
+    healthy.cleanup();
+  }
+  const rogue = healthyRun({ mutateState: (state) => { state.planned.push('rogue/unrouted'); } });
+  try {
+    const four = row(await rowsFor(rogue), 'INV-CTX-04');
+    assert.equal(four.status, 'fail');
+    assert.match(four.evidence, /have no pass route: .*rogue\/unrouted/);
+  } finally {
+    rogue.cleanup();
   }
 });
 

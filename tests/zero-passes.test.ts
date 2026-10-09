@@ -690,12 +690,16 @@ test('prompt text in the repo stays stack-agnostic (no framework names)', async 
   const srcDir = fileURLToPath(new URL('../src/dispatch/', import.meta.url));
   const codexSrc = readFileSync(join(srcDir, 'codex.ts'), 'utf8');
   const singleSrc = readFileSync(join(srcDir, 'single-session.ts'), 'utf8');
+  // The call-sites section is prompt text too: neither its wording nor the
+  // declaration keywords it recognizes may name a framework.
+  const callSitesSrc = readFileSync(join(srcDir, 'call-sites.ts'), 'utf8');
   const DENY = /\b(React|Vue|Angular|Django|Rails|Spring|Express|Next\.js|Flask|Laravel|Terraform|Kubernetes|Docker)\b/;
   for (const [label, text] of [
     ['PASS_RULES', PASS_RULES],
     ['VERIFIER_BRIEF', VERIFIER_BRIEF],
     ['single-session.ts', singleSrc],
     ['codex.ts', codexSrc],
+    ['call-sites.ts', callSitesSrc],
   ] as const) {
     assert.ok(!DENY.test(text), `${label} must not hardcode framework names`);
   }

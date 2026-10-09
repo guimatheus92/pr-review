@@ -269,9 +269,10 @@ can take minutes, and fetching would import branch-authored objects into the
 reviewer's repository. The truncated-list completion reads only objects already
 present and otherwise fails with the exact command for the user to run.
 
-**Enforced:** `src/util/tmp.ts`, `src/commands/gather.ts`, `src/util/git.ts`
+**Enforced:** `src/util/tmp.ts`, `src/commands/gather.ts`, `src/util/git.ts`,
+`src/dispatch/call-sites.ts`
 
-**Verified:** `tests/gather-cache.test.ts`, `tests/tmp.test.ts`
+**Verified:** `tests/gather-cache.test.ts`, `tests/tmp.test.ts`, `tests/call-sites.test.ts`
 
 **Check:** run
 
@@ -514,9 +515,10 @@ checkout would undo the confinement INV-CTX-06 depends on; Node can answer the
 question deterministically instead.
 
 **Enforced:** `src/commands/review.ts`, `src/dispatch/single-session.ts`,
-`src/dispatch/runtime.ts`
+`src/dispatch/runtime.ts`, `src/dispatch/call-sites.ts`
 
-**Verified:** `tests/session-context.test.ts`, `tests/single-session-retry.test.ts`
+**Verified:** `tests/session-context.test.ts`, `tests/single-session-retry.test.ts`,
+`tests/call-sites.test.ts`
 
 **Check:** tests-only
 
@@ -739,7 +741,8 @@ skills.
 updated, disabled, or reviewed by anyone but this repo's maintainers. Packs own
 the knowledge precisely so it can change without a release.
 
-**Enforced:** `src/dispatch/single-session.ts`, `src/dispatch/codex.ts`
+**Enforced:** `src/dispatch/single-session.ts`, `src/dispatch/codex.ts`,
+`src/dispatch/call-sites.ts`
 
 **Verified:** `tests/zero-passes.test.ts`
 

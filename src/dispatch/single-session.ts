@@ -97,6 +97,8 @@ export interface SingleSessionOptions {
   includeCodex?: boolean;
   /** Checkout root recorded as plan metadata. Planned spawns intentionally do not grant it, so pr-context.md does not name it either. */
   repoRoot?: string;
+  /** Node-computed `## Call sites` section (INV-CTX-07) — how the changed declarations are consumed, since passes cannot read the checkout. */
+  callSites?: string;
   /** Sanitized capability inventory; names and provenance only. */
   mcpServers?: McpCapability[];
   /** Unchanged checkout MCP definitions, written to the run dir as provenance only — no runtime loads them. */
@@ -177,6 +179,7 @@ export const PASS_RULES = [
   `- You are a code reviewer applying ONLY the rules in the skill below to this PR's diff. Do not do a general review.`,
   `- Severity scale: CRITICAL (exploitable or production-breaking today) → HIGH (real risk, fix before merge) → MEDIUM (should fix soon) → LOW (minor) → NIT (tiny suggestion; never blocks).`,
   `- Only flag code this PR changes. Never flag pre-existing issues in untouched lines.`,
+  `- Check claims about how the changed code is used (comments, the description, a new field or parameter "for the caller") against "Call sites" in the PR context when present; flag a mismatch on the changed line.`,
   `- Do not duplicate anything listed under "Existing Comments" in the PR context.`,
   `- Every finding carries the exact \`file\` and \`line\` from the diff (new-side line numbers).`,
   `- In each finding's body, state the rule violated and the concrete fix.`,
@@ -347,6 +350,7 @@ function writeContextFile(
     }
   }
   metaLines.push(...renderLockfileDigests(gather));
+  if (opts.callSites) metaLines.push('', opts.callSites);
 
   if (index && index.count > 0) {
     metaLines.push(

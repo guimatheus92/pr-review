@@ -17,11 +17,10 @@ import type { PrProvider } from '../providers/types.js';
 import pLimit from 'p-limit';
 import { cwdMatchesPr } from '../stack/detect.js';
 import { countChangedLines } from '../util/diff-lines.js';
-import { gitOut, gitOutAsync, gitTopLevel, gitZ } from '../util/git.js';
+import { gitOut, gitOutAsync, gitTopLevel, gitZ, HEX_ID } from '../util/git.js';
 import { printable, safeRuntimeDiagnostic } from '../util/text.js';
 
 const PATCH_CONCURRENCY = 8;
-const HEX_ID = /^[0-9a-f]{7,64}$/i;
 /** Exported so `tests/changed-file-status.test.ts` can list this producer's vocabulary alongside the three providers'. End-to-end coverage of the letters git really emits lives in `tests/gather-cache.test.ts`. */
 export const GIT_STATUS: Record<string, ChangedFile['status']> = { A: 'added', C: 'added', D: 'deleted', R: 'renamed' };
 

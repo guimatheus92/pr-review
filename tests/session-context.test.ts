@@ -3,7 +3,7 @@ import { strict as assert } from 'node:assert';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { MAX_TOTAL_PASSES, prepareSessionContext } from '../src/dispatch/single-session.js';
+import { MAX_TOTAL_PASSES, PASS_RULES, prepareSessionContext } from '../src/dispatch/single-session.js';
 import { readDispatchPlan, validateDispatchArtifacts } from '../src/dispatch/delivery.js';
 import { selectPasses, type IndexEntry, type ReviewPass } from '../src/dispatch/pass-select.js';
 import type { CompanionPluginSource } from '../src/plugins/companions.js';
@@ -851,6 +851,28 @@ test('pr-context — an excluded package-lock.json gets its digest after Changed
     assert.ok(changed >= 0 && changed < digest && digest < diff, 'Changed Files, then the digest, then the diff');
     assert.match(context, /### package-lock\.json\n- packages: 541 at base, 541 at head\n- Lost resolved\/integrity: 419 \(first 1\) — a \(resolved, integrity\)/);
     assert.doesNotMatch(context.slice(diff), /package-lock/, 'the digest is context, never a diff');
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('pr-context — call sites sit after Changed Files and the digest, before the diff; no section when not computed', () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'pr-review-ctx-'));
+  try {
+    const gather = fixtureGather(['src/app.ts']);
+    gather.changedFiles.push({ path: 'package-lock.json', status: 'modified', additions: 1, deletions: 1, excluded: true });
+    const callSites = '## Call sites\n\n_Not computed: no declarations changed._';
+    const ctx = prepareSessionContext({ ...baseOpts(outDir, [], [pass('pack/quality')]), gather, callSites });
+    const context = readFileSync(ctx.contextPath, 'utf8');
+    const changed = context.indexOf('## Changed Files');
+    const digest = context.indexOf('## Lockfile Digest');
+    const sites = context.indexOf(`\n${callSites}\n`);
+    const diff = context.indexOf('\n## Diff');
+    assert.ok(changed >= 0 && changed < digest && digest < sites && sites < diff, 'Changed Files, the digest, the call sites, then the diff');
+
+    const plain = prepareSessionContext(baseOpts(join(outDir, 'plain'), ['src/app.ts'], [pass('pack/quality')]));
+    assert.doesNotMatch(readFileSync(plain.contextPath, 'utf8'), /## Call sites/);
+    assert.match(PASS_RULES, /against "Call sites" in the PR context when present; flag a mismatch on the changed line/);
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }

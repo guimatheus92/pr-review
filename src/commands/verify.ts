@@ -258,6 +258,7 @@ export const TEST_ONLY: Record<string, string> = {
   // binaries and pure renames legitimately produces, so grading it from a run
   // would fail honest runs and still miss a provider that quietly refetched.
   'INV-FETCH-04': 'guarded by tests/providers/azuredevops.test.ts, tests/gather-cache.test.ts and tests/zero-passes.test.ts — a fetch that did not happen leaves no artifact to grade',
+  'INV-CTX-07': 'guarded by tests/session-context.test.ts and tests/single-session-retry.test.ts — runs do not record the CLI version, so a run cannot tell a dropped section from one that predates it',
   'INV-TRUST-02': 'guarded by tests/config.test.ts and tests/linked-skills.test.ts — "no yaml/env key exists" is an absence, not something a run can record',
   'INV-TRUST-03': 'guarded by tests/linked-skills.test.ts, tests/git-provenance.test.ts and tests/loader.test.ts — a refused link leaves only a degraded note, and absence proves nothing',
   'INV-HYG-01': 'guarded by tests/zero-passes.test.ts — prompt text lives in the bundle, not in a run',

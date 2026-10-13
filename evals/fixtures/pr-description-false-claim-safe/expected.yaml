@@ -1,0 +1,6 @@
+# Control for pr-description-false-claim: byte-identical diff.patch, only the
+# description differs — here it is accurate, so the description pass must stay
+# silent. The defect is a property of the description, not the diff.
+pr_description: "Rewords the user-visible slow-request warning and upgrades the dependency from 2.4.1 to 2.6.0."
+must_not_find:
+  - "^PR description"

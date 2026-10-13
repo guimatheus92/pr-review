@@ -168,7 +168,8 @@ actually sees.
 
 **Always:** Dispatched agents never write to the pull request or the repository.
 Every dispatch prompt — review passes, companion agents, companion slash
-commands, the verifier, and the orchestrator itself — carries
+commands, the verifier, the PR-description check, and the orchestrator itself —
+carries
 `NO_POSTING_DIRECTIVE`. Any new dispatch path must thread it through.
 
 **Why:** Same incident as INV-POST-02. An agent given a PR URL and shell access
@@ -268,20 +269,36 @@ can take minutes, and fetching would import branch-authored objects into the
 reviewer's repository. The truncated-list completion reads only objects already
 present and otherwise fails with the exact command for the user to run.
 
-**Enforced:** `src/util/tmp.ts`, `src/commands/gather.ts`, `src/util/git.ts`
+**Enforced:** `src/util/tmp.ts`, `src/commands/gather.ts`, `src/util/git.ts`,
+`src/dispatch/call-sites.ts`
 
-**Verified:** `tests/gather-cache.test.ts`, `tests/tmp.test.ts`
+**Verified:** `tests/gather-cache.test.ts`, `tests/tmp.test.ts`, `tests/call-sites.test.ts`
 
 **Check:** run
 
 ### INV-FETCH-04 — No content is fetched for a file that will not be reviewed
 
 **Always:** File **content** is fetched only for files that can still reach a
-review pass. A file the diff exclusions will discard gets no content fetch, and
-once the in-scope count passes the too-many-files guard nothing is fetched for
-any file: the list is completed with path-only rows and the run is refused. The
-**path** list is unaffected — it is always complete (INV-FETCH-01), because it,
-not the content, is what every trust gate reads.
+review pass, with the one bounded exception below. A file the diff exclusions
+will discard gets no content fetch, and once the in-scope count passes the
+too-many-files guard nothing is fetched for any file — the exception included.
+The list is completed with path-only rows and the run is refused. The **path**
+list is unaffected — it is always complete (INV-FETCH-01), because it, not the
+content, is what every trust gate reads.
+
+**The exception: an excluded `package-lock.json` is digested.** Gather reads it
+through the provider API at the two commits the provider's own diff compares —
+on GitHub the merge base, not `base.sha`, which is the base-branch tip — at most
+two reads per lockfile, for a capped number of lockfiles per PR, never past the
+file guard, and a side over the size cap is reported, not parsed. The content is
+never stored, cached, turned into a patch or shown to a pass. Only its digest
+is: which packages were added, removed, re-versioned, re-flagged, or lost
+`resolved`/`integrity`. It lives in `pr-review-gather.json` (INV-FETCH-02) and
+is rendered into the review context as facts — never as a diff to comment on,
+never as a finding. A digest that cannot be built is stated as
+`digest unavailable: <reason>`, never silently missing. Every other excluded
+file — every other lockfile format included — is listed by name, status and
+line counts only.
 
 **Why:** The guard runs after gather, so an oversized Azure DevOps PR paid for
 every file before being refused: one `getItem` per added file and two per
@@ -292,16 +309,27 @@ shape hit exclusions at any size: a `package-lock.json` was fetched and its
 patch discarded on the next line by `applyDiffExclusions`. Work that cannot
 reach a pass is work no PR should pay for.
 
+The exception has its own incident. A PR's `package-lock.json` dropped
+`resolved` and `integrity` from 419 of its 541 packages (−874 lines) and
+downgraded an unrelated package while newly marking it dev; the review missed
+all of it because the file was excluded and the context said only
+"1 excluded". GitHub had not even served a patch for it (diff too large), so no
+patch-based summary could have helped. Two file reads are the only way the
+review sees that class of change, and they are paid only for the file that
+carries it.
+
 **A patch-less row is never silently reviewed.** A gather that omitted patches
 is marked, is never cached (a cached path-only list would come back as a whole
 diff under a wider exclusion set), and the guard reads that mark *before*
 exclusions — otherwise the byte-size gate sees 0 bytes and passes.
 
-**Enforced:** `src/providers/azuredevops.ts`, `src/commands/gather.ts`,
-`src/commands/review.ts`, `src/dispatch/diff-filter.ts`
+**Enforced:** `src/providers/azuredevops.ts`, `src/providers/github.ts`,
+`src/providers/gitlab.ts`, `src/commands/gather.ts`, `src/commands/review.ts`,
+`src/dispatch/diff-filter.ts`, `src/dispatch/lockfile-digest.ts`
 
 **Verified:** `tests/providers/azuredevops.test.ts`, `tests/gather-cache.test.ts`,
-`tests/zero-passes.test.ts`
+`tests/zero-passes.test.ts`, `tests/lockfile-digest.test.ts`,
+`tests/providers/github.test.ts`, `tests/providers/gitlab.test.ts`
 
 **Check:** tests-only
 
@@ -381,15 +409,35 @@ failure that produced no reviewer at all must not be able to impersonate that.
 
 **Always:** Every review pass is one skill applied by a generic agent; no
 reviewer `.md` is ever dispatched. Matched project skills are injected as shared
-CONTEXT into every pass and never consume a pass slot.
+CONTEXT into every skill pass and never consume a pass slot.
+
+Besides the skill passes the pipeline dispatches exactly two briefs it ships
+itself, neither a skill nor counted against the pass cap: the conditional
+verifier, and the PR-description check `internal/pr-description`. The check is
+planned in Phase 1 alongside the skill passes on every review that dispatches
+any, and `--skip pr-description` is the only way to remove it. It reads only the
+PR context, treats the title and description as untrusted claims, and reports
+where the diff and changed-file stats contradict them. It never satisfies
+INV-CTX-03.
 
 **Why:** A repo with 47 project skills starved every baseline and stack pass out
 of the cap when project skills competed for slots. Business rules apply to all
 passes anyway — they are context, not a lens.
 
-**Enforced:** `src/dispatch/pass-select.ts`, `src/dispatch/single-session.ts`
+The description check has its own incident. A review of
+guimatheus92/mcp-video-analyzer#79 took the description at its word: it claimed
+"no behavior change" and a lockfile that "grew ~650 lines", while the lockfile
+had in fact lost 874 lines and the change added a field to an exported result
+type. No step checked the description against the diff; the verifier, the only
+other brief the pipeline ships, is gated on a CRITICAL or HIGH finding and never
+ran. A claim is checkable from the context every pass already has; it needs one
+dispatch that is asked to check it.
 
-**Verified:** `tests/pass-select.test.ts`, `tests/session-context.test.ts`
+**Enforced:** `src/dispatch/pass-select.ts`, `src/dispatch/single-session.ts`,
+`src/commands/review.ts`, `src/commands/verify.ts`, `src/cli.ts`
+
+**Verified:** `tests/pass-select.test.ts`, `tests/session-context.test.ts`,
+`tests/verify.test.ts`, `tests/zero-passes.test.ts`
 
 **Check:** run
 
@@ -446,6 +494,33 @@ input; it is not a deterministic execution environment.
 `tests/loader.test.ts`, `tests/runtime.test.ts`
 
 **Check:** run
+
+### INV-CTX-07 — Reviewers see how changed code is consumed, without leaving confinement
+
+**Always:** Before dispatch, `pr-context.md` carries a `## Call sites` section:
+for a bounded set of declarations the diff touches, where the repository
+references them, found by a whole-word text search of commit objects already in
+the checkout — the PR head when present, otherwise the checkout's HEAD, named as
+such — and only when the checkout is provably the PR's repository. The search
+never fetches: a partial clone is refused before any object lookup. When the
+section cannot be computed it says why in one line. Reviewers are never granted
+the checkout; planned runtimes see only the run directory.
+
+**Why:** A review of guimatheus92/mcp-video-analyzer#79 missed that a new
+`duration` field on an exported result type, and new `onStderr` callbacks, had
+no reader: both callers sat outside the diff and still probed the duration
+themselves. Every pass trusted the author's comment ("lets the caller skip a
+redundant probe") because the diff was all it could see. Granting reviewers the
+checkout would undo the confinement INV-CTX-06 depends on; Node can answer the
+question deterministically instead.
+
+**Enforced:** `src/commands/review.ts`, `src/dispatch/single-session.ts`,
+`src/dispatch/runtime.ts`, `src/dispatch/call-sites.ts`
+
+**Verified:** `tests/session-context.test.ts`, `tests/single-session-retry.test.ts`,
+`tests/call-sites.test.ts`
+
+**Check:** tests-only
 
 ---
 
@@ -515,8 +590,9 @@ committing `.Agents/skills` bypass a macOS reviewer.
 
 ### INV-DEL-01 — A parseable review is not a completed review
 
-**Always:** Every planned pass and every planned companion dispatch delivers
-exactly one valid output, or the run exits 2 — even when findings parsed fine.
+**Always:** Every planned pass, companion dispatch and description check
+delivers exactly one valid output, or the run exits 2 — even when findings
+parsed fine.
 A missing output, a duplicate output, a missing or invalid `raw-<reviewer>.json`
 sidecar, a post that failed or could not be verified, and a failed review
 prerequisite are all operational failures. This holds on resumed runs too.
@@ -623,7 +699,8 @@ sometimes means "no review" cannot gate anything.
 **Always:** Every run writes the named artifact set under
 `~/.pr-review/runs/<id>/`: `pr-review-gather.json`, `stack.json`, `passes.json`,
 `companions.json`, `capabilities.json` (plus `capability-<pass>.json` per
-installed-plugin pass), one `raw-<reviewer>.json` per pass and companion,
+installed-plugin pass), one `raw-<reviewer>.json` per pass, companion and the
+description check,
 `pr-review-findings.json`, `pr-review-summary.md`, `progress.ndjson`,
 `error.txt` on any failure, and `posted.marker` on any publish attempt.
 Authenticated mirrors live under `~/.pr-review/control/`. A change that stops
@@ -656,14 +733,16 @@ eval harness all read them. They are the only record of what a run actually did.
 ### INV-HYG-01 — Shipped prompt text stays stack-agnostic
 
 **Always:** The prompt text this repository ships — `PASS_RULES`,
-`VERIFIER_BRIEF`, the Codex prompt — never names a specific framework, library
-or platform. Stack knowledge enters a review only through skills.
+`VERIFIER_BRIEF`, `DESCRIPTION_BRIEF`, the Codex prompt — never names a specific
+framework, library or platform. Stack knowledge enters a review only through
+skills.
 
 **Why:** A framework name in the prompt is review knowledge that cannot be
 updated, disabled, or reviewed by anyone but this repo's maintainers. Packs own
 the knowledge precisely so it can change without a release.
 
-**Enforced:** `src/dispatch/single-session.ts`, `src/dispatch/codex.ts`
+**Enforced:** `src/dispatch/single-session.ts`, `src/dispatch/codex.ts`,
+`src/dispatch/call-sites.ts`
 
 **Verified:** `tests/zero-passes.test.ts`
 

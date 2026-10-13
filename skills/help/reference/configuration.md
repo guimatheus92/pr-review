@@ -46,7 +46,7 @@ default_model: claude-opus-4.8
 language: en                     # finding titles/bodies language (default en)
 extra_skills_dirs:
   - ~/work/team-conventions
-skip_reviewers: [verifier]       # pass names (full `pack/skill` or bare suffix), plus `verifier` / `codex`
+skip_reviewers: [verifier]       # pass names (full `pack/skill` or bare suffix), plus `verifier` / `codex` / `pr-description`
 invoke_companions: true
 invoke_codex: true               # Codex second-opinion reviewer (auto-skipped if codex not installed)
 companion_warn: true

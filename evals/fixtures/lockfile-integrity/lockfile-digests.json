@@ -1,0 +1,42 @@
+[
+  {
+    "path": "package-lock.json",
+    "status": "ok",
+    "packages": { "base": 541, "head": 541 },
+    "changes": {
+      "stripped": {
+        "total": 419,
+        "sample": [
+          "@esbuild/aix-ppc64 (resolved, integrity)",
+          "@esbuild/android-arm (resolved, integrity)",
+          "@esbuild/android-arm64 (resolved, integrity)",
+          "@esbuild/android-x64 (resolved, integrity)",
+          "@esbuild/darwin-arm64 (resolved, integrity)",
+          "@esbuild/darwin-x64 (resolved, integrity)",
+          "@esbuild/freebsd-arm64 (resolved, integrity)",
+          "@esbuild/freebsd-x64 (resolved, integrity)",
+          "@esbuild/linux-arm (resolved, integrity)",
+          "@esbuild/linux-arm64 (resolved, integrity)",
+          "@esbuild/linux-ia32 (resolved, integrity)",
+          "@esbuild/linux-loong64 (resolved, integrity)",
+          "@esbuild/linux-mips64el (resolved, integrity)",
+          "@esbuild/linux-ppc64 (resolved, integrity)",
+          "@esbuild/linux-riscv64 (resolved, integrity)",
+          "@esbuild/linux-s390x (resolved, integrity)",
+          "@esbuild/linux-x64 (resolved, integrity)",
+          "@esbuild/netbsd-arm64 (resolved, integrity)",
+          "@esbuild/netbsd-x64 (resolved, integrity)",
+          "@esbuild/openbsd-arm64 (resolved, integrity)"
+        ]
+      },
+      "version": {
+        "total": 2,
+        "sample": ["@emnapi/runtime 1.11.3 → 1.11.2", "typescript 5.7.2 → 5.7.3"]
+      },
+      "flags": {
+        "total": 1,
+        "sample": ["@emnapi/runtime dev: no → yes"]
+      }
+    }
+  }
+]

@@ -41,14 +41,15 @@ Docs-only triage retains only glob/forced passes (never baseline). When candidat
 
 ```bash
 pr-review review <pr-url> --skip go                        # bare skill suffix
-pr-review review <pr-url> --skip awesome-copilot/go,codex  # full name; verifier/codex too
+pr-review review <pr-url> --skip awesome-copilot/go,codex  # full name; verifier/codex/pr-description too
 ```
 
-Valid `--skip` / `skip_reviewers` names are **pass names** — the full `<pack>/<skill>` form or the bare suffix — plus `verifier` and `codex`.
+Valid `--skip` / `skip_reviewers` names are **pass names** — the full `<pack>/<skill>` form or the bare suffix — plus `verifier`, `codex` and `pr-description`.
 
 ## The rest of the pipeline
 
 - **Verifier** — still a pipeline step, not a skill. Its brief (`VERIFIER_BRIEF` in `src/dispatch/single-session.ts`) is written to `verifier.md` and dispatched as a generic agent when phase 1 produced a CRITICAL/HIGH finding.
+- **PR-description check** — the other shipped brief, also not a skill. `DESCRIPTION_BRIEF` is written to `pr-description.md` and dispatched as `internal/pr-description` beside the skill passes on every review: it checks the PR's title and description against `pr-context.md` (diff, changed-file counts, lockfile digest, call sites) and reports contradicted claims at MEDIUM or LOW. `--skip pr-description` removes it.
 - **Codex** — the optional second-opinion sibling process, unchanged; it reads `skills-project.md` when pass selection leaves shared project context, or the budgeted `skills-all.md` union as fallback.
 - **Companion plugins** — each installed companion criterion is copied into a hash-bound run-local brief and dispatched through a generic agent. Every planned companion identity, up to seven, reads the same `skills-project.md` or `skills-all.md` shared file as Codex and the verifier; `code-review` consumes the materialized PR diff rather than invoking its native URL/`gh` workflow.
 

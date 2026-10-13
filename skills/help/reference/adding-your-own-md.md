@@ -105,7 +105,7 @@ Drop it in a repo skill dir (`.claude/skills/` etc.) for the team, or a home dir
 
 ```bash
 pr-review review <pr-url> --skip go                            # bare skill suffix
-pr-review review <pr-url> --skip awesome-copilot/go,verifier   # full name; verifier/codex too
+pr-review review <pr-url> --skip awesome-copilot/go,verifier   # full name; verifier/codex/pr-description too
 ```
 
 ### Always skip in this repo

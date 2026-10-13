@@ -1,0 +1,7 @@
+# Control for ts-unread-result-field. Deliberately NOT the AGENTS.md "-safe =
+# corrected diff" convention: this control holds the DIFF fixed (byte-identical
+# diff.patch) and varies the REPOSITORY, because the defect is a property of the
+# repository — its callers — not of the diff. Here repo/src/tools/analyze.ts
+# reads `extraction.duration` and no longer probes, so the same field is consumed.
+must_not_find:
+  - "(?=.*\\bduration\\b)(?=.*(?:unused|never (?:read|used|consumed)|not (?:read|used|consumed)|no (?:caller|consumer)|still (?:calls?|probes?)|redundant|dead))"

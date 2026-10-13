@@ -527,6 +527,62 @@ export class AzureDevOpsProvider implements PrProvider {
     return results;
   }
 
+  /** One file's text at one commit; null when the path is absent there. Throws on a failed read — the callers decide what that means. */
+  private async readItem(
+    git: GitApi,
+    repoId: string,
+    project: string | undefined,
+    path: string,
+    sha: string,
+  ): Promise<string | null> {
+    const item = await withRetry(
+      () =>
+        git.getItem(
+          repoId,
+          `/${path}`,
+          project,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          { version: sha, versionType: 2 },
+          true,
+          false,
+        ),
+      isTransientAdoError,
+      `getItem ${path}@${sha.slice(0, 8)}`,
+    );
+    // getItem yields a null item for a path absent at this version instead of
+    // throwing; reading `.content` off null would throw a misleading
+    // "Cannot read properties of null" that surfaces as a bogus fetch failure.
+    if (item == null) return null;
+    const content = (item as unknown as { content?: string }).content;
+    return typeof content === 'string' ? content : null;
+  }
+
+  /**
+   * Base is the latest iteration's commonRefCommit — the merge base the PR's
+   * own diff is taken from — not `lastMergeTargetCommit`, which is the target
+   * branch TIP and would charge the PR with everything merged there since.
+   */
+  async readFileAt(ref: PrRef, path: string, side: 'base' | 'head', m: PrMetadata): Promise<string> {
+    const git = await this.gitApi(ref);
+    const pr = await this.getPr(ref);
+    const repoId = pr.repository!.id!;
+    let sha = m.headSha;
+    if (side === 'base') {
+      const iterations = await git.getPullRequestIterations(repoId, ref.number, ref.project);
+      sha = iterations[iterations.length - 1]?.commonRefCommit?.commitId ?? '';
+      if (!sha) throw new Error('Azure DevOps reported no common commit');
+    }
+    if (!sha) throw new Error(`PR #${ref.number} reports no head commit`);
+    // Absent is not empty: a missing side read as "" would turn every package into an add or a removal.
+    const text = await this.readItem(git, repoId, ref.project, path, sha);
+    if (text === null) throw new Error(`${path} is absent at ${sha.slice(0, 12)}`);
+    return text;
+  }
+
   private async fetchFileText(
     git: GitApi,
     repoId: string,
@@ -535,30 +591,7 @@ export class AzureDevOpsProvider implements PrProvider {
     sha: string,
   ): Promise<string | null> {
     try {
-      const item = await withRetry(
-        () =>
-          git.getItem(
-            repoId,
-            `/${path}`,
-            project,
-            undefined,
-            undefined,
-            undefined,
-            undefined,
-            undefined,
-            { version: sha, versionType: 2 },
-            true,
-            false,
-          ),
-        isTransientAdoError,
-        `getItem ${path}@${sha.slice(0, 8)}`,
-      );
-      // getItem yields a null item for a path absent at this version instead of
-      // throwing; reading `.content` off null would throw a misleading
-      // "Cannot read properties of null" that surfaces as a bogus fetch failure.
-      if (item == null) return null;
-      const content = (item as unknown as { content?: string }).content;
-      return typeof content === 'string' ? content : null;
+      return await this.readItem(git, repoId, project, path, sha);
     } catch (err) {
       // A null here makes synthesizePatch treat the file as added/deleted —
       // a wrong diff on a transient failure would be silent, so say it loud.

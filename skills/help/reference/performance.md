@@ -35,7 +35,7 @@ One-time cost worth knowing: the first review on a machine clones the configured
 
 ## Diff exclusion defaults
 
-Lockfiles (`package-lock.json`, `yarn.lock`, etc.), generated code (`*.designer.cs`, `*.g.cs`), vendor directories, and binary files are stripped automatically. Add custom patterns via `diff_excludes` in `.pr-review.yaml`.
+Lockfiles (`package-lock.json`, `yarn.lock`, etc.), generated code (`*.designer.cs`, `*.g.cs`), vendor directories, and binary files are stripped automatically. Add custom patterns via `diff_excludes` in `.pr-review.yaml`. A changed `package-lock.json` is the one exception that costs fetches: two whole-file reads through the provider API (base and head of the PR's own diff; at most ten lockfiles, none past the file guard, a side over 16 MB reported rather than parsed) to build the `## Lockfile Digest`. Every other excluded file costs only its row in the file list.
 
 ## Triage today, and what's deferred
 

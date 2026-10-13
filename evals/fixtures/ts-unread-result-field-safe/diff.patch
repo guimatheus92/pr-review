@@ -1,0 +1,18 @@
+diff --git a/src/frames.ts b/src/frames.ts
+index 6e3c99d..51f5943 100644
+--- a/src/frames.ts
++++ b/src/frames.ts
+@@ -3,10 +3,12 @@ import { runFfmpeg } from './ffmpeg.js';
+ export interface FrameExtraction {
+   frames: string[];
+   warnings: string[];
++  /** Video length in seconds, read from ffmpeg's own output. Lets the caller skip a redundant probe. */
++  duration: number;
+ }
+ 
+ /** Extracts `count` evenly spaced key frames from a video file. */
+ export async function extractFrames(videoPath: string, count: number): Promise<FrameExtraction> {
+   const result = await runFfmpeg(videoPath, count);
+-  return { frames: result.frames, warnings: result.warnings };
++  return { frames: result.frames, warnings: result.warnings, duration: result.duration };
+ }

@@ -1,0 +1,8 @@
+# Control for lockfile-integrity: byte-identical diff.patch, only
+# lockfile-digests.json differs — here the lockfile changed exactly as the
+# package.json bump implies (typescript 5.7.2 -> 5.7.3) and nothing else. The
+# digest stands in for the lockfile content the diff cannot carry: the defect
+# is a property of that content, so it is the one variable this pair moves.
+must_not_find:
+  - "(?=.*(?:integrity|resolved))(?=.*(?:lock|package))"
+  - "(?=.*emnapi)"

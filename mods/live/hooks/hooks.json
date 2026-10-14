@@ -1,0 +1,4 @@
+{
+  "description": "pr-review live: band, pane and spinner timer for a running review (Claude Code mod)",
+  "modules": ["./register.js"]
+}

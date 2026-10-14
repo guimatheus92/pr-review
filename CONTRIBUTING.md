@@ -80,7 +80,7 @@ CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs build, tests, and
 
 ## The demo video
 
-`assets/live-demo.gif` (the README's clip) and the MP4 attached to the release are cut from ONE recording of a real review by `scripts/demo-video.mjs`, so they can be remade for a new version without an editor:
+`assets/live-demo.gif` (the README's clip) and `assets/live-demo.mp4` (the full video it links) are cut from ONE recording of a real review by `scripts/demo-video.mjs`, so they can be remade for a new version without an editor:
 
 ```bash
 node scripts/demo-video.mjs all --work <scratch dir> --pr <pr-url> --checkout <that PR's checkout> --plugin-dir <this checkout> --out assets/live-demo.gif
@@ -90,7 +90,7 @@ node scripts/demo-video.mjs all --work <scratch dir> --pr <pr-url> --checkout <t
 - what `compose` decides is pure and tested (`recordCues`, `storyboard`, `buildProject` in `tests/demo-video.test.ts`, on the kit fixture): the cues come from the run directory's own clock (`progress.ndjson`, `reviewer-progress.ndjson`, `delivery-state.json`, `dispatch-plan.json`) mapped onto the recording's; from them come four segments of the recording (intro at 1×, the middle squeezed into 20 s, the finish, the findings) and the Recordly project (`demo.recordly`: seven zooms, six captions in English) for the clip those segments make. A caption lives in the recording's own space and zooms with it, so each one is placed inside the view of its zoom.
 - `cut` re-times and joins the segments with ffmpeg into `cut.mp4` (~55 s). The project never cuts: Recordly 1.4.0's clips carry no source in-point, so a project cannot jump within its source — and a clip whose time is the timeline keeps every zoom and caption where the storyboard put it.
 - `export` runs [Recordly](https://github.com/webadderallorg/Recordly) (installed per user, 1.4.0 at the time) in its own headless smoke-export mode — environment variables, no clicks — launched through PowerShell's `Start-Process` right after a one-shot Node-mode run of the same binary, the only launch shape that started the app from a script on Windows 11 (2026-10-06). `gif` converts the MP4 with ffmpeg under 10 MB (1024 px, 6 fps and 3 fps across the sped-up middle, no dithering — every frame of that middle is a new screenful of text, and that is where the bytes go; then 960 px, then 880 px), and `frames` writes one PNG per cue to look at before committing.
-- The MP4 goes to the GitHub release under the name the README links, and `gh` names the asset after the file, so copy it first: `copy <work>\live-demo.mp4 pr-review-live-demo.mp4` then `gh release upload vX.Y.Z pr-review-live-demo.mp4 --clobber`. The GIF is committed. A remake for a new version also bumps the version in the README's caption and in its release link.
+- Both are committed: copy `<work>\live-demo.mp4` to `assets/live-demo.mp4` beside the GIF (GitHub plays an MP4 blob in the browser; ~30 MB, so a remake replaces the file in the same PR rather than iterating on it). A remake for a new version also bumps the version in the README's caption.
 
 ### Auditing a run
 

@@ -10,13 +10,14 @@
 //   node scripts/demo-video.mjs all     --work <dir> --pr <url> --checkout <dir> --plugin-dir <dir> --out assets/live-demo.gif
 //
 // `record` opens a Windows Terminal window of its own, starts Claude Code there with the
-// slash command as the initial prompt, captures that window with ffmpeg (gdigrab, by window
-// title) and stops ~45 s after the run's `done`. `compose` is pure: the cues come from the
-// run directory's own clock (progress.ndjson, reviewer-progress.ndjson, delivery-state.json,
-// dispatch-plan.json) mapped onto the recording's clock, and the Recordly project (clips,
-// zooms, captions) is derived from them — tests/demo-video.test.ts pins that on the kit
-// fixture. Nothing here touches src/ or the run directory; ffmpeg must be on PATH and
-// Recordly installed per user (%LOCALAPPDATA%\Programs\Recordly).
+// slash command as the initial prompt, cuts that window's rectangle out of the desktop with
+// ffmpeg (gdigrab) and stops once the session's transcript settles on the findings answer
+// after the run's `done`. What `compose` decides is pure and tested on the kit fixture
+// (`recordCues`, `storyboard`, `buildProject`): the cues come from the run directory's own
+// clock (progress.ndjson, reviewer-progress.ndjson, delivery-state.json, dispatch-plan.json)
+// mapped onto the recording's clock, and the Recordly project (clips, zooms, captions) is
+// derived from them. Nothing here touches src/ or the run directory; ffmpeg must be on PATH
+// and Recordly installed per user (%LOCALAPPDATA%\Programs\Recordly).
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -54,6 +55,9 @@ export function storyboard({ runId, progress, reviewerProgress, delivery, plan, 
   const start = runStartMs(runId);
   const done = progress.filter((e) => e.phase === 'done' || e.phase === 'error').at(-1);
   if (!done) throw new Error('the run has no terminal phase yet');
+  // `record` stops on `error` too, but its detail is "N operational failure(s)", not a count
+  // of findings: the caption would read "0 findings — every one retained" over a failed run.
+  if (done.phase !== 'done') throw new Error(`the run ended in error (${done.detail ?? 'no detail'}); nothing to show`);
   const planned = Array.isArray(delivery.planned) ? delivery.planned.length : plan.reviewers.length;
   const seen = reviewerProgress
     .filter((e) => e.kind === 'output-first-seen' && typeof e.ts === 'number')
@@ -82,6 +86,7 @@ export function storyboard({ runId, progress, reviewerProgress, delivery, plan, 
       posted: detail ? Number(detail[1]) : 0,
       passes: reviewers.filter((r) => r.kind !== 'companion-agent').length,
       companions: reviewers.filter((r) => r.kind === 'companion-agent').length,
+      codex: Boolean(plan.codex && plan.codex.enabled === true), // the pane draws the Codex row only then
     },
     elapsedLabel: fmtElapsed(done.ts - start),
     prLabel: plan.pr && plan.pr.owner ? `${plan.pr.owner}/${plan.pr.repo} #${plan.pr.number}` : runId,
@@ -107,7 +112,7 @@ function zoom(id, startMs, endMs, depth, cx, cy) {
 function captionFor(id, startMs, text, z) {
   const s = ZOOM_SCALE[z.depth];
   const view = { left: (z.focus.cx - 0.5 / s) * 100, top: (z.focus.cy - 0.5 / s) * 100, size: 100 / s };
-  // One line of up to ~48 characters at this size (measured on the export: Recordly draws the
+  // One line of up to ~56 characters at this size (measured on the export: Recordly draws the
   // font about 1.45x the number given, so 32/s reads as ~45 px on a 1080p frame at any depth).
   const width = 92 / s;
   const height = 12 / s;
@@ -152,7 +157,9 @@ function captionFor(id, startMs, text, z) {
 export function buildProject(s, { videoPath }) {
   const { cues } = s;
   const c1 = { sourceStartMs: Math.max(0, cues.launch - 3_000), sourceEndMs: cues.band + 6_000, speed: 1 };
-  const middleSource = Math.max(1_000, cues.done - 5_000 - c1.sourceEndMs);
+  const middleSource = cues.done - 5_000 - c1.sourceEndMs;
+  // A run that ended sooner than the intro plus the finish lead would run the middle backwards.
+  if (middleSource < 1_000) throw new Error(`run too short for the storyboard: done ${((cues.done - cues.band) / 1000).toFixed(1)} s after the band`);
   const c2 = { sourceStartMs: c1.sourceEndMs, sourceEndMs: cues.done - 5_000, speed: Math.max(2, middleSource / MIDDLE_MS) };
   const c3 = { sourceStartMs: cues.done - 5_000, sourceEndMs: cues.done + 4_000, speed: 1 };
   const c4 = { sourceStartMs: Math.max(c3.sourceEndMs, cues.summary - 1_000), sourceEndMs: cues.end, speed: 1 };
@@ -185,7 +192,7 @@ export function buildProject(s, { videoPath }) {
     captionFor('cap-passes', middle.startMs + 5_500, 'passes — one agent per skill, from skill packs', zPasses),
     // The pane says "none installed for this runtime" under this caption when there are none.
     captionFor('cap-companions', middle.startMs + 10_500, s.counts.companions ? 'companions — installed plugins reviewing too' : 'companions — installed plugins review too · none here', zCompanions),
-    captionFor('cap-siblings', middle.startMs + 15_500, 'siblings — Codex, verifier · rules in every pass', zSiblings),
+    captionFor('cap-siblings', middle.startMs + 15_500, s.counts.codex ? 'siblings — Codex, verifier · rules in every pass' : 'siblings — verifier · rules in every pass (Codex off)', zSiblings),
     captionFor('cap-done', finish.startMs + 6_000, `${s.elapsedLabel} · ${s.counts.findings} findings — every one retained`, zTimer),
     captionFor('cap-findings', findings.startMs + 2_500, 'the findings — inline threads (a dry run here)', zFindings),
   ];
@@ -287,8 +294,8 @@ public static class W {
 /**
  * The desktop rectangle to grab for a window: borders inset, even-sized. gdigrab's offsets
  * are relative to the primary monitor's origin (measured: an offset computed from the
- * virtual screen's origin captured the monitor to the right), in the same DPI-unaware space
- * the window rectangle was read in.
+ * virtual screen's origin captured the monitor to the right), in the same physical-pixel
+ * (DPI-aware) space the window rectangle was read in.
  */
 function captureRegion(rect) {
   // The invisible resize border is what pushes a window placed at 0,0 to a negative left.
@@ -447,7 +454,11 @@ async function record(opts) {
   const launcher = join(work, 'launch.cmd');
   // Started from inside a Claude Code session, the demo session would inherit its parent's
   // child-session marker: transcript saving off, and a warning line across the recording.
-  writeFileSync(launcher, `@echo off\r\nset "CLAUDE_CODE_CHILD_SESSION="\r\nset "CLAUDECODE="\r\nclaude --plugin-dir "${pluginDir}" "${prompt}"\r\n`, 'utf8');
+  // cmd expands %N and %VAR% inside double quotes too (an Azure DevOps URL carries %20), and a
+  // double quote would end the argument: doubled, refused.
+  if (/"/.test(prompt) || /"/.test(pluginDir)) throw new Error('a double quote in --pr or --plugin-dir cannot be passed to the launcher');
+  const cmd = (v) => v.replace(/%/g, '%%');
+  writeFileSync(launcher, `@echo off\r\nset "CLAUDE_CODE_CHILD_SESSION="\r\nset "CLAUDECODE="\r\nclaude --plugin-dir "${cmd(pluginDir)}" "${cmd(prompt)}"\r\n`, 'utf8');
   const rawPath = join(work, 'raw.mp4');
   console.log(`[record] window "${WINDOW_TITLE}" in ${checkout}\n[record] prompt: ${prompt}`);
   // A window of its own, at the top-left, with a title the shell may not overwrite. No
@@ -481,8 +492,12 @@ async function record(opts) {
   );
   console.log(`[record] capturing desktop region ${region.width}x${region.height} at ${region.x},${region.y}`);
   let ffmpegError = null;
-  ffmpeg.on('error', (e) => { ffmpegError = e; });
-  const exited = new Promise((r) => ffmpeg.on('exit', (code) => r(code)));
+  // A spawn failure (ffmpeg not on PATH) emits 'error' and never 'exit': settle on both, or
+  // the stop below waits forever and the process ends with exit 0 and no message.
+  const exited = new Promise((r) => {
+    ffmpeg.on('exit', (code) => r(code));
+    ffmpeg.on('error', (e) => { ffmpegError = e; r(null); });
+  });
   const stopFfmpeg = () => {
     if (ffmpeg.exitCode === null && !ffmpegError) {
       ffmpeg.stdin.write('q');
@@ -564,6 +579,20 @@ async function record(opts) {
 }
 
 /**
+ * Pure: what demo-record.json decides for the cut. A covered recording is refused — ffmpeg
+ * reads the desktop, and one take shipped an editor with the author's notes to the QA frames
+ * — and the transcript's settled answer, in video ms, is where the findings segment starts
+ * (null when `record` saw none: the caller falls back to scene detection).
+ */
+export function recordCues(rec) {
+  if (Array.isArray(rec.covered) && rec.covered.length > 0) {
+    // A covered frame anywhere is somebody else's screen in the README, even at x16 in the middle.
+    throw new Error(`the recording was covered ${rec.covered.map((c) => `at ${Math.round(c.atMs / 1000)} s by "${c.title}"`).join(', ')}; record again`);
+  }
+  return { summaryAtMs: typeof rec.answerAtMs === 'number' ? rec.answerAtMs - rec.recordingStartedAt : null };
+}
+
+/**
  * The first big change of the picture after `fromSec`. The fallback for a recording without
  * a transcript answer (`answerAtMs`): an answer streams in over seconds, so on one take
  * nothing after `done` crossed the threshold and the cut landed on the wait.
@@ -592,10 +621,6 @@ function readNdjson(p) {
 function compose(opts) {
   const work = resolve(opts.work);
   const rec = readJson(join(work, 'demo-record.json'));
-  if (Array.isArray(rec.covered) && rec.covered.length) {
-    // A covered frame anywhere is somebody else's screen in the README, even at x24 in the middle.
-    throw new Error(`the recording was covered ${rec.covered.map((c) => `at ${Math.round(c.atMs / 1000)} s by "${c.title}"`).join(', ')}; record again`);
-  }
   const runDir = opts['run-dir'] ? resolve(opts['run-dir']) : rec.runDir;
   if (!runDir) throw new Error('no run dir recorded; pass --run-dir');
   const runId = runDir.split(/[\\/]/).at(-1);
@@ -603,9 +628,7 @@ function compose(opts) {
   const doneLine = progress.filter((e) => e.phase === 'done' || e.phase === 'error').at(-1);
   const doneSec = doneLine ? (doneLine.ts - rec.recordingStartedAt) / 1000 : null;
   const recSec = (rec.recordingStoppedAt - rec.recordingStartedAt) / 1000;
-  // The transcript's settled answer (record) is the findings' moment; scene detection is the
-  // fallback for a recording made without it.
-  const answerAtMs = typeof rec.answerAtMs === 'number' ? rec.answerAtMs - rec.recordingStartedAt : null;
+  const answerAtMs = recordCues(rec).summaryAtMs;
   const summaryAtMs = answerAtMs ?? (doneSec !== null && existsSync(rec.video) ? detectSummary(rec.video, doneSec + 2, recSec) : null);
   const s = storyboard({
     runId,
@@ -696,9 +719,11 @@ async function exportVideo(opts) {
   // The app writes `<out>.report.json` beside the export, success or not.
   const reportPath = `${out}.report.json`;
   const report = existsSync(reportPath) ? JSON.parse(readFileSync(reportPath, 'utf8')) : null;
-  if (!existsSync(out) || statSync(out).size === 0 || (report && report.success === false)) {
+  // The report is the verdict: an MP4 without one is a crash mid-export, and a partial file
+  // would otherwise pass straight into `frames` and `gif`.
+  if (!existsSync(out) || statSync(out).size === 0 || !report || report.success !== true) {
     const smoke = log.split('\n').filter((l) => l.includes('smoke')).join('\n');
-    throw new Error(`no export at ${out} (exit ${code})\n${report ? JSON.stringify(report, null, 2) : 'no report'}\n${smoke}`);
+    throw new Error(`export failed at ${out} (exit ${code}; ${report ? 'report' : 'no report, so the app did not finish'})\n${report ? JSON.stringify(report, null, 2) : ''}\n${smoke}\nlogs: ${join(work, 'recordly-stdout.txt')}, ${join(work, 'recordly-stderr.txt')}`);
   }
   console.log(`[export] ${out} (${(statSync(out).size / 1048576).toFixed(1)} MB); exit ${code}; report: ${report ? `success=${report.success} phase=${report.phase ?? '-'}` : 'none'}`);
   return out;

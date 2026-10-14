@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { answerSettled, buildProject, pickNewestRun, projectDirFor, storyboard } from '../scripts/demo-video.mjs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { answerSettled, buildProject, pickNewestRun, projectDirFor, recordCues, storyboard } from '../scripts/demo-video.mjs';
 import { DONE, RUN_ID } from '../mods/live/tests/fixtures/run-798.ts';
 
 /**
@@ -41,16 +43,19 @@ test('projectDirFor — the transcript folder is named the way Claude Code names
   // C--Users-guilh-repos-pr-review--claude-worktrees-feat-live-mod. A dot or an underscore in
   // the path (first.last, my_repo) used to yield a folder that never exists, so `record`
   // waited the full ceiling and the findings segment fell back to scene detection.
-  const dir = projectDirFor('C:\\Users\\first.last\\repos\\my_repo\\feat+x');
-  assert.ok(dir.endsWith('C--Users-first-last-repos-my-repo-feat-x'), dir);
-  assert.ok(dir.includes('.claude') && dir.includes('projects'), dir);
+  // `resolve` is the platform's, so each leg gets its own absolute path and the whole value is pinned.
+  const [input, folder] = process.platform === 'win32'
+    ? ['C:\\Users\\first.last\\repos\\my_repo\\feat+x', 'C--Users-first-last-repos-my-repo-feat-x']
+    : ['/home/first.last/repos/my_repo/feat+x', '-home-first-last-repos-my-repo-feat-x'];
+  assert.equal(projectDirFor(input), join(homedir(), '.claude', 'projects', folder));
 });
 
 test('answerSettled — the findings are on screen once a long assistant answer after done is followed by silence', () => {
   // The slash command narrates every poll ("still running, I'll keep polling"); those are
   // assistant text too, and one of them lands right after `done` — a take ended there, 13 s
-  // after done, with the findings still being written. The answer that matters is long and
-  // is the last thing written: nothing follows it for a while.
+  // after done, with the findings still being written. The answer that matters is the newest
+  // LONG assistant text after done, once the file has been silent for a while: a short
+  // narration written after it ("The review of PR #798 finished…") does not undo it.
   const doneMs = Date.parse('2026-10-07T01:30:52.000Z');
   const entry = (type, text, atMs) => JSON.stringify({ type, timestamp: new Date(atMs).toISOString(), message: { content: [{ type: 'text', text }] } });
   const narration = entry('assistant', 'The review is still running; I will keep polling the run status every 25 seconds until it ends.', doneMs + 3000);
@@ -69,6 +74,20 @@ test('answerSettled — the findings are on screen once a long assistant answer 
   // A long answer from before done does not count.
   const old = entry('assistant', 'x'.repeat(2000), doneMs - 60000);
   assert.equal(answerSettled([old, narration], doneMs, { nowMs: doneMs + 60000, lastWriteMs: doneMs + 3000 }), null);
+  // The real shape of every take: a short closing line after the findings, and a tool call
+  // after that — the findings' own moment is still the answer.
+  const closing = entry('assistant', 'The review of PR #798 finished: 13 findings, nothing posted (dry run).', doneMs + 45000);
+  const laterTool = JSON.stringify({ type: 'assistant', timestamp: new Date(doneMs + 46000).toISOString(), message: { content: [{ type: 'tool_use', name: 'Bash', input: {} }] } });
+  assert.equal(answerSettled([narration, tool, findings, closing, laterTool], doneMs, { nowMs: doneMs + 58000, lastWriteMs: doneMs + 46000 }), doneMs + 40000);
+});
+
+test('recordCues — a covered recording is refused, and the findings start where the transcript says', () => {
+  // ffmpeg reads the desktop: one take shipped an editor with the author's notes to the QA
+  // frames before `record` checked what was on top. The refusal is the privacy guard.
+  const rec = { recordingStartedAt, recordingStoppedAt, answerAtMs: recordingStartedAt + 400000, covered: [] };
+  assert.deepEqual(recordCues(rec), { summaryAtMs: 400000 });
+  assert.deepEqual(recordCues({ ...rec, answerAtMs: null }), { summaryAtMs: null }, 'no settled answer: the caller falls back to scene detection');
+  assert.throws(() => recordCues({ ...rec, covered: [{ atMs: 5000, title: 'notes.md - Editor' }] }), /covered at 5 s by "notes.md - Editor"; record again/);
 });
 
 test('storyboard — the cues come from the run clock mapped onto the recording clock', () => {
@@ -80,9 +99,31 @@ test('storyboard — the cues come from the run clock mapped onto the recording 
   assert.equal(s.cues.done, doneTs - recordingStartedAt);
   assert.equal(s.cues.summary, defaultSummaryAt, 'without a detected summary, 20 s after done');
   assert.equal(s.cues.end, defaultSummaryAt + 12000);
-  assert.deepEqual(s.counts, { planned: 16, findings: 33, posted: 33, passes: 10, companions: 6 });
+  assert.deepEqual(s.counts, { planned: 16, findings: 33, posted: 33, passes: 10, companions: 6, codex: false });
   assert.equal(s.elapsedLabel, '27:24', 'done minus the run start, as the band shows it');
   assert.equal(s.prLabel, 'acme/backend #798');
+});
+
+test('storyboard — a dry run says "0 posted, N findings", and N is the findings count', () => {
+  // The fixture's done line reads "33 posted, 33 findings", which cannot tell the two numbers
+  // apart; every take this script records is a dry run.
+  const run = fixtureRun();
+  const last = run.progress.length - 1;
+  run.progress[last] = { ...run.progress[last], detail: '0 posted, 13 findings' };
+  const s = storyboard({ ...run, recordingStartedAt, recordingStoppedAt });
+  assert.equal(s.counts.findings, 13);
+  assert.equal(s.counts.posted, 0);
+  const texts = buildProject(s, { videoPath: 'C:\\demo\\cut.mp4' }).project.editor.annotationRegions.map((c: { textContent: string }) => c.textContent);
+  assert.match(texts[4]!, /27:24 · 13 findings/);
+});
+
+test('storyboard — a run that ended in error has no findings to show and is refused', () => {
+  // `record` stops on `error` too (nothing more will happen on screen), but the done line then
+  // reads "N operational failure(s)": the caption would say "0 findings — every one retained".
+  const run = fixtureRun();
+  const last = run.progress.length - 1;
+  run.progress[last] = { ...run.progress[last], phase: 'error', detail: '3 operational failure(s)' };
+  assert.throws(() => storyboard({ ...run, recordingStartedAt, recordingStoppedAt }), /ended in error \(3 operational failure\(s\)\); nothing to show/);
 });
 
 test('storyboard — a detected summary moment replaces the default, and the end never passes the recording', () => {
@@ -154,13 +195,27 @@ test('buildProject — zooms and captions land inside the timeline, in story ord
   const none = buildProject({ ...s, counts: { ...s.counts, companions: 0 } }, { videoPath: 'C:\\demo\\cut.mp4' }).project.editor.annotationRegions.map((c: { textContent: string }) => c.textContent);
   assert.match(none[2]!, /companions/);
   assert.match(none[2]!, /none/);
+  // Same for the siblings: the pane draws the Codex row only when the plan enabled it, and
+  // every take this script records runs with --no-codex.
   assert.match(texts[3]!, /siblings/);
+  assert.match(texts[3]!, /Codex off/);
+  const codex = buildProject({ ...s, counts: { ...s.counts, codex: true } }, { videoPath: 'C:\\demo\\cut.mp4' }).project.editor.annotationRegions.map((c: { textContent: string }) => c.textContent);
+  assert.match(codex[3]!, /siblings — Codex, verifier/);
   assert.match(texts[4]!, /27:24 · 33 findings/);
   assert.match(texts[5]!, /findings/);
   // The first zoom is on the band as it appears; the timer zoom sits in the finish segment.
   const { segments } = buildProject(s, { videoPath: 'C:\\demo\\cut.mp4' });
   assert.ok(zooms[0].startMs >= segments[0].startMs && zooms[0].endMs <= segments[0].endMs);
   assert.ok(zooms[5].startMs >= segments[2].startMs && zooms[5].endMs <= segments[2].endMs);
+});
+
+test('buildProject — a run too short for the four segments is refused by name, not by ffmpeg', () => {
+  // The middle runs from the end of the intro (band + 6 s) to done - 5 s: a run that reached
+  // its terminal phase sooner than that (a fast error, a docs-only PR with no passes) would
+  // make that segment's source run backwards and `cut` fail inside ffmpeg (-to before -ss).
+  const s = storyboard({ ...fixtureRun(), recordingStartedAt, recordingStoppedAt });
+  const short = { ...s, cues: { ...s.cues, done: s.cues.band + 8000, summary: s.cues.band + 20000, end: s.cues.band + 30000 } };
+  assert.throws(() => buildProject(short, { videoPath: 'C:\\demo\\cut.mp4' }), /run too short for the storyboard: done 8\.0 s after the band/);
 });
 
 test('buildProject — the project is what Recordly loads: version 2, the recording, a 16:9 frame, no cursor', () => {

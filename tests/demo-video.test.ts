@@ -138,6 +138,12 @@ test('buildProject — zooms and captions land inside the timeline, in story ord
   assert.match(texts[0]!, /band/i);
   assert.match(texts[1]!, /passes/);
   assert.match(texts[2]!, /companions/);
+  assert.doesNotMatch(texts[2]!, /none/, 'six companions ran: the caption does not say none');
+  // A machine with no companion installed shows "none installed for this runtime" under the
+  // caption, so the caption must not claim plugins are reviewing (seen on the seventh take).
+  const none = buildProject({ ...s, counts: { ...s.counts, companions: 0 } }, { videoPath: 'C:\\demo\\cut.mp4' }).project.editor.annotationRegions.map((c: { textContent: string }) => c.textContent);
+  assert.match(none[2]!, /companions/);
+  assert.match(none[2]!, /none/);
   assert.match(texts[3]!, /siblings/);
   assert.match(texts[4]!, /27:24 · 33 findings/);
   assert.match(texts[5]!, /findings/);

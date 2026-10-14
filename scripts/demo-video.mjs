@@ -182,7 +182,8 @@ export function buildProject(s, { videoPath }) {
   const annotationRegions = [
     captionFor('cap-band', introBand + 500, 'the band — phase · timer · delivered · sources', zBand),
     captionFor('cap-passes', middle.startMs + 5_500, 'passes — one agent per skill, from skill packs', zPasses),
-    captionFor('cap-companions', middle.startMs + 10_500, 'companions — installed plugins reviewing too', zCompanions),
+    // The pane says "none installed for this runtime" under this caption when there are none.
+    captionFor('cap-companions', middle.startMs + 10_500, s.counts.companions ? 'companions — installed plugins reviewing too' : 'companions — installed plugins review too · none here', zCompanions),
     captionFor('cap-siblings', middle.startMs + 15_500, 'siblings — Codex, verifier · rules in every pass', zSiblings),
     captionFor('cap-done', finish.startMs + 6_000, `${s.elapsedLabel} · ${s.counts.findings} findings — every one retained`, zTimer),
     captionFor('cap-findings', findings.startMs + 2_500, 'the findings — inline threads (a dry run here)', zFindings),

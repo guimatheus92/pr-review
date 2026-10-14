@@ -1,0 +1,10 @@
+# Distilled from the guimatheus92/mcp-video-analyzer#79 review, which missed a
+# package-lock.json that dropped resolved/integrity from 419 of 541 packages and
+# downgraded @emnapi/runtime 1.11.3 -> 1.11.2 while newly marking it dev. The
+# lockfile is excluded from the diff; its content reaches the passes only as the
+# `## Lockfile Digest` section, which this fixture supplies through
+# lockfile-digests.json (what gather would compute from the two sides via the
+# provider API — a synthetic gather has no provider to read them from).
+must_find:
+  - "(?=.*(?:integrity|resolved))(?=.*(?:lock|package))"
+  - "(?=.*emnapi)(?=.*(?:downgrad|1\\.11\\.2|dev))"

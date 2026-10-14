@@ -1,0 +1,13 @@
+[
+  {
+    "path": "package-lock.json",
+    "status": "ok",
+    "packages": { "base": 541, "head": 541 },
+    "changes": {
+      "version": {
+        "total": 1,
+        "sample": ["typescript 5.7.2 → 5.7.3"]
+      }
+    }
+  }
+]

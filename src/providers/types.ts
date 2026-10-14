@@ -31,6 +31,15 @@ export interface PrProvider {
    */
   fetchChangedFiles(ref: PrRef, opts?: ChangedFilesOptions): Promise<ChangedFile[]>;
   /**
+   * Full text of one file on one side of the PR's OWN diff: head =
+   * metadata.headSha; base = the commit the provider diffs against (GitHub:
+   * merge base, not base.sha; GitLab: diff_refs.base_sha; ADO: latest iteration
+   * commonRefCommit). Throws when unreadable — never a guess. Used only for
+   * excluded-lockfile digests (INV-FETCH-04 exception). Optional: a provider
+   * without it yields "digest unavailable", never silence.
+   */
+  readFileAt?(ref: PrRef, path: string, side: 'base' | 'head', metadata: PrMetadata): Promise<string>;
+  /**
    * Existing comments on the PR. `since`, when given, asks the provider to
    * return only comments created/updated at or after it: the reconciliation
    * read-backs care only about the current run, and pulling a long-lived PR's

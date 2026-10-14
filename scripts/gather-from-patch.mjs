@@ -131,6 +131,7 @@ export function gatherFromPatch(patchText, overrides = {}) {
     },
     changedFiles: files,
     existingComments: [],
+    ...(overrides.lockfileDigests ? { lockfileDigests: overrides.lockfileDigests } : {}),
     gatheredAt: now,
   };
 }

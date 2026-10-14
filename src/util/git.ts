@@ -4,6 +4,9 @@ import { existsSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { foldPath } from './realpath.js';
 
+/** Provider-supplied commit ids become git arguments: only a hex object id gets that far. */
+export const HEX_ID = /^[0-9a-f]{7,64}$/i;
+
 export function gitTopLevel(cwd: string): string | null {
   try {
     return execFileSync('git', ['rev-parse', '--show-toplevel'], {

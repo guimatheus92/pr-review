@@ -77,7 +77,7 @@ program
   .description('Run the full review pipeline in parallel; print/post findings')
   .option('--dry-run', 'Preview findings without posting comments (posting is the default)', false)
   .option('--publish', '(deprecated: posting is now the default; use --dry-run to preview)', false)
-  .option('--skip <names>', 'Comma-separated pass names to skip (full pack/skill or bare skill name; also: verifier, codex)')
+  .option('--skip <names>', 'Comma-separated pass names to skip (full pack/skill or bare skill name; also: verifier, codex, pr-description)')
   .option('--reviewer <path...>', 'Include a specific .md file as a reviewer (repeatable)')
   .option('--reviewers-dir <path...>', 'Include a directory of reviewer .md files (repeatable)')
   .option('--skill <path...>', 'Include a specific .md skill; its applyTo/paths scope still applies (repeatable)')

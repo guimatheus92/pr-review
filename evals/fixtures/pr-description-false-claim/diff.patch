@@ -1,0 +1,25 @@
+diff --git a/package.json b/package.json
+index c95dd96..9002f6e 100644
+--- a/package.json
++++ b/package.json
+@@ -4,6 +4,6 @@
+   "private": true,
+   "main": "src/notify.js",
+   "dependencies": {
+-    "yaml": "2.4.1"
++    "yaml": "2.6.0"
+   }
+ }
+diff --git a/src/notify.js b/src/notify.js
+index 9fe0db6..5fc5ffc 100644
+--- a/src/notify.js
++++ b/src/notify.js
+@@ -6,7 +6,7 @@ function formatSeconds(ms) {
+ 
+ function warnSlowRequest(url, ms) {
+   if (ms < SLOW_REQUEST_MS) return;
+-  console.warn(`Request to ${url} was slow (${formatSeconds(ms)}).`);
++  console.warn(`Slow response from ${url}: ${formatSeconds(ms)}. The service may be degraded; retry later.`);
+ }
+ 
+ module.exports = { warnSlowRequest };

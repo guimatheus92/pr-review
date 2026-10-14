@@ -67,6 +67,22 @@ export interface ChangedFile {
 }
 
 /**
+ * What changed inside one excluded `package-lock.json`, computed from its base
+ * and head content (INV-FETCH-04's exception). Facts for the review context —
+ * never a patch, never a finding.
+ */
+export interface LockfileDigest {
+  path: string;
+  status: 'ok' | 'unavailable' | 'unsupported';
+  /** Set exactly when status !== 'ok'. */
+  reason?: string;
+  /** Package entries per side (ok only; root "" excluded). */
+  packages?: { base: number; head: number };
+  /** Only groups that occurred; `total` uncapped, `sample` sorted, ≤ 20. */
+  changes?: Partial<Record<'stripped' | 'source' | 'version' | 'flags' | 'added' | 'removed', { total: number; sample: string[] }>>;
+}
+
+/**
  * What a caller of `fetchChangedFiles` already knows about which files can
  * still reach a review pass (INV-FETCH-04). Both fields are advisory and
  * concern **content only** — a provider must list every path either way, since
@@ -147,6 +163,8 @@ export interface GatherOutput {
    * provider fetched every patch — so their absence is not a reason to refetch.
    */
   contentExcludes?: string[];
+  /** INV-FETCH-04's one exception: one digest per changed, excluded package-lock.json. Context only — never a patch, never a finding. Absent on older/synthetic gathers; the context then says "digest unavailable". */
+  lockfileDigests?: LockfileDigest[];
 }
 
 export interface ReviewerDefinition {

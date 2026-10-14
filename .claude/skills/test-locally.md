@@ -72,7 +72,7 @@ npm run build
 # Dry run (no posting)
 node ./dist/cli.js review <pr-url> --dry-run
 
-# With specific options — --skip takes pass names (full or bare suffix), plus verifier/codex
+# With specific options — --skip takes pass names (full or bare suffix), plus verifier/codex/pr-description
 node ./dist/cli.js review <pr-url> --skip verifier --no-companions --dry-run
 node ./dist/cli.js review <pr-url> --skip awesome-copilot/go --dry-run   # full pass name
 node ./dist/cli.js review <pr-url> --skip go --dry-run                   # bare suffix, same pass

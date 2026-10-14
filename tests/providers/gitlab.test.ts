@@ -13,6 +13,7 @@ import {
   resolveToken,
 } from '../../src/providers/gitlab.js';
 import { detectProvider } from '../../src/providers/index.js';
+import type { PrMetadata } from '../../src/types.js';
 import { gatherCachePath, CACHE_ROOT } from '../../src/cache/keys.js';
 import { ensureRunDir, safeOwner, safeSegment } from '../../src/util/tmp.js';
 import { validLinesFromPatch } from '../../src/dispatch/line-snap.js';
@@ -241,13 +242,13 @@ test('resolveToken — GITLAB_ACCESS_TOKEN fallback, empty-token guard, and host
 });
 
 /** Stub global.fetch for provider round-trip tests (env token set → no subprocess). */
-function withFetch(handler: (url: string) => { status?: number; json?: unknown; headers?: Record<string, string> }, fn: () => Promise<void>): Promise<void> {
+function withFetch(handler: (url: string) => { status?: number; json?: unknown; text?: string; headers?: Record<string, string> }, fn: () => Promise<void>): Promise<void> {
   const realFetch = global.fetch;
   const prevToken = process.env.GITLAB_TOKEN;
   process.env.GITLAB_TOKEN = 'test-token';
   global.fetch = (async (url: string | URL) => {
     const r = handler(String(url));
-    return new Response(JSON.stringify(r.json ?? {}), {
+    return new Response(r.text ?? JSON.stringify(r.json ?? {}), {
       status: r.status ?? 200,
       headers: { 'content-type': 'application/json', ...(r.headers ?? {}) },
     });
@@ -279,6 +280,31 @@ test('apiAll — follows x-next-page across pages and concatenates (diffs pagina
       assert.equal(files.length, 101, 'both pages concatenated');
       assert.equal(files[100]!.path, 'last.ts');
       assert.ok(requested.some((u) => u.includes('page=2')), 'second page requested');
+    },
+  );
+});
+
+test('readFileAt — raw file at diff_refs.base_sha / head, path encoded as one segment; no base commit throws', async () => {
+  // INV-FETCH-04's lockfile exception. GitLab's base_sha is already the merge
+  // base the MR diffs against, so no extra call is needed to resolve it.
+  const requested: string[] = [];
+  await withFetch(
+    (url) => {
+      requested.push(url);
+      return { text: '{"lockfileVersion":3}' };
+    },
+    async () => {
+      const p = new GitLabProvider();
+      const ref = p.parseUrl(MR_URL)!;
+      const meta = { headSha: 'head1', baseSha: 'base1' } as PrMetadata;
+      assert.equal(await p.readFileAt(ref, 'sub/package-lock.json', 'base', meta), '{"lockfileVersion":3}', 'the body as text, not JSON-decoded');
+      await p.readFileAt(ref, 'sub/package-lock.json', 'head', meta);
+      assert.deepEqual(requested, [
+        'https://gitlab.com/api/v4/projects/group%2Fproj/repository/files/sub%2Fpackage-lock.json/raw?ref=base1',
+        'https://gitlab.com/api/v4/projects/group%2Fproj/repository/files/sub%2Fpackage-lock.json/raw?ref=head1',
+      ]);
+      await assert.rejects(() => p.readFileAt(ref, 'package-lock.json', 'base', { ...meta, baseSha: '' }), /no base commit/);
+      assert.equal(requested.length, 2, 'an unknown base is never guessed at');
     },
   );
 });

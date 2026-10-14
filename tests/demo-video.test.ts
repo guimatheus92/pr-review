@@ -47,16 +47,18 @@ test('answerSettled — the findings are on screen once a long assistant answer 
   const findings = entry('assistant', '## Findings\n' + '- a finding with its file and line, body and severity\n'.repeat(30), doneMs + 40000);
   const tool = JSON.stringify({ type: 'assistant', timestamp: new Date(doneMs + 6000).toISOString(), message: { content: [{ type: 'tool_use', name: 'Bash', input: {} }] } });
   // Narration only, and the file still being written: not settled.
-  assert.equal(answerSettled([narration, tool], doneMs, { nowMs: doneMs + 7000, lastWriteMs: doneMs + 6000 }), false);
+  assert.equal(answerSettled([narration, tool], doneMs, { nowMs: doneMs + 7000, lastWriteMs: doneMs + 6000 }), null);
   // Narration only, silent for a while: still not settled (nothing long was written).
-  assert.equal(answerSettled([narration], doneMs, { nowMs: doneMs + 30000, lastWriteMs: doneMs + 3000 }), false);
+  assert.equal(answerSettled([narration], doneMs, { nowMs: doneMs + 30000, lastWriteMs: doneMs + 3000 }), null);
   // The long answer, but written just now: wait for the silence.
-  assert.equal(answerSettled([narration, tool, findings], doneMs, { nowMs: doneMs + 42000, lastWriteMs: doneMs + 40000 }), false);
-  // The long answer, then 12 s of silence: settled.
-  assert.equal(answerSettled([narration, tool, findings], doneMs, { nowMs: doneMs + 53000, lastWriteMs: doneMs + 40000 }), true);
+  assert.equal(answerSettled([narration, tool, findings], doneMs, { nowMs: doneMs + 42000, lastWriteMs: doneMs + 40000 }), null);
+  // The long answer, then 12 s of silence: settled — and WHEN it landed is the answer, because
+  // that moment is where the findings segment of the cut starts (scene detection missed it on a
+  // take: the answer streams in over seconds, so there is no single big change of the picture).
+  assert.equal(answerSettled([narration, tool, findings], doneMs, { nowMs: doneMs + 53000, lastWriteMs: doneMs + 40000 }), doneMs + 40000);
   // A long answer from before done does not count.
   const old = entry('assistant', 'x'.repeat(2000), doneMs - 60000);
-  assert.equal(answerSettled([old, narration], doneMs, { nowMs: doneMs + 60000, lastWriteMs: doneMs + 3000 }), false);
+  assert.equal(answerSettled([old, narration], doneMs, { nowMs: doneMs + 60000, lastWriteMs: doneMs + 3000 }), null);
 });
 
 test('storyboard — the cues come from the run clock mapped onto the recording clock', () => {

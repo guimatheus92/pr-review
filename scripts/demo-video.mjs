@@ -231,7 +231,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const runsRoot = () => join(homedir(), '.pr-review', 'runs');
 
 function ps(script) {
-  const r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', windowsHide: true });
+  const r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', `[Console]::OutputEncoding = [Text.Encoding]::UTF8\n${script}`], { encoding: 'utf8', windowsHide: true });
   if (r.status !== 0) throw new Error(`powershell failed: ${r.stderr || r.stdout}`);
   return r.stdout.trim();
 }
@@ -301,6 +301,39 @@ function captureRegion(rect) {
 }
 
 /**
+ * The title of a window other than ours on top of the capture region, or null. gdigrab reads
+ * the desktop, not the window: whatever is on top goes into the recording (a take captured an
+ * editor with the author's own notes, found only on the QA frames after the export). Four
+ * points are probed — the band's corner, the pane's corner, the centre, the prompt — through
+ * WindowFromPoint resolved to its top-level window.
+ */
+function coveringWindow(region, title) {
+  const px = (fx, fy) => `${Math.round(region.x + region.width * fx)},${Math.round(region.y + region.height * fy)}`;
+  const points = [px(0.5, 0.5), px(0.15, 0.85), px(0.85, 0.15), px(0.5, 0.97)].join(';');
+  const out = ps(`
+Add-Type @'
+using System; using System.Runtime.InteropServices; using System.Text;
+public static class P {
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint f);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
+  public struct POINT { public int X, Y; public POINT(int x, int y) { X = x; Y = y; } }
+  public static string TitleAt(int x, int y) {
+    SetProcessDPIAware();
+    var h = GetAncestor(WindowFromPoint(new POINT(x, y)), 2);
+    var t = new StringBuilder(512); GetWindowTextW(h, t, 512);
+    return t.ToString();
+  }
+}
+'@
+'${points}'.Split(';') | ForEach-Object { $xy = $_.Split(','); [P]::TitleAt([int]$xy[0], [int]$xy[1]) }
+`);
+  const titles = out.split('\n').map((l) => l.trim());
+  return titles.find((t) => t !== title) ?? null;
+}
+
+/**
  * The newest run id that started at or after `sinceMs`, or null. Pure, and decided afresh on
  * every poll: the review's own run dir appears a few seconds into the recording, and a run
  * from before it (a probe, an unrelated review) must never be the one the capture waits on.
@@ -327,7 +360,7 @@ const SETTLE_MS = 12_000; // the transcript stops growing once the answer is com
  * AND the last thing written: nothing follows it for SETTLE_MS.
  */
 export function answerSettled(lines, afterMs, { nowMs, lastWriteMs }) {
-  if (nowMs - lastWriteMs < SETTLE_MS) return false;
+  if (nowMs - lastWriteMs < SETTLE_MS) return null;
   for (let i = lines.length - 1; i >= 0; i -= 1) {
     const line = lines[i].trim();
     if (!line.includes('"assistant"')) continue;
@@ -339,14 +372,17 @@ export function answerSettled(lines, afterMs, { nowMs, lastWriteMs }) {
     }
     if (entry.type !== 'assistant' || Date.parse(entry.timestamp) < afterMs) continue;
     const content = entry.message && Array.isArray(entry.message.content) ? entry.message.content : [];
-    if (content.some((c) => c.type === 'text' && typeof c.text === 'string' && c.text.length >= ANSWER_MIN_CHARS)) return true;
+    // The entry's timestamp is when the answer finished landing on screen: that moment, not a
+    // scene cut, is where the findings segment starts (an answer streams in over seconds, so
+    // scene detection saw no single big change on a take and the cut showed the wait instead).
+    if (content.some((c) => c.type === 'text' && typeof c.text === 'string' && c.text.length >= ANSWER_MIN_CHARS)) return Date.parse(entry.timestamp);
   }
-  return false;
+  return null;
 }
 
 /**
- * True once the demo session's transcript (~/.claude/projects/<checkout>/<session>.jsonl)
- * settled on a long assistant answer written after `afterMs`; false at the ceiling.
+ * The time the demo session's transcript (~/.claude/projects/<checkout>/<session>.jsonl)
+ * settled on a long assistant answer written after `afterMs`; null at the ceiling.
  */
 async function waitForAnswer(checkout, afterMs, ceilingMs) {
   const projectDir = join(homedir(), '.claude', 'projects', resolve(checkout).replace(/[:\\/]/g, '-'));
@@ -360,10 +396,11 @@ async function waitForAnswer(checkout, afterMs, ceilingMs) {
       .filter((p) => statSync(p).mtimeMs >= afterMs);
     for (const file of transcripts) {
       const lines = readFileSync(file, 'utf8').split('\n');
-      if (answerSettled(lines, afterMs, { nowMs: Date.now(), lastWriteMs: statSync(file).mtimeMs })) return true;
+      const at = answerSettled(lines, afterMs, { nowMs: Date.now(), lastWriteMs: statSync(file).mtimeMs });
+      if (at !== null) return at;
     }
   }
-  return false;
+  return null;
 }
 
 function readProgress(dir) {
@@ -433,13 +470,31 @@ async function record(opts) {
   // is decided afresh on every poll (locking onto a probe run from a minute earlier once kept
   // the capture rolling past the real run's `done`, until the 30-minute ceiling).
   let runId = null;
+  let answerAtMs = null;
+  const covered = [];
+  let polls = 0;
+  const sampleCover = () => {
+    // Every ten seconds (one PowerShell process each): say so the moment something covers the
+    // window, instead of after the export.
+    if (polls++ % 5 !== 0) return;
+    const by = coveringWindow(region, WINDOW_TITLE);
+    if (by === null) return;
+    const atMs = Date.now() - recordingStartedAt;
+    covered.push({ atMs, title: by });
+    console.log(`[record] WARNING: the window is covered by "${by}" at ${Math.round(atMs / 1000)} s — this take cannot be used`);
+  };
   if (opts['context-only']) {
-    await sleep(Number(opts.seconds ?? 45) * 1_000);
+    const until = Date.now() + Number(opts.seconds ?? 45) * 1_000;
+    while (Date.now() < until) {
+      await sleep(2_000);
+      sampleCover();
+    }
     runId = newestRunSince(recordingStartedAt);
   } else {
     const ceiling = Date.now() + 30 * 60_000;
     while (Date.now() < ceiling) {
       await sleep(2_000);
+      sampleCover();
       const newest = newestRunSince(recordingStartedAt);
       if (newest !== runId) {
         runId = newest;
@@ -452,9 +507,9 @@ async function record(opts) {
         // summary (the slash command's last step), 20-90 s after `done`: wait for that answer in
         // the session's transcript, then a little more so it is read, with a ceiling.
         console.log(`[record] run ${runId} reached ${last.phase}; waiting for the findings on screen`);
-        const answered = await waitForAnswer(checkout, last.ts, 180_000);
-        console.log(answered ? '[record] the findings are on screen; 8 s more' : '[record] no settled answer in 180 s; stopping anyway');
-        await sleep(answered ? 8_000 : 2_000);
+        answerAtMs = await waitForAnswer(checkout, last.ts, 180_000);
+        console.log(answerAtMs !== null ? '[record] the findings are on screen; 8 s more' : '[record] no settled answer in 180 s; stopping anyway');
+        await sleep(answerAtMs !== null ? 8_000 : 2_000);
         break;
       }
     }
@@ -465,9 +520,9 @@ async function record(opts) {
   const code = await exited;
   const recordingStoppedAt = Date.now();
   if (code !== 0) throw new Error(`ffmpeg exited ${code}`);
-  const record = { recordingStartedAt, recordingStoppedAt, runId, runDir: runId ? join(runsRoot(), runId) : null, window: rect, prompt, video: rawPath, title: WINDOW_TITLE };
+  const record = { recordingStartedAt, recordingStoppedAt, answerAtMs, covered, runId, runDir: runId ? join(runsRoot(), runId) : null, window: rect, prompt, video: rawPath, title: WINDOW_TITLE };
   writeFileSync(join(work, 'demo-record.json'), JSON.stringify(record, null, 2) + '\n', 'utf8');
-  console.log(`[record] ${rawPath} (${Math.round((recordingStoppedAt - recordingStartedAt) / 1000)} s); run ${runId ?? 'none'}`);
+  console.log(`[record] ${rawPath} (${Math.round((recordingStoppedAt - recordingStartedAt) / 1000)} s); run ${runId ?? 'none'}${covered.length ? `; COVERED ${covered.length} times — record again` : ''}`);
   return record;
 }
 
@@ -497,6 +552,10 @@ function readNdjson(p) {
 function compose(opts) {
   const work = resolve(opts.work);
   const rec = readJson(join(work, 'demo-record.json'));
+  if (Array.isArray(rec.covered) && rec.covered.length) {
+    // A covered frame anywhere is somebody else's screen in the README, even at x24 in the middle.
+    throw new Error(`the recording was covered ${rec.covered.map((c) => `at ${Math.round(c.atMs / 1000)} s by "${c.title}"`).join(', ')}; record again`);
+  }
   const runDir = opts['run-dir'] ? resolve(opts['run-dir']) : rec.runDir;
   if (!runDir) throw new Error('no run dir recorded; pass --run-dir');
   const runId = runDir.split(/[\\/]/).at(-1);
@@ -504,7 +563,10 @@ function compose(opts) {
   const doneLine = progress.filter((e) => e.phase === 'done' || e.phase === 'error').at(-1);
   const doneSec = doneLine ? (doneLine.ts - rec.recordingStartedAt) / 1000 : null;
   const recSec = (rec.recordingStoppedAt - rec.recordingStartedAt) / 1000;
-  const summaryAtMs = doneSec !== null && existsSync(rec.video) ? detectSummary(rec.video, doneSec + 2, recSec) : null;
+  // The transcript's settled answer (record) is the findings' moment; scene detection is the
+  // fallback for a recording made without it.
+  const answerAtMs = typeof rec.answerAtMs === 'number' ? rec.answerAtMs - rec.recordingStartedAt : null;
+  const summaryAtMs = answerAtMs ?? (doneSec !== null && existsSync(rec.video) ? detectSummary(rec.video, doneSec + 2, recSec) : null);
   const s = storyboard({
     runId,
     progress,
@@ -518,7 +580,7 @@ function compose(opts) {
   const { project, segments, timeline } = buildProject(s, { videoPath: join(work, 'cut.mp4') });
   writeFileSync(join(work, 'demo.recordly'), JSON.stringify(project, null, 2) + '\n', 'utf8');
   writeFileSync(join(work, 'storyboard.json'), JSON.stringify({ ...s, summaryDetected: summaryAtMs !== null, raw: resolve(rec.video), segments, timeline }, null, 2) + '\n', 'utf8');
-  console.log(`[compose] ${s.prLabel}: ${Object.entries(s.cues).map(([k, v]) => `${k}=${(v / 1000).toFixed(1)}s`).join(' ')}\n[compose] timeline ${(timeline.durationMs / 1000).toFixed(1)} s, middle x${segments[1].speed.toFixed(1)}, summary ${summaryAtMs !== null ? 'detected' : 'assumed'}`);
+  console.log(`[compose] ${s.prLabel}: ${Object.entries(s.cues).map(([k, v]) => `${k}=${(v / 1000).toFixed(1)}s`).join(' ')}\n[compose] timeline ${(timeline.durationMs / 1000).toFixed(1)} s, middle x${segments[1].speed.toFixed(1)}, summary ${answerAtMs !== null ? 'from the transcript' : summaryAtMs !== null ? 'detected' : 'assumed'}`);
   return { project, segments, timeline };
 }
 
@@ -602,18 +664,24 @@ function gif(opts) {
   const work = resolve(opts.work);
   const input = resolve(opts.input ?? join(work, 'live-demo.mp4'));
   const out = resolve(opts.out ?? join(work, 'live-demo.gif'));
+  // The size is the sped-up middle: every one of its frames is a new screenful of text, so it
+  // gets half the frame rate of the rest (a GIF carries its own delay per frame); the 1x parts
+  // are nearly still. No dithering: bayer noise around every glyph edge re-encoded each frame
+  // (measured on one 55 s take: 13.5 MB at 960px/8fps dithered, 8.1 MB at 960px 6/3 fps plain).
+  const { startMs, endMs } = readJson(join(work, 'storyboard.json')).segments[1];
   const attempts = [
-    { width: Number(opts.width ?? 1280), fps: Number(opts.fps ?? 12) },
-    { width: 1024, fps: 10 },
-    { width: 960, fps: 8 },
+    { width: Number(opts.width ?? 1024), colors: 96 },
+    { width: 960, colors: 96 },
+    { width: 880, colors: 64 },
   ];
   const limit = Number(opts['max-mb'] ?? 10) * 1048576;
   for (const a of attempts) {
-    const filters = `fps=${a.fps},scale=${a.width}:-2:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128:stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle`;
-    const r = spawnSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', input, '-vf', filters, '-loop', '0', out], { encoding: 'utf8', windowsHide: true });
+    const select = `select='if(between(t,${startMs / 1000},${endMs / 1000}),not(mod(n,10)),not(mod(n,5)))'`; // 30 fps source: 3 fps in the middle, 6 fps elsewhere
+    const filters = `${select},scale=${a.width}:-2:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=${a.colors}:stats_mode=diff[p];[s1][p]paletteuse=dither=none:diff_mode=rectangle`;
+    const r = spawnSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', input, '-vf', filters, '-fps_mode', 'vfr', '-loop', '0', out], { encoding: 'utf8', windowsHide: true });
     if (r.status !== 0) throw new Error(`ffmpeg gif failed: ${r.stderr}`);
     const size = statSync(out).size;
-    console.log(`[gif] ${out}: ${(size / 1048576).toFixed(1)} MB at ${a.width}px/${a.fps}fps`);
+    console.log(`[gif] ${out}: ${(size / 1048576).toFixed(1)} MB at ${a.width}px/${a.colors} colours`);
     if (size <= limit) return out;
     console.log(`[gif] over ${limit / 1048576} MB, trying smaller`);
   }

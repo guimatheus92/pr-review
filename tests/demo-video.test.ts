@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { answerSettled, buildProject, pickNewestRun, storyboard } from '../scripts/demo-video.mjs';
+import { answerSettled, buildProject, pickNewestRun, projectDirFor, storyboard } from '../scripts/demo-video.mjs';
 import { DONE, RUN_ID } from '../mods/live/tests/fixtures/run-798.ts';
 
 /**
@@ -34,6 +34,16 @@ test('pickNewestRun — only a run that started after the recording did, the new
   assert.equal(pickNewestRun([probe], recordingStartedAt), null, 'nothing newer than the recording yet');
   assert.equal(pickNewestRun([probe, real], recordingStartedAt), real);
   assert.equal(pickNewestRun(['local__o__r__main__abc', real, 'github__o__r__1__2026-09-01T00-00-00-000Z'], recordingStartedAt), real, 'unstamped and old ids are ignored');
+});
+
+test('projectDirFor — the transcript folder is named the way Claude Code names it: every character but letters, digits and hyphens becomes a hyphen', () => {
+  // Measured: C:\Users\guilh\repos\pr-review\.claude\worktrees\feat+live-mod is stored under
+  // C--Users-guilh-repos-pr-review--claude-worktrees-feat-live-mod. A dot or an underscore in
+  // the path (first.last, my_repo) used to yield a folder that never exists, so `record`
+  // waited the full ceiling and the findings segment fell back to scene detection.
+  const dir = projectDirFor('C:\\Users\\first.last\\repos\\my_repo\\feat+x');
+  assert.ok(dir.endsWith('C--Users-first-last-repos-my-repo-feat-x'), dir);
+  assert.ok(dir.includes('.claude') && dir.includes('projects'), dir);
 });
 
 test('answerSettled — the findings are on screen once a long assistant answer after done is followed by silence', () => {

@@ -18,7 +18,7 @@
 // fixture. Nothing here touches src/ or the run directory; ffmpeg must be on PATH and
 // Recordly installed per user (%LOCALAPPDATA%\Programs\Recordly).
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -46,7 +46,8 @@ function fmtElapsed(ms) {
 /**
  * Where the story beats fall in the recording, in video ms. `recordingStartedAt` and
  * `recordingStoppedAt` are wall-clock ms (the same clock the CLI stamps its feeds with);
- * `summaryAtMs` is the moment the summary appeared on screen when `detectSummary` found it.
+ * `summaryAtMs` is the moment the findings appeared on screen (the transcript's settled answer,
+ * or scene detection as the fallback); without it the findings segment starts at done + 20 s.
  */
 export function storyboard({ runId, progress, reviewerProgress, delivery, plan, recordingStartedAt, recordingStoppedAt, summaryAtMs }) {
   const v = (wallMs) => wallMs - recordingStartedAt;
@@ -357,8 +358,11 @@ const SETTLE_MS = 12_000; // the transcript stops growing once the answer is com
 /**
  * Pure: whether the findings answer is on screen, from the session transcript's lines, the
  * run's `done` time and the transcript's last write. The slash command narrates every poll
- * (assistant text too, one of them right after `done`), so the answer that matters is long
- * AND the last thing written: nothing follows it for SETTLE_MS.
+ * (assistant text too, one of them right after `done`), so the answer that matters is the
+ * newest LONG assistant text after `afterMs`, once the file has been silent for SETTLE_MS. A
+ * short narration written after it does not count: one follows the findings on every take
+ * ("The review of PR #798 finished: 13 findings…"), and requiring the long text to be the
+ * very last entry would miss the answer every time.
  */
 export function answerSettled(lines, afterMs, { nowMs, lastWriteMs }) {
   if (nowMs - lastWriteMs < SETTLE_MS) return null;
@@ -382,14 +386,25 @@ export function answerSettled(lines, afterMs, { nowMs, lastWriteMs }) {
 }
 
 /**
- * The time the demo session's transcript (~/.claude/projects/<checkout>/<session>.jsonl)
- * settled on a long assistant answer written after `afterMs`; null at the ceiling.
+ * Pure: the folder Claude Code keeps a checkout's transcripts in. Measured on the session
+ * dirs under ~/.claude/projects: every character that is not a letter, a digit or a hyphen
+ * becomes a hyphen (`C:\...\.claude\worktrees\feat+live-mod` → `C--...--claude-worktrees-feat-live-mod`).
  */
-async function waitForAnswer(checkout, afterMs, ceilingMs) {
-  const projectDir = join(homedir(), '.claude', 'projects', resolve(checkout).replace(/[:\\/]/g, '-'));
+export function projectDirFor(checkout) {
+  return join(homedir(), '.claude', 'projects', resolve(checkout).replace(/[^A-Za-z0-9-]/g, '-'));
+}
+
+/**
+ * The time the demo session's transcript (~/.claude/projects/<checkout>/<session>.jsonl)
+ * settled on a long assistant answer written after `afterMs`; null at the ceiling. `onTick`
+ * runs every 3 s: the recording goes on while this waits, so the cover check must too.
+ */
+async function waitForAnswer(checkout, afterMs, ceilingMs, onTick = () => {}) {
+  const projectDir = projectDirFor(checkout);
   const started = Date.now();
   while (Date.now() - started < ceilingMs) {
     await sleep(3_000);
+    onTick();
     if (!existsSync(projectDir)) continue;
     const transcripts = readdirSync(projectDir)
       .filter((n) => n.endsWith('.jsonl'))
@@ -465,7 +480,16 @@ async function record(opts) {
     { stdio: ['pipe', 'inherit', 'inherit'], windowsHide: true },
   );
   console.log(`[record] capturing desktop region ${region.width}x${region.height} at ${region.x},${region.y}`);
+  let ffmpegError = null;
+  ffmpeg.on('error', (e) => { ffmpegError = e; });
   const exited = new Promise((r) => ffmpeg.on('exit', (code) => r(code)));
+  const stopFfmpeg = () => {
+    if (ffmpeg.exitCode === null && !ffmpegError) {
+      ffmpeg.stdin.write('q');
+      ffmpeg.stdin.end();
+    }
+    return exited;
+  };
   console.log(`[record] ffmpeg started at ${new Date(recordingStartedAt).toISOString()}`);
   // The review's own run dir appears a few seconds into the recording; which run to wait on
   // is decided afresh on every poll (locking onto a probe run from a minute earlier once kept
@@ -473,52 +497,64 @@ async function record(opts) {
   let runId = null;
   let answerAtMs = null;
   const covered = [];
-  let polls = 0;
-  const sampleCover = () => {
-    // Every ten seconds (one PowerShell process each): say so the moment something covers the
-    // window, instead of after the export.
-    if (polls++ % 5 !== 0) return;
+  let lastProbe = -Infinity;
+  const tick = (force = false) => {
+    // ffmpeg gone (not on PATH, or gdigrab refused the region) means the review would run on
+    // with nothing recording it: fail now, with the cause, not after the 30-minute ceiling.
+    if (ffmpegError) throw new Error(`ffmpeg failed to start: ${ffmpegError.message}`);
+    if (ffmpeg.exitCode !== null) throw new Error(`ffmpeg stopped early (exit ${ffmpeg.exitCode})`);
+    // Every ten seconds (one PowerShell process each), on every wait of the recording — the
+    // findings segment is cut from the wait AFTER `done`: say so the moment something covers
+    // the window, instead of after the export.
+    if (!force && Date.now() - lastProbe < 10_000) return;
+    lastProbe = Date.now();
     const by = coveringWindow(region, WINDOW_TITLE);
     if (by === null) return;
     const atMs = Date.now() - recordingStartedAt;
     covered.push({ atMs, title: by });
     console.log(`[record] WARNING: the window is covered by "${by}" at ${Math.round(atMs / 1000)} s — this take cannot be used`);
   };
-  if (opts['context-only']) {
-    const until = Date.now() + Number(opts.seconds ?? 45) * 1_000;
-    while (Date.now() < until) {
-      await sleep(2_000);
-      sampleCover();
-    }
-    runId = newestRunSince(recordingStartedAt);
-  } else {
-    const ceiling = Date.now() + 30 * 60_000;
-    while (Date.now() < ceiling) {
-      await sleep(2_000);
-      sampleCover();
-      const newest = newestRunSince(recordingStartedAt);
-      if (newest !== runId) {
-        runId = newest;
-        console.log(`[record] following run ${runId}`);
+  try {
+    if (opts['context-only']) {
+      const until = Date.now() + Number(opts.seconds ?? 45) * 1_000;
+      while (Date.now() < until) {
+        await sleep(2_000);
+        tick();
       }
-      if (!runId) continue;
-      const last = readProgress(join(runsRoot(), runId)).filter((e) => e.phase !== 'reap').at(-1);
-      if (last && (last.phase === 'done' || last.phase === 'error')) {
-        // The findings reach the screen only when Claude writes its answer after reading the
-        // summary (the slash command's last step), 20-90 s after `done`: wait for that answer in
-        // the session's transcript, then a little more so it is read, with a ceiling.
-        console.log(`[record] run ${runId} reached ${last.phase}; waiting for the findings on screen`);
-        answerAtMs = await waitForAnswer(checkout, last.ts, 180_000);
-        console.log(answerAtMs !== null ? '[record] the findings are on screen; 8 s more' : '[record] no settled answer in 180 s; stopping anyway');
-        await sleep(answerAtMs !== null ? 8_000 : 2_000);
-        break;
+      runId = newestRunSince(recordingStartedAt);
+    } else {
+      const ceiling = Date.now() + 30 * 60_000;
+      while (Date.now() < ceiling) {
+        await sleep(2_000);
+        tick();
+        const newest = newestRunSince(recordingStartedAt);
+        if (newest !== runId) {
+          runId = newest;
+          console.log(`[record] following run ${runId}`);
+        }
+        if (!runId) continue;
+        const last = readProgress(join(runsRoot(), runId)).filter((e) => e.phase !== 'reap').at(-1);
+        if (last && (last.phase === 'done' || last.phase === 'error')) {
+          // The findings reach the screen only when Claude writes its answer after reading the
+          // summary (the slash command's last step), 20-90 s after `done`: wait for that answer in
+          // the session's transcript, then a little more so it is read, with a ceiling.
+          console.log(`[record] run ${runId} reached ${last.phase}; waiting for the findings on screen`);
+          answerAtMs = await waitForAnswer(checkout, last.ts, 180_000, tick);
+          console.log(answerAtMs !== null ? '[record] the findings are on screen; 8 s more' : '[record] no settled answer in 180 s; stopping anyway');
+          await sleep(answerAtMs !== null ? 8_000 : 2_000);
+          tick(true); // the last frames are the findings at 1x: look once more before stopping
+          break;
+        }
       }
+      if (!runId) throw new Error('no run appeared under the runs root');
     }
-    if (!runId) throw new Error('no run appeared under the runs root');
+  } catch (e) {
+    // A throw above would leave ffmpeg recording the desktop into raw.mp4 with no limit (it
+    // survives its parent and ignores the end of its stdin): stop it before failing.
+    await stopFfmpeg().catch(() => {});
+    throw e;
   }
-  ffmpeg.stdin.write('q');
-  ffmpeg.stdin.end();
-  const code = await exited;
+  const code = await stopFfmpeg();
   const recordingStoppedAt = Date.now();
   if (code !== 0) throw new Error(`ffmpeg exited ${code}`);
   const record = { recordingStartedAt, recordingStoppedAt, answerAtMs, covered, runId, runDir: runId ? join(runsRoot(), runId) : null, window: rect, prompt, video: rawPath, title: WINDOW_TITLE };
@@ -527,10 +563,13 @@ async function record(opts) {
   return record;
 }
 
-/** The first big change of the picture after `fromSec`: the summary being printed. */
+/**
+ * The first big change of the picture after `fromSec`. The fallback for a recording without
+ * a transcript answer (`answerAtMs`): an answer streams in over seconds, so on one take
+ * nothing after `done` crossed the threshold and the cut landed on the wait.
+ */
 function detectSummary(video, fromSec, toSec) {
-  // The summary is a few hundred lines printed at once: a clear cut on a mostly still picture
-  // (measured 0.1–0.2 on the recording; nothing else after `done` comes near 0.1).
+  // A screenful printed at once is a clear cut on a mostly still picture (measured 0.1–0.2).
   const r = spawnSync('ffmpeg', ['-hide_banner', '-ss', String(fromSec), '-to', String(toSec), '-i', video, '-vf', "select='gt(scene,0.1)',showinfo", '-f', 'null', '-'], { encoding: 'utf8', windowsHide: true });
   const m = /pts_time:([\d.]+)/.exec(r.stderr);
   return m ? fromSec * 1000 + Math.round(Number(m[1]) * 1000) : null;
@@ -642,6 +681,10 @@ async function exportVideo(opts) {
     `exit $p.ExitCode`,
   ].join('\n');
   console.log(`[export] ${exe}\n[export] project ${project}\n[export] out ${out}`);
+  // An app that exits at once (seen, above) would leave an earlier export and its
+  // `success: true` report in place, and `all` would cut the GIF from the old take.
+  rmSync(out, { force: true });
+  rmSync(`${out}.report.json`, { force: true });
   const started = Date.now();
   const r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', windowsHide: true, timeout: Number(opts.timeout ?? 600) * 1000 });
   const code = r.status;

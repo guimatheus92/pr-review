@@ -32,6 +32,7 @@ import {
   companionReviewerNames,
   detectCompanions,
   formatWarning,
+  KNOWN_COMPANIONS,
   materializeCompanionBriefs,
   type CompanionState,
   type MaterializedCompanionBrief,
@@ -1417,6 +1418,11 @@ async function reviewPipeline(opts: ReviewCmdOptions, where: { outDir?: string }
   let installedCompanions: string[] = [];
   let companionState: CompanionState | undefined;
   let companionDetectionWarning: string | undefined;
+  // The Degraded line must say what the failure COST. "companion detection failed:
+  // …conflicting active installations" read as harmless for 36 reviews in a row
+  // while every one of them ran 7 reviewers short.
+  const detectionFailure = (reason: string): string =>
+    `companion detection failed — 0 of ${companionDispatchCount(KNOWN_COMPANIONS.map((c) => c.id))} companion reviewers dispatched: ${reason}`;
   const companionDegraded: string[] = [];
   let companionPromise: Promise<void> = Promise.resolve();
   if (config.invokeCompanions || config.companionWarn) {
@@ -1426,13 +1432,13 @@ async function reviewPipeline(opts: ReviewCmdOptions, where: { outDir?: string }
         const state = await (opts.detectCompanionsFn ?? detectCompanions)(companionBinary, runtime);
         companionState = state;
         installedCompanions = state.recognized;
-        if (state.detectionError) companionDetectionWarning = `companion detection failed: ${state.detectionError}`;
+        if (state.detectionError) companionDetectionWarning = detectionFailure(state.detectionError);
         if (state.missing.length > 0 && config.companionWarn && !opts.noCompanionWarning) {
           const warn = formatWarning(state.missing, runtime);
           if (warn) process.stderr.write(warn + '\n');
         }
       } catch (err) {
-        companionDetectionWarning = `companion detection failed: ${safeRuntimeDiagnostic((err as Error).message) ?? 'unknown error'}`;
+        companionDetectionWarning = detectionFailure(safeRuntimeDiagnostic((err as Error).message) ?? 'unknown error');
         process.stderr.write(`[companions] ${companionDetectionWarning}\n`);
       }
     })();
@@ -1509,7 +1515,7 @@ async function reviewPipeline(opts: ReviewCmdOptions, where: { outDir?: string }
     const materialized = materializeCompanionBriefs({ installed: installedCompanions, sources: companionSources });
     companionBriefs.push(...materialized.briefs);
     for (const failure of materialized.failures) {
-      const note = `companion ${failure.id} not dispatched — ${failure.reason}`;
+      const note = `companion ${failure.id} not dispatched (${companionDispatchCount([failure.id])} reviewer(s) lost) — ${failure.reason}`;
       companionDegraded.push(note);
       process.stderr.write(`[companions] warning: ${note}\n`);
     }

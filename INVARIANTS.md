@@ -477,7 +477,13 @@ be materialized is dropped and named as degraded coverage — never fatal, and n
 left in the planned roster, because a planned reviewer that is not dispatched reads
 as missing output under INV-DEL-01. Eligibility is scoped by pr-review, not assumed
 from the runtime: `claude plugin list --json` reports every project-scoped install
-on the machine regardless of the invocation directory.
+on the machine regardless of the invocation directory. Several enabled records of
+one plugin for the directory under review are several roots to read, not a
+conflict: integrity is the CONTENT of the criteria, which must be identical across
+roots, never the version string. Divergent content drops that one companion; the
+others still dispatch. The `code-review` criteria are recognised in either
+marketplace's wording (`claude-code-plugins`, `claude-plugins-official`), and a body
+matching neither is refused by name.
 
 **Why:** A live review loaded an unrelated AVD plugin into every reviewer and
 ran 35 `userPromptSubmitted` hooks, each timing out after 45 seconds. The

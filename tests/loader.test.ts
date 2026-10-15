@@ -232,32 +232,56 @@ test('parseClaudePluginListJson — another project\'s installs never become a c
   }]);
 });
 
-test('parseClaudePluginListJson — a project-scoped install governs subdirectories of its project', () => {
-  // Inside that project the two entries genuinely are ambiguous: same id, same
-  // project, different versions. Failing closed there is the point of the check,
-  // and case-folding is what makes `c:` and `C:` one project rather than two.
+test('parseClaudePluginListJson — inside the project, every governing record is a root to read, never a conflict', () => {
+  // Same id, same project (case-folded: `c:` and `C:` are one folder), three
+  // different versions. 0.15.x failed closed here — "conflicting active
+  // installations" — and that one stale `code-review` record dropped all 7 companion
+  // reviewers from 36 reviews in a week (#54). The version string proves nothing;
+  // the content check in `agreedDefinition` is the integrity gate, so every root
+  // must reach it.
   for (const cwd of [
     'C:\\Users\\guilh\\repos\\PrecoPratico',
     'C:\\Users\\guilh\\repos\\PrecoPratico\\apps\\backend',
   ]) {
     const parsed = parseClaudePluginListJson(JSON.stringify(REAL_PLUGIN_LIST), cwd);
-    assert.match(parsed.detectionError ?? '', /conflicting active installations/, `cwd=${cwd}`);
+    assert.equal(parsed.detectionError, undefined, `cwd=${cwd}`);
+    assert.deepEqual(
+      parsed.activeClaudePlugins.map((plugin) => plugin.version).sort(),
+      ['3b600518a637', '3deb821cb71c', '3ea32df27be7'],
+      `cwd=${cwd}`,
+    );
   }
+});
+
+test('parseClaudePluginListJson — records that share a root collapse to one selector', () => {
+  // The list on the reporting machine after `claude plugin update`: user scope plus
+  // both project-scope spellings, all on one version and one installPath.
+  const root = join(tmpdir(), 'cache', 'code-review', 'c2bdb427efe8');
+  const parsed = parseClaudePluginListJson(JSON.stringify([
+    { id: 'code-review@claude-plugins-official', version: 'c2bdb427efe8', scope: 'user', enabled: true, installPath: root },
+    {
+      id: 'code-review@claude-plugins-official', version: 'c2bdb427efe8', scope: 'project', enabled: true,
+      installPath: root, projectPath: 'C:\\Users\\guilh\\repos\\PrecoPratico',
+    },
+    {
+      id: 'code-review@claude-plugins-official', version: 'c2bdb427efe8', scope: 'project', enabled: true,
+      installPath: root.toUpperCase(), projectPath: 'c:\\Users\\guilh\\repos\\PrecoPratico',
+    },
+  ]), 'C:\\Users\\guilh\\repos\\PrecoPratico');
+
+  assert.equal(parsed.detectionError, undefined);
+  assert.equal(parsed.activeClaudePlugins.length, 1);
 });
 
 test('parseClaudePluginListJson — plugin-derived detection errors are single-line and bounded', () => {
   const parsed = parseClaudePluginListJson(JSON.stringify([
     {
-      id: 'pr-review-toolkit@market\nFORGED', enabled: true, version: '1.0.0',
+      id: 'pr-review-toolkit@market\nFORGED', enabled: true,
       installPath: join(tmpdir(), 'one'),
-    },
-    {
-      id: 'pr-review-toolkit@market\nFORGED', enabled: true, version: '2.0.0',
-      installPath: join(tmpdir(), 'two'),
     },
   ]));
 
-  assert.match(parsed.detectionError ?? '', /conflicting active installations/);
+  assert.match(parsed.detectionError ?? '', /no qualified identity, version, and install path/);
   assert.doesNotMatch(parsed.detectionError ?? '', /[\r\n]/);
   assert.ok((parsed.detectionError ?? '').length <= 1_000);
 });

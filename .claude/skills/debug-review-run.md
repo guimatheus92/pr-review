@@ -82,7 +82,7 @@ Every `pr-review review` writes artifacts to `~/.pr-review/runs/<provider>__<own
 **Companion failures:**
 1. Read `companions.json` first — it separates *installed*, *recognized*, *planned*, and *completed*. `plannedDispatches: 7` (six `pr-review-toolkit` agents + one `code-review` slash command) with fewer completed rows is the signal; `missingReviewers` / `duplicateReviewers` name exactly which.
 2. A planned companion that delivered nothing is incomplete delivery (exit 2), not a quiet gap. A companion that is simply *not installed* is recorded as degraded coverage instead.
-3. `detectionWarning` in `companions.json` means installation state is **unknown** (the probe failed) — that is deliberately not the same as "none installed".
+3. `detectionWarning` in `companions.json` means installation state is **unknown** (the probe failed) — that is deliberately not the same as "none installed". The Degraded line says what it cost (`0 of 7 companion reviewers dispatched`), and so does each per-companion note (`not dispatched (1 reviewer(s) lost)`). Several `claude plugin list --json` records of one plugin for the same project (user + project scope, or `C:`/`c:` spellings) are not a failure: their criteria files are compared by content, and only divergent content drops that companion.
 4. Look for `companion:` entries with `✗` status in the summary.
 5. Companion tasks share the orchestrator session's 30-minute process timeout. If they consistently time out, try `--no-companions`.
 6. Verify companion is installed: `pr-review doctor`.

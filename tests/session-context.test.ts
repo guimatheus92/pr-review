@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { basename, join } from 'node:path';
 import {
   DESCRIPTION_BRIEF,
@@ -1184,5 +1185,100 @@ test('companions — a real directive AFTER the invocation section still fails c
     );
   } finally {
     seeded.cleanup();
+  }
+});
+
+// The `code-review` command exists in two marketplaces with different wording. Both
+// fixtures are byte-for-byte copies of the installed files (the AGENTS.md lesson: a
+// check over another producer's text is fed that producer's REAL shape, never a
+// hand-written stand-in — the synthetic `seedCompanionSources` body only ever
+// carried the claude-code-plugins markers, which is how the official copy went
+// unrecognised through 14 cached versions).
+const CODE_REVIEW_FIXTURES = join(fileURLToPath(new URL('.', import.meta.url)), 'fixtures', 'code-review-command');
+
+function codeReviewSourceFrom(fixture: string): { source: CompanionPluginSource; cleanup(): void } {
+  const root = mkdtempSync(join(tmpdir(), 'pr-review-code-review-'));
+  mkdirSync(join(root, 'commands'), { recursive: true });
+  writeFileSync(join(root, 'commands', 'code-review.md'), readFileSync(join(CODE_REVIEW_FIXTURES, fixture)));
+  return { source: { id: 'code-review', roots: [root] }, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+test('companions — the claude-plugins-official code-review wording is a known shape (#54)', () => {
+  const seeded = codeReviewSourceFrom('claude-plugins-official.md');
+  try {
+    const { briefs, failures } = materializeCompanionBriefs({ installed: ['code-review'], sources: [seeded.source] });
+    assert.deepEqual(failures, []);
+    assert.equal(briefs.length, 1);
+    const brief = briefs[0]!.body;
+    // The rubric, its threshold, and the official false-positive list reach the agent…
+    assert.match(brief, /report only issues scoring 80 or higher/);
+    assert.match(brief, /e\. 100: Absolutely certain/);
+    assert.match(brief, /6\. Filter out any issues with a score less than 80/);
+    assert.match(brief, /Examples of false positives, for steps 4 and 5:/);
+    assert.match(brief, /Real issues, but on lines that the user did not modify/);
+    // …and nothing of the host workflow around them does.
+    assert.doesNotMatch(brief, /Haiku|Sonnet|launch|gh |Generated with|### Code review|7\. Use a/i);
+    assert.doesNotMatch(brief, /^Notes:/m);
+    assert.equal(companionRuntimeDirective(brief), undefined);
+  } finally {
+    seeded.cleanup();
+  }
+});
+
+test('companions — the claude-code-plugins code-review wording still resolves from its real file', () => {
+  const seeded = codeReviewSourceFrom('claude-code-plugins.md');
+  try {
+    const { briefs, failures } = materializeCompanionBriefs({ installed: ['code-review'], sources: [seeded.source] });
+    assert.deepEqual(failures, []);
+    const brief = briefs[0]!.body;
+    assert.match(brief, /\*\*CRITICAL: We only want HIGH SIGNAL issues\.\*\*/);
+    assert.match(brief, /Use this list when evaluating issues in Steps 4 and 5/);
+    assert.doesNotMatch(brief, /scoring 80 or higher|mcp__github|--comment|Opus/i);
+    assert.equal(companionRuntimeDirective(brief), undefined);
+  } finally {
+    seeded.cleanup();
+  }
+});
+
+test('companions — a code-review body matching neither marketplace wording is refused by name', () => {
+  const seeded = codeReviewSourceFrom('claude-plugins-official.md');
+  try {
+    writeFileSync(
+      join(seeded.source.roots[0]!, 'commands', 'code-review.md'),
+      '# code review\n\nReview the pull request and report what you find.\n',
+      'utf8',
+    );
+    assertCompanionRefused(
+      { installed: ['code-review'], sources: [seeded.source] },
+      /neither the claude-code-plugins nor the claude-plugins-official wording/,
+    );
+  } finally {
+    seeded.cleanup();
+  }
+});
+
+test('companions — two roots carrying different code-review wordings drop code-review only', () => {
+  // Two active records of one plugin whose criteria really differ: the content
+  // check refuses THAT companion, and the toolkit beside it still dispatches six.
+  const official = codeReviewSourceFrom('claude-plugins-official.md');
+  const small = codeReviewSourceFrom('claude-code-plugins.md');
+  const toolkit = seedCompanionSources();
+  try {
+    const { briefs, failures } = materializeCompanionBriefs({
+      installed: ['pr-review-toolkit', 'code-review'],
+      sources: [
+        toolkit.sources[0]!,
+        { id: 'code-review', roots: [...official.source.roots, ...small.source.roots] },
+      ],
+    });
+    assert.equal(briefs.length, 6);
+    assert.ok(briefs.every((brief) => brief.companionId === 'pr-review-toolkit'));
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0]!.id, 'code-review');
+    assert.match(failures[0]!.reason, /divergent active definitions/);
+  } finally {
+    official.cleanup();
+    small.cleanup();
+    toolkit.cleanup();
   }
 });

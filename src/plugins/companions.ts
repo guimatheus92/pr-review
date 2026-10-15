@@ -195,25 +195,81 @@ function agreedDefinition(
   return [...bodies][0]!;
 }
 
+interface CriteriaSlice {
+  /** Exact sentence that opens the slice. */
+  from: string;
+  /** Whether that sentence itself is part of the criteria or only locates them. */
+  keepFrom: boolean;
+  /** Exact text that closes the slice (searched after `from`). */
+  until: string;
+}
+
+/**
+ * The `code-review` command ships in TWO marketplaces with different wording, and
+ * each is the only shape a whole population installs.
+ *
+ * `anthropics/claude-code` (`claude-code-plugins`, the one the install hint names
+ * because Copilot accepts it) carries `**CRITICAL: We only want HIGH SIGNAL
+ * issues.**` and a `Use this list when evaluating issues in Steps 4 and 5` block.
+ * `anthropics/claude-plugins-official` — Claude Code's default marketplace, and what
+ * a team `enabledPlugins` list installs — has none of that: it scores each issue 0–100
+ * with a rubric, discards anything under 80, and opens its list with `Examples of false
+ * positives, for steps 4 and 5:`. All 14 cached versions of the official copy
+ * (2026-09-09 → 2026-10-14) have that shape. Matching only the first refused every
+ * official install with "no longer contains the expected high-signal review criteria"
+ * — 51 summaries on one machine — while 0.14.0 had dispatched it.
+ *
+ * Each shape is a pair of exact slices, never a heading scan: what reaches the
+ * dispatched agent must be predictable per version. The official rubric is taken
+ * WITHOUT the sentence that introduces it ("launch a parallel Haiku agent …"): that
+ * is host workflow, and `NATIVE_COMPANION_DIRECTIVE_RE` would refuse it anyway.
+ */
+const CODE_REVIEW_SHAPES: readonly { framing: string; criteria: CriteriaSlice; falsePositives: CriteriaSlice }[] = [
+  {
+    framing: 'Validate each candidate directly and report only issues that meet these source-plugin criteria.',
+    criteria: { from: '**CRITICAL: We only want HIGH SIGNAL issues.**', keepFrom: true, until: '\n5. For each issue found' },
+    falsePositives: {
+      from: 'Use this list when evaluating issues in Steps 4 and 5 (these are false positives, do NOT flag):',
+      keepFrom: true,
+      until: '\nNotes:',
+    },
+  },
+  {
+    framing: 'Score each candidate issue 0-100 with this rubric and report only issues scoring 80 or higher.',
+    // Ends after step 6 ("Filter out any issues with a score less than 80 …"), which is
+    // the threshold the framing line restates; step 7 is the host's eligibility re-check.
+    criteria: { from: 'The scale is (give this rubric to the agent verbatim):', keepFrom: false, until: '\n7. ' },
+    falsePositives: { from: 'Examples of false positives, for steps 4 and 5:', keepFrom: true, until: '\nNotes:' },
+  },
+];
+
+function sliceCriteria(body: string, slice: CriteriaSlice): string | undefined {
+  const at = body.indexOf(slice.from);
+  if (at < 0) return undefined;
+  const start = slice.keepFrom ? at : at + slice.from.length;
+  const end = body.indexOf(slice.until, start);
+  if (end < 0) return undefined;
+  return body.slice(start, end).trim();
+}
+
 function codeReviewCriteria(body: string): string {
-  const highSignalMarker = '**CRITICAL: We only want HIGH SIGNAL issues.**';
-  const highSignalStart = body.indexOf(highSignalMarker);
-  const highSignalEnd = body.indexOf('\n5. For each issue found', highSignalStart);
-  const falsePositiveMarker = 'Use this list when evaluating issues in Steps 4 and 5 (these are false positives, do NOT flag):';
-  const falsePositiveStart = body.indexOf(falsePositiveMarker);
-  const falsePositiveEnd = body.indexOf('\nNotes:', falsePositiveStart);
-  if (highSignalStart < 0 || highSignalEnd < 0 || falsePositiveStart < 0 || falsePositiveEnd < 0) {
-    throw new Error('companion plugin \'code-review\' no longer contains the expected high-signal review criteria');
+  for (const shape of CODE_REVIEW_SHAPES) {
+    const criteria = sliceCriteria(body, shape.criteria);
+    const falsePositives = sliceCriteria(body, shape.falsePositives);
+    if (criteria === undefined || falsePositives === undefined) continue;
+    return [
+      '# Companion review criteria: code-review',
+      '',
+      `Review only the materialized PR context and diff. ${shape.framing}`,
+      '',
+      criteria,
+      '',
+      falsePositives,
+    ].join('\n');
   }
-  return [
-    '# Companion review criteria: code-review',
-    '',
-    'Review only the materialized PR context and diff. Validate each candidate directly and report only issues that meet these source-plugin criteria.',
-    '',
-    body.slice(highSignalStart, highSignalEnd).trim(),
-    '',
-    body.slice(falsePositiveStart, falsePositiveEnd).trim(),
-  ].join('\n');
+  throw new Error(
+    'companion plugin \'code-review\' no longer contains the expected high-signal review criteria (neither the claude-code-plugins nor the claude-plugins-official wording)',
+  );
 }
 
 /**
@@ -448,7 +504,8 @@ function enabledField(record: Record<string, unknown>): boolean | undefined {
 
 /**
  * Parse Claude's plugin inventory and reduce it to what governs `cwd`.
- * Unknown shapes fail closed; another project's installs are skipped, not conflicts.
+ * Unknown shapes fail closed; another project's installs are skipped, and several
+ * records of one plugin for this project are several roots to read, not a conflict.
  */
 export function parseClaudePluginListJson(raw: string, cwd = process.cwd()): {
   installed: string[];
@@ -479,7 +536,7 @@ export function parseClaudePluginListJson(raw: string, cwd = process.cwd()): {
       installed.add(id);
       if (!KNOWN_COMPANIONS.some((companion) => companion.id === id)) continue;
       // Another project's install is not this review's plugin state — skip it before
-      // the enable and conflict gates, which would otherwise fail closed on it.
+      // the enable gate, which would otherwise fail closed on it.
       const projectPath = stringField(entry, ['projectPath', 'project_path']);
       if (projectPath && !governsCwd(projectPath, cwd)) continue;
       const enabled = enabledField(entry);
@@ -496,11 +553,15 @@ export function parseClaudePluginListJson(raw: string, cwd = process.cwd()): {
           detectionError: safeDetectionError(`enabled Claude plugin '${id}' has no qualified identity, version, and install path`),
         };
       }
-      const previous = active.get(key);
-      if (previous && (previous.version !== version || resolve(previous.root) !== resolve(root))) {
-        return { installed: [], activeClaudePlugins: [], detectionError: safeDetectionError(`Claude plugin '${key}' reports conflicting active installations`) };
-      }
-      active.set(key, { key, version, root: resolve(root) });
+      // One selector per distinct root, never a conflict. Claude Code records the SAME
+      // project twice when its tools spell the folder `C:\…` and `c:\…` (VS Code vs
+      // Git Bash), and only one record moves on at `plugin update`; a user-scope record
+      // sits beside them too. Treating a version or root mismatch as "effective plugin
+      // state unknown" dropped all 7 companion reviewers from 36 reviews over one week
+      // for a stale `code-review` record. The version string is not the integrity
+      // check — the CONTENT is: every root reaches `agreedDefinition`, which refuses
+      // divergent criteria for that one companion while the rest still dispatch.
+      active.set(`${key}\0${foldPath(resolve(root))}`, { key, version, root: resolve(root) });
     }
     return { installed: [...installed], activeClaudePlugins: [...active.values()] };
   } catch (error) {

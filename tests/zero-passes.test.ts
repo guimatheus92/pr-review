@@ -1006,3 +1006,79 @@ test('file guard — a contentless gather is refused BEFORE exclusions, or the b
     s.restore();
   }
 });
+
+// The Degraded line for a failed companion probe states what the failure COST —
+// a bare reason read as harmless for a week while every run was 7 reviewers short
+// (#54). Detection also runs for the install hint alone, and then nothing was
+// planned, so the cost must not be claimed.
+for (const withCompanions of [true, false]) {
+  test(`runReview — a failed companion probe names its cost in the Degraded block only when companions were invoked (${withCompanions})`, async () => {
+    const s = setup(['src/app.ts']);
+    try {
+      // `setup` silences the install hint; the probe runs for the hint alone, which is
+      // exactly the opted-out case this pins.
+      writeFileSync(join(s.cwd, '.pr-review.yaml'), 'skill_packs: []\ncompanion_warn: true\n');
+      const result = await runReview({
+        ...BASE,
+        withCompanions,
+        homeOverride: s.home,
+        contextOnly: true,
+        runDir: s.runDir,
+        fromGather: s.gatherFile,
+        provider: fakeProvider(),
+        detectCompanionsFn: async () => ({
+          installed: [], recognized: [], missing: [],
+          detectionError: '`claude plugin list --json` failed (exit 1)',
+        }),
+        selectPassesFn: () => ({
+          passes: [{ name: 'p/one', source: '/one.md', body: 'one', matchedBy: 'baseline', matchedOn: [] }],
+          projectSkills: [], indexEntries: [], stackTags: [],
+          routes: [{ name: 'p/one', source: '/one.md', matchedBy: 'baseline' }], missingBaseline: [],
+        }),
+      });
+      assert.equal(result.exitCode, 0);
+      const degraded = /Degraded:[\s\S]*/.exec(result.summary)?.[0] ?? '';
+      assert.match(degraded, /companion detection failed[^\n]*`claude plugin list --json` failed \(exit 1\)/);
+      if (withCompanions) {
+        assert.match(degraded, /0 of 7 companion reviewers dispatched/);
+      } else {
+        assert.match(degraded, /companions not invoked on this run/);
+        assert.doesNotMatch(degraded, /0 of 7/);
+      }
+    } finally {
+      s.restore();
+    }
+  });
+}
+
+test('runReview — a companion that fails to materialize names the reviewers it cost', async () => {
+  const s = setup(['src/app.ts']);
+  try {
+    const root = seedToolkitPlugin(s.home, 'claude');
+    // Break ONE agent definition: the toolkit is dropped as a whole (6 reviewers).
+    writeFileSync(join(root, 'agents', 'code-reviewer.md'), '---\nname: broken\nno closing delimiter', 'utf8');
+    const result = await runReview({
+      ...BASE,
+      runtime: 'claude',
+      withCompanions: true,
+      homeOverride: s.home,
+      contextOnly: true,
+      runDir: s.runDir,
+      fromGather: s.gatherFile,
+      provider: fakeProvider(),
+      detectCompanionsFn: async () => ({
+        installed: ['pr-review-toolkit'], recognized: ['pr-review-toolkit'], missing: [],
+        activeClaudePlugins: [{ key: 'pr-review-toolkit@market', version: '1.0.0', root }],
+      }),
+      selectPassesFn: () => ({
+        passes: [{ name: 'p/one', source: '/one.md', body: 'one', matchedBy: 'baseline', matchedOn: [] }],
+        projectSkills: [], indexEntries: [], stackTags: [],
+        routes: [{ name: 'p/one', source: '/one.md', matchedBy: 'baseline' }], missingBaseline: [],
+      }),
+    });
+    assert.equal(result.exitCode, 0);
+    assert.match(result.summary, /companion pr-review-toolkit not dispatched \(6 reviewer\(s\) lost\) — [^\n]*unterminated frontmatter/);
+  } finally {
+    s.restore();
+  }
+});

@@ -190,7 +190,11 @@ function agreedDefinition(
   });
   const bodies = new Set(definitions.map((definition) => definition.body.replace(/\r\n/g, '\n')));
   if (bodies.size !== 1) {
-    throw new Error(`companion plugin '${source.id}' has divergent active definitions for ${relativePath}`);
+    // Name every root: with duplicate runtime records this is the only place a stale
+    // record surfaces, and the operator has to know WHICH install to update.
+    throw new Error(
+      `companion plugin '${source.id}' has divergent active definitions for ${relativePath} across ${definitions.length} active roots: ${source.roots.join(' | ')}`,
+    );
   }
   return [...bodies][0]!;
 }
@@ -200,7 +204,7 @@ interface CriteriaSlice {
   from: string;
   /** Whether that sentence itself is part of the criteria or only locates them. */
   keepFrom: boolean;
-  /** Exact text that closes the slice (searched after `from`). */
+  /** Exact text that closes the slice, searched after the end of `from`. */
   until: string;
 }
 
@@ -214,18 +218,20 @@ interface CriteriaSlice {
  * `anthropics/claude-plugins-official` — Claude Code's default marketplace, and what
  * a team `enabledPlugins` list installs — has none of that: it scores each issue 0–100
  * with a rubric, discards anything under 80, and opens its list with `Examples of false
- * positives, for steps 4 and 5:`. All 14 cached versions of the official copy
- * (2026-09-09 → 2026-10-14) have that shape. Matching only the first refused every
- * official install with "no longer contains the expected high-signal review criteria"
- * — 51 summaries on one machine — while 0.14.0 had dispatched it.
+ * positives, for steps 4 and 5:`. Matching only the first wording refused every
+ * official install (#54).
  *
  * Each shape is a pair of exact slices, never a heading scan: what reaches the
  * dispatched agent must be predictable per version. The official rubric is taken
- * WITHOUT the sentence that introduces it ("launch a parallel Haiku agent …"): that
- * is host workflow, and `NATIVE_COMPANION_DIRECTIVE_RE` would refuse it anyway.
+ * WITHOUT the sentence that introduces it ("launch a parallel Haiku agent …") and
+ * WITHOUT the step after it ("Filter out … do not proceed"): both are host workflow —
+ * the first would be refused by `NATIVE_COMPANION_DIRECTIVE_RE`, the second tells an
+ * agent contracted to write `[]` to stop instead — so the framing line restates the
+ * cutoff in the dispatch contract's own terms.
  */
-const CODE_REVIEW_SHAPES: readonly { framing: string; criteria: CriteriaSlice; falsePositives: CriteriaSlice }[] = [
+const CODE_REVIEW_SHAPES: readonly { marketplace: string; framing: string; criteria: CriteriaSlice; falsePositives: CriteriaSlice }[] = [
   {
+    marketplace: 'claude-code-plugins',
     framing: 'Validate each candidate directly and report only issues that meet these source-plugin criteria.',
     criteria: { from: '**CRITICAL: We only want HIGH SIGNAL issues.**', keepFrom: true, until: '\n5. For each issue found' },
     falsePositives: {
@@ -235,10 +241,9 @@ const CODE_REVIEW_SHAPES: readonly { framing: string; criteria: CriteriaSlice; f
     },
   },
   {
+    marketplace: 'claude-plugins-official',
     framing: 'Score each candidate issue 0-100 with this rubric and report only issues scoring 80 or higher.',
-    // Ends after step 6 ("Filter out any issues with a score less than 80 …"), which is
-    // the threshold the framing line restates; step 7 is the host's eligibility re-check.
-    criteria: { from: 'The scale is (give this rubric to the agent verbatim):', keepFrom: false, until: '\n7. ' },
+    criteria: { from: 'The scale is (give this rubric to the agent verbatim):', keepFrom: false, until: '\n6. ' },
     falsePositives: { from: 'Examples of false positives, for steps 4 and 5:', keepFrom: true, until: '\nNotes:' },
   },
 ];
@@ -246,10 +251,10 @@ const CODE_REVIEW_SHAPES: readonly { framing: string; criteria: CriteriaSlice; f
 function sliceCriteria(body: string, slice: CriteriaSlice): string | undefined {
   const at = body.indexOf(slice.from);
   if (at < 0) return undefined;
-  const start = slice.keepFrom ? at : at + slice.from.length;
-  const end = body.indexOf(slice.until, start);
+  const afterFrom = at + slice.from.length;
+  const end = body.indexOf(slice.until, afterFrom);
   if (end < 0) return undefined;
-  return body.slice(start, end).trim();
+  return body.slice(slice.keepFrom ? at : afterFrom, end).trim();
 }
 
 function codeReviewCriteria(body: string): string {
@@ -267,8 +272,9 @@ function codeReviewCriteria(body: string): string {
       falsePositives,
     ].join('\n');
   }
+  const wordings = CODE_REVIEW_SHAPES.map((shape) => shape.marketplace).join(', ');
   throw new Error(
-    'companion plugin \'code-review\' no longer contains the expected high-signal review criteria (neither the claude-code-plugins nor the claude-plugins-official wording)',
+    `companion plugin 'code-review' no longer contains the expected high-signal review criteria (matches neither known marketplace wording: ${wordings})`,
   );
 }
 
@@ -476,10 +482,10 @@ function stringField(record: Record<string, unknown>, names: readonly string[]):
  *
  * `claude plugin list --json` is NOT scoped to the invocation directory: run from
  * one checkout it still reports every project-scoped install on the machine, each
- * carrying the `projectPath` it belongs to. Reading the list as if it were already
- * cwd-filtered turns another project's installs into "conflicting active
- * installations" and drops every companion dispatch — observed on a machine with
- * `code-review` installed once at user scope and twice for an unrelated project.
+ * carrying the `projectPath` it belongs to. Read as if it were already cwd-filtered,
+ * another project's installs would become this review's roots — observed on a
+ * machine with `code-review` installed once at user scope and twice for an
+ * unrelated project.
  *
  * Containment, not equality: pr-review may run from a subdirectory of the checkout
  * while Claude keys project scope on its root. `foldPath` because the same two
@@ -556,12 +562,14 @@ export function parseClaudePluginListJson(raw: string, cwd = process.cwd()): {
       // One selector per distinct root, never a conflict. Claude Code records the SAME
       // project twice when its tools spell the folder `C:\…` and `c:\…` (VS Code vs
       // Git Bash), and only one record moves on at `plugin update`; a user-scope record
-      // sits beside them too. Treating a version or root mismatch as "effective plugin
-      // state unknown" dropped all 7 companion reviewers from 36 reviews over one week
-      // for a stale `code-review` record. The version string is not the integrity
-      // check — the CONTENT is: every root reaches `agreedDefinition`, which refuses
-      // divergent criteria for that one companion while the rest still dispatch.
-      active.set(`${key}\0${foldPath(resolve(root))}`, { key, version, root: resolve(root) });
+      // sits beside them too. A version or root mismatch is not "effective plugin state
+      // unknown" (#54): the version string is not the integrity check — the CONTENT is.
+      // Every root whose manifest names the plugin reaches `agreedDefinition`, which
+      // refuses divergent criteria for that one companion while the rest still dispatch.
+      // Keyed by the exact resolved path: on a case-sensitive filesystem two spellings
+      // are two directories, and both must be read.
+      const resolvedRoot = resolve(root);
+      active.set(`${key}\0${resolvedRoot}`, { key, version, root: resolvedRoot });
     }
     return { installed: [...installed], activeClaudePlugins: [...active.values()] };
   } catch (error) {

@@ -1418,11 +1418,13 @@ async function reviewPipeline(opts: ReviewCmdOptions, where: { outDir?: string }
   let installedCompanions: string[] = [];
   let companionState: CompanionState | undefined;
   let companionDetectionWarning: string | undefined;
-  // The Degraded line must say what the failure COST. "companion detection failed:
-  // …conflicting active installations" read as harmless for 36 reviews in a row
-  // while every one of them ran 7 reviewers short.
+  // The Degraded line must say what the failure COST: a bare reason read as harmless
+  // while every run was 7 reviewers short. Detection also runs for the install hint
+  // alone (`companionWarn`), and then nothing was planned, so there is no cost to name.
   const detectionFailure = (reason: string): string =>
-    `companion detection failed — 0 of ${companionDispatchCount(KNOWN_COMPANIONS.map((c) => c.id))} companion reviewers dispatched: ${reason}`;
+    config.invokeCompanions
+      ? `companion detection failed — 0 of ${companionDispatchCount(KNOWN_COMPANIONS.map((c) => c.id))} companion reviewers dispatched: ${reason}`
+      : `companion detection failed (companions not invoked on this run): ${reason}`;
   const companionDegraded: string[] = [];
   let companionPromise: Promise<void> = Promise.resolve();
   if (config.invokeCompanions || config.companionWarn) {

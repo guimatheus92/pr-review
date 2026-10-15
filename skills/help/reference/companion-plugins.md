@@ -11,7 +11,7 @@ description: "pr-review companion plugins: pr-review-toolkit and code-review ins
 | Plugin | Criteria used by pr-review | Planned rows |
 |---|---|---|
 | [`pr-review-toolkit`](https://claude.com/plugins/pr-review-toolkit) | The bodies of `code-reviewer`, `code-simplifier`, `comment-analyzer`, `pr-test-analyzer`, `silent-failure-hunter`, and `type-design-analyzer`, with runtime frontmatter removed | Six: `companion:pr-review-toolkit/<agent>` |
-| [`code-review`](https://claude.com/plugins/code-review) | Its review criteria in either marketplace's wording — the `**CRITICAL: HIGH SIGNAL**` block from `claude-code-plugins`, or the 0–100 confidence rubric with its 80 cutoff from `claude-plugins-official` — plus the matching false-positive list, adapted to the already-materialized PR diff | One: `companion:code-review` |
+| [`code-review`](https://claude.com/plugins/code-review) | Its review criteria in either marketplace's wording — the `**CRITICAL: We only want HIGH SIGNAL issues.**` block from `claude-code-plugins`, or the 0–100 confidence rubric (scored, 80 cutoff) from `claude-plugins-official` — plus the matching false-positive list, adapted to the already-materialized PR diff | One: `companion:code-review` |
 
 ## Install — the command differs per runtime
 

@@ -535,3 +535,31 @@ test('runtimeInstalledPluginRoots — identity is still enforced: a manifest nam
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+// Several `claude plugin list --json` records of ONE plugin for this project (#54):
+// the parser hands over one selector per distinct root, and every root whose
+// manifest names the plugin must come out here, so `agreedDefinition` can compare
+// their content. Collapsing them by key would silently skip the integrity check.
+test('runtimeInstalledPluginRoots — several selectors for one key yield every distinct root, once each', () => {
+  const home = mkdtempSync(join(tmpdir(), 'claude-multi-root-'));
+  try {
+    const roots = ['c2bdb427efe8', '8f814f49002f'].map((version) => {
+      const root = join(home, '.claude', 'plugins', 'cache', 'claude-plugins-official', 'code-review', version);
+      mkdirSync(join(root, '.claude-plugin'), { recursive: true });
+      writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'code-review' }), 'utf8');
+      return root;
+    });
+    const key = 'code-review@claude-plugins-official';
+
+    const resolved = runtimeInstalledPluginRoots('claude', home, [
+      { key, version: 'c2bdb427efe8', root: roots[0]! },
+      { key, version: '8f814f49002f', root: roots[1]! },
+      { key, version: 'c2bdb427efe8', root: roots[0]! },
+    ]);
+
+    assert.deepEqual(resolved.map((plugin) => plugin.root), roots);
+    assert.ok(resolved.every((plugin) => plugin.id === 'code-review'));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

@@ -6,7 +6,7 @@ Generic, plugin-based PR review tool for GitHub, Azure DevOps, and GitLab, packa
 
 ```bash
 npm run build          # tsc + esbuild → dist/cli.cjs
-npm run test           # node scripts/test.mjs → node --test over tests/**/*.test.ts (980 tests, ~15s — on Windows run it from Git Bash: PowerShell resolves `bash` to WSL and fails `tests/command-finder.test.ts`)
+npm run test           # node scripts/test.mjs → node --test over tests/**/*.test.ts (985 tests, ~15s — on Windows run it from Git Bash: PowerShell resolves `bash` to WSL and fails `tests/command-finder.test.ts`)
 npm run test:mod       # claude plugin test mods/live → the live mod's 35 kit tests, offline, ~8 s (needs Claude Code >= 2.1.287 on PATH)
 npm run validate:mod   # claude plugin validate → the module's hooks:/calls: lines; the calls line is its read-only contract
 npm run build:watch    # tsc watch (re-run `npm run bundle` for esbuild)

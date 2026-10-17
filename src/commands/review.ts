@@ -1418,9 +1418,9 @@ async function reviewPipeline(opts: ReviewCmdOptions, where: { outDir?: string }
   let installedCompanions: string[] = [];
   let companionState: CompanionState | undefined;
   let companionDetectionWarning: string | undefined;
-  // The Degraded line must say what the failure COST: a bare reason read as harmless
-  // while every run was 7 reviewers short. Detection also runs for the install hint
-  // alone (`companionWarn`), and then nothing was planned, so there is no cost to name.
+  // A bare reason hides the cost; name how many companion reviewers the failure
+  // dropped. Detection also runs for the install hint alone (`companionWarn`), and
+  // then nothing was planned, so there is no cost to name.
   const detectionFailure = (reason: string): string =>
     config.invokeCompanions
       ? `companion detection failed — 0 of ${companionDispatchCount(KNOWN_COMPANIONS.map((c) => c.id))} companion reviewers dispatched: ${reason}`
@@ -1508,6 +1508,21 @@ async function reviewPipeline(opts: ReviewCmdOptions, where: { outDir?: string }
     id,
     roots: runtimePluginRoots.filter((plugin) => plugin.id === id).map((plugin) => plugin.root),
   }));
+  // A Claude record whose installPath has no manifest naming the plugin (a GC'd cache
+  // version, a manifest for another plugin) is dropped by `runtimeInstalledPluginRoots`.
+  // With several records per plugin that drop is silent while another root survives —
+  // and it is exactly the stale record the operator needs to find, so name it.
+  if (runtime === 'claude' && config.invokeCompanions) {
+    for (const id of installedCompanions) {
+      const kept = new Set(runtimePluginRoots.filter((plugin) => plugin.id === id).map((plugin) => plugin.root));
+      for (const selector of companionState?.activeClaudePlugins ?? []) {
+        if (selector.key.split('@')[0] !== id || kept.has(selector.root)) continue;
+        const note = `companion ${id}: active record ${safeRuntimeDiagnostic(selector.root) ?? '<unprintable path>'} has no manifest naming '${id}' — ignored`;
+        companionDegraded.push(note);
+        process.stderr.write(`[companions] warning: ${note}\n`);
+      }
+    }
+  }
   // Resolve the briefs BEFORE the roster is fixed. A companion that cannot be
   // materialized is dropped from `installedCompanions`, so it is never planned —
   // planning it and failing to dispatch it is what INV-DEL-01 reads as a missing

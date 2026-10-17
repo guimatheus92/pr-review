@@ -1011,12 +1011,12 @@ test('file guard — a contentless gather is refused BEFORE exclusions, or the b
 // a bare reason read as harmless for a week while every run was 7 reviewers short
 // (#54). Detection also runs for the install hint alone, and then nothing was
 // planned, so the cost must not be claimed.
-for (const withCompanions of [true, false]) {
-  test(`runReview — a failed companion probe names its cost in the Degraded block only when companions were invoked (${withCompanions})`, async () => {
+for (const [withCompanions, label] of [[true, 'companions invoked'], [false, '--no-companions']] as const) {
+  test(`runReview — a failed companion probe names its cost in the Degraded block only when companions were invoked (${label})`, async () => {
     const s = setup(['src/app.ts']);
     try {
-      // `setup` silences the install hint; the probe runs for the hint alone, which is
-      // exactly the opted-out case this pins.
+      // `setup` silences the install hint; re-enable it so the probe still runs when
+      // companions are off (the `--no-companions` case) — with them on, it runs anyway.
       writeFileSync(join(s.cwd, '.pr-review.yaml'), 'skill_packs: []\ncompanion_warn: true\n');
       const result = await runReview({
         ...BASE,
@@ -1078,6 +1078,47 @@ test('runReview — a companion that fails to materialize names the reviewers it
     });
     assert.equal(result.exitCode, 0);
     assert.match(result.summary, /companion pr-review-toolkit not dispatched \(6 reviewer\(s\) lost\) — [^\n]*unterminated frontmatter/);
+  } finally {
+    s.restore();
+  }
+});
+
+test('runReview — a Claude record whose installPath has no manifest for the plugin is named, and the other root still dispatches', async () => {
+  // Several records per plugin means one can point at a GC\'d cache version or at a
+  // manifest for another plugin while a sibling record resolves. Before #54 one key was
+  // one root, so that surfaced as "no active runtime source root"; now it must not
+  // vanish silently — it is the stale record the operator has to find.
+  const s = setup(['src/app.ts']);
+  try {
+    const root = seedToolkitPlugin(s.home, 'claude');
+    const dead = join(s.home, '.claude', 'plugins', 'cache', 'market', 'pr-review-toolkit', '0.9.0');
+    const result = await runReview({
+      ...BASE,
+      runtime: 'claude',
+      withCompanions: true,
+      homeOverride: s.home,
+      contextOnly: true,
+      runDir: s.runDir,
+      fromGather: s.gatherFile,
+      provider: fakeProvider(),
+      detectCompanionsFn: async () => ({
+        installed: ['pr-review-toolkit'], recognized: ['pr-review-toolkit'], missing: [],
+        activeClaudePlugins: [
+          { key: 'pr-review-toolkit@market', version: '1.0.0', root },
+          { key: 'pr-review-toolkit@market', version: '0.9.0', root: dead },
+        ],
+      }),
+      selectPassesFn: () => ({
+        passes: [{ name: 'p/one', source: '/one.md', body: 'one', matchedBy: 'baseline', matchedOn: [] }],
+        projectSkills: [], indexEntries: [], stackTags: [],
+        routes: [{ name: 'p/one', source: '/one.md', matchedBy: 'baseline' }], missingBaseline: [],
+      }),
+    });
+    assert.equal(result.exitCode, 0);
+    assert.match(result.summary, /companion pr-review-toolkit: active record [^\n]*0\.9\.0[^\n]* has no manifest naming 'pr-review-toolkit' — ignored/);
+    assert.doesNotMatch(result.summary, /not dispatched/);
+    const artifact = JSON.parse(readFileSync(join(s.runDir, 'companions.json'), 'utf8')) as { plannedDispatches: number };
+    assert.equal(artifact.plannedDispatches, 6);
   } finally {
     s.restore();
   }

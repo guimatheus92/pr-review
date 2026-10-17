@@ -253,26 +253,42 @@ test('parseClaudePluginListJson — inside the project, every governing record i
   }
 });
 
-test('parseClaudePluginListJson — records that share a root collapse to one selector, exactly', () => {
-  // The list on the reporting machine after `claude plugin update`: user scope plus
-  // both project-scope spellings, all on one version and one installPath. The key is
-  // the exact resolved path — a case variant is a different directory on a
-  // case-sensitive filesystem, so it is NOT folded away.
+test('parseClaudePluginListJson — records that share a root on different versions are all handed over', () => {
+  // The list on the reporting machine mid-update: user scope plus both project-scope
+  // spellings on ONE installPath, but a record that `plugin update` has not moved yet
+  // still carries the old version. At 0.16.0 the version mismatch alone was
+  // "conflicting active installations"; now every record is a selector, and the
+  // dedupe by exact resolved path happens at the `runtimeInstalledPluginRoots` seam.
   const root = join(tmpdir(), 'cache', 'code-review', 'c2bdb427efe8');
-  const record = (scope: string, projectPath?: string) => ({
-    id: 'code-review@claude-plugins-official', version: 'c2bdb427efe8', scope, enabled: true, installPath: root,
+  const record = (version: string, scope: string, projectPath?: string) => ({
+    id: 'code-review@claude-plugins-official', version, scope, enabled: true, installPath: root,
     ...(projectPath ? { projectPath } : {}),
   });
   const parsed = parseClaudePluginListJson(JSON.stringify([
-    record('user'),
-    record('project', 'C:\\Users\\guilh\\repos\\PrecoPratico'),
-    record('project', 'c:\\Users\\guilh\\repos\\PrecoPratico'),
+    record('8f814f49002f', 'user'),
+    record('c2bdb427efe8', 'project', 'C:\\Users\\guilh\\repos\\PrecoPratico'),
+    record('8f814f49002f', 'project', 'c:\\Users\\guilh\\repos\\PrecoPratico'),
   ]), 'C:\\Users\\guilh\\repos\\PrecoPratico');
 
   assert.equal(parsed.detectionError, undefined);
   assert.deepEqual(parsed.activeClaudePlugins, [
+    { key: 'code-review@claude-plugins-official', version: '8f814f49002f', root },
     { key: 'code-review@claude-plugins-official', version: 'c2bdb427efe8', root },
+    { key: 'code-review@claude-plugins-official', version: '8f814f49002f', root },
   ]);
+});
+
+test('parseClaudePluginListJson — installPaths differing only by case stay two selectors with their exact spelling', () => {
+  // On a case-sensitive filesystem two spellings are two directories, so neither the
+  // parser nor the roots seam may fold them into one: both must be read and compared.
+  const lower = join(tmpdir(), 'cache', 'code-review', 'v1');
+  const upper = join(tmpdir(), 'cache', 'Code-Review', 'v1');
+  const parsed = parseClaudePluginListJson(JSON.stringify([
+    { id: 'code-review@claude-plugins-official', version: 'v1', scope: 'user', enabled: true, installPath: lower },
+    { id: 'code-review@claude-plugins-official', version: 'v1', scope: 'user', enabled: true, installPath: upper },
+  ]));
+
+  assert.deepEqual(parsed.activeClaudePlugins.map((plugin) => plugin.root), [lower, upper]);
 });
 
 test('detectCompanions — Claude dispatches enabled companions only', async () => {

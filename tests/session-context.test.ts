@@ -566,7 +566,7 @@ test('companions — identical active definitions agree, divergent definitions f
     writeFileSync(join(roots[1], 'agents', 'code-reviewer.md'), '# changed criteria', 'utf8');
     assertCompanionRefused(
       { installed: ['pr-review-toolkit'], sources: [{ id: 'pr-review-toolkit', roots }] },
-      /divergent active definitions.*code-reviewer\.md/,
+      /divergent active definition files.*code-reviewer\.md/,
     );
   } finally {
     first.cleanup();
@@ -1215,16 +1215,22 @@ test('companions — the claude-plugins-official code-review wording is a known 
     assert.deepEqual(failures, []);
     assert.equal(briefs.length, 1);
     const brief = briefs[0]!.body;
-    // The rubric, the cutoff (restated by the framing line), and the official
+    // The scoring instruction with its CLAUDE.md double-check (a review criterion),
+    // the rubric, the cutoff (restated by the framing line), and the official
     // false-positive list reach the agent…
     assert.match(brief, /report only issues scoring 80 or higher/);
+    assert.match(brief, /^To do that, the agent should score each issue on a scale from 0-100/m);
+    assert.match(brief, /double check that the CLAUDE\.md actually calls out that issue specifically/);
+    assert.match(brief, /The scale is:\n/);
     assert.match(brief, /a\. 0: Not confident at all/);
     assert.match(brief, /e\. 100: Absolutely certain/);
     assert.match(brief, /Examples of false positives, for steps 4 and 5:/);
     assert.match(brief, /Real issues, but on lines that the user did not modify/);
-    // …and nothing of the host workflow around them does — including step 6's
-    // "do not proceed", which contradicts an agent contracted to write `[]`.
-    assert.doesNotMatch(brief, /Haiku|Sonnet|launch|gh |Generated with|### Code review|do not proceed|6\. Filter out/i);
+    // …and nothing of the host workflow around them does: the sentence that launches
+    // scoring agents, the parenthetical that hands the rubric to another agent, and
+    // step 6's "do not proceed", which contradicts an agent contracted to write `[]`.
+    assert.doesNotMatch(brief, /Haiku|Sonnet|launch|\bgh\b|Generated with|### Code review|do not proceed|6\. Filter out/i);
+    assert.doesNotMatch(brief, /give this rubric|verbatim/i);
     assert.doesNotMatch(brief, /^Notes:/m);
     assert.equal(companionRuntimeDirective(brief), undefined);
   } finally {
@@ -1232,35 +1238,82 @@ test('companions — the claude-plugins-official code-review wording is a known 
   }
 });
 
-test('companions — a code-review body matching only half of a shape is refused, never half-briefed', () => {
+test('companions — a code-review body matching only half of a shape is refused, naming the marker that moved', () => {
   // Drop the official false-positive heading: the rubric still matches, the list
-  // does not. A shape must resolve BOTH slices or yield to the next one.
+  // does not. A shape must resolve BOTH slices or yield to the next one, and the
+  // refusal says which marker each shape missed and which file was read.
   const seeded = codeReviewSource(
     codeReviewFixture('claude-plugins-official.md').replace('Examples of false positives, for steps 4 and 5:', 'Known non-issues:'),
   );
   try {
+    const { failures } = materializeCompanionBriefs({ installed: ['code-review'], sources: [seeded.source] });
+    assert.equal(failures.length, 1);
+    const reason = failures[0]!.reason;
+    assert.match(reason, /matches no known marketplace wording in commands[\\/]code-review\.md at /);
+    assert.ok(reason.includes(seeded.source.roots[0]!), 'the refusal names the root that was read');
+    assert.match(reason, /claude-code-plugins: missing "\*\*CRITICAL: We only want HIGH SIGNAL issues\.\*\*"/);
+    assert.match(reason, /claude-plugins-official: missing "Examples of false positives, for steps 4 and 5:"/);
+  } finally {
+    seeded.cleanup();
+  }
+});
+
+test('companions — an official body whose rubric was removed is refused, not briefed with an empty rubric', () => {
+  // "To do that, the agent should score …" immediately followed by step 6: both
+  // markers are present but the slice between them is empty, which must count as a
+  // miss — otherwise the framing line would promise a rubric the brief does not carry.
+  const official = codeReviewFixture('claude-plugins-official.md');
+  const start = official.indexOf('To do that, the agent should score each issue');
+  const end = official.indexOf('\n6. Filter out any issues with a score less than 80');
+  assert.ok(start > 0 && end > start, 'fixture still carries both markers');
+  const seeded = codeReviewSource(`${official.slice(0, start)}To do that, the agent should score each issue on a scale from 0-100.${official.slice(end)}`);
+  try {
     assertCompanionRefused(
       { installed: ['code-review'], sources: [seeded.source] },
-      /matches neither known marketplace wording: claude-code-plugins, claude-plugins-official/,
+      /claude-plugins-official: missing "text between .*To do that, the agent should score each issue on a scale from 0-100.* and .*6\. Filter out any issues with a score less than 80/,
     );
   } finally {
     seeded.cleanup();
   }
 });
 
-test('companions — a failure reason built from a runtime-supplied root is single-line and bounded', () => {
+test('companions — a renumbered official body is refused rather than briefed with "do not proceed"', () => {
+  // If upstream drops a step so that "Filter out … do not proceed" becomes step 5, a
+  // bare "\n6. " end marker would swallow that host instruction into the brief. The
+  // end marker carries the step's text, so the renumbered copy matches neither shape.
+  const seeded = codeReviewSource(
+    codeReviewFixture('claude-plugins-official.md')
+      .replace('\n6. Filter out any issues', '\n5. Filter out any issues')
+      .replace('\n7. Use a Haiku agent', '\n6. Use a Haiku agent'),
+  );
+  try {
+    assertCompanionRefused(
+      { installed: ['code-review'], sources: [seeded.source] },
+      /claude-plugins-official: missing "6\. Filter out any issues with a score less than 80"/,
+    );
+  } finally {
+    seeded.cleanup();
+  }
+});
+
+test('companions — a failure reason built from a runtime-supplied root arrives folded onto one line and capped at 1000 chars', () => {
   // The install path comes from `claude plugin list --json`; it reaches the Degraded
-  // block through the failure reason, so a forged newline must not survive.
-  const root = join(tmpdir(), 'pr-review-forged\nFORGED');
+  // block through the failure reason, so a forged newline must arrive folded (not
+  // dropped: the operator still has to see the path) and the length must be capped.
+  const root = join(tmpdir(), `pr-review-forged\nFORGED${'x'.repeat(1_100)}`);
   const { briefs, failures } = materializeCompanionBriefs({
     installed: ['code-review'],
     sources: [{ id: 'code-review', roots: [root] }],
   });
   assert.deepEqual(briefs, []);
   assert.equal(failures.length, 1);
-  assert.match(failures[0]!.reason, /no readable/);
-  assert.doesNotMatch(failures[0]!.reason, /[\r\n]/);
-  assert.ok(failures[0]!.reason.length <= 1_000);
+  const reason = failures[0]!.reason;
+  assert.match(reason, /no readable commands[\\/]code-review\.md: /);
+  // `safeRuntimeDiagnostic` strips control characters BEFORE folding whitespace, so
+  // the newline is removed, not replaced by a space; the rest of the path survives.
+  assert.match(reason, /pr-review-forgedFORGEDx/, 'the forged path arrives with its newline stripped');
+  assert.doesNotMatch(reason, /[\r\n]/);
+  assert.equal(reason.length, 1_000);
 });
 
 test('companions — the claude-code-plugins code-review wording still resolves from its real file', () => {
@@ -1283,7 +1336,7 @@ test('companions — a code-review body matching neither marketplace wording is 
   try {
     assertCompanionRefused(
       { installed: ['code-review'], sources: [seeded.source] },
-      /matches neither known marketplace wording: claude-code-plugins, claude-plugins-official/,
+      /matches no known marketplace wording in commands[\\/]code-review\.md at .*\(claude-code-plugins: missing .*; claude-plugins-official: missing .*\)/,
     );
   } finally {
     seeded.cleanup();
@@ -1308,11 +1361,15 @@ test('companions — two roots carrying different code-review wordings drop code
     assert.ok(briefs.every((brief) => brief.companionId === 'pr-review-toolkit'));
     assert.equal(failures.length, 1);
     assert.equal(failures[0]!.id, 'code-review');
-    assert.match(failures[0]!.reason, /divergent active definitions .* across 2 active roots/);
-    // Both roots are named, so the operator knows WHICH install is stale.
+    assert.match(failures[0]!.reason, /divergent active definition files .* across 2 active roots/);
+    // Both roots are named with a digest of their definition file, so the operator
+    // knows WHICH install is stale — and with three roots, which one is the odd one out.
     for (const root of [...official.source.roots, ...small.source.roots]) {
-      assert.ok(failures[0]!.reason.includes(root), `reason names ${root}`);
+      assert.match(failures[0]!.reason, new RegExp(`${root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\(sha256:[0-9a-f]{8}\\)`), `reason names ${root} with a digest`);
     }
+    const digests = [...failures[0]!.reason.matchAll(/sha256:([0-9a-f]{8})/g)].map((m) => m[1]);
+    assert.equal(digests.length, 2);
+    assert.notEqual(digests[0], digests[1], 'divergent files carry different digests');
   } finally {
     official.cleanup();
     small.cleanup();

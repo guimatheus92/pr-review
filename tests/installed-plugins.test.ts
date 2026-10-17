@@ -563,3 +563,27 @@ test('runtimeInstalledPluginRoots — several selectors for one key yield every 
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('runtimeInstalledPluginRoots — roots differing only by case are two roots, each with its exact spelling', () => {
+  // The dedupe key is the exact resolved path, never case-folded: on a case-sensitive
+  // filesystem `code-review/v1` and `Code-Review/v1` are two directories whose
+  // definition files `agreedDefinition` must compare. (On a case-insensitive one both
+  // spellings reach the same directory, and reading it twice is harmless.)
+  const home = mkdtempSync(join(tmpdir(), 'claude-case-roots-'));
+  try {
+    const roots = ['code-review', 'Code-Review'].map((dir) => {
+      const root = join(home, '.claude', 'plugins', 'cache', 'm', dir, 'v1');
+      mkdirSync(join(root, '.claude-plugin'), { recursive: true });
+      writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'code-review' }), 'utf8');
+      return root;
+    });
+
+    const resolved = runtimeInstalledPluginRoots('claude', home, roots.map((root) => ({
+      key: 'code-review@m', version: 'v1', root,
+    })));
+
+    assert.deepEqual(resolved.map((plugin) => plugin.root), roots);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

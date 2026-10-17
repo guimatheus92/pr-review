@@ -479,11 +479,14 @@ as missing output under INV-DEL-01. Eligibility is scoped by pr-review, not assu
 from the runtime: `claude plugin list --json` reports every project-scoped install
 on the machine regardless of the invocation directory. Several enabled records of
 one plugin for the directory under review are several roots to read, not a
-conflict: integrity is the CONTENT of the criteria, which must be identical across
-roots, never the version string. Divergent content drops that one companion; the
-others still dispatch. The `code-review` criteria are recognised in either
-marketplace's wording (`claude-code-plugins`, `claude-plugins-official`), and a body
-matching neither is refused by name.
+conflict: integrity is the CONTENT of the definition file behind each root (the
+whole file, frontmatter and line endings normalized), which must be identical
+across roots, never the version string. Divergent files drop that one companion,
+naming every root with a digest of its file; the others still dispatch. A record
+whose path holds no manifest for the plugin is named and ignored. The `code-review`
+criteria are recognised in either marketplace's wording (`claude-code-plugins`,
+`claude-plugins-official`), and a body matching neither is refused naming the file
+read and the marker each wording missed.
 
 **Why:** A live review loaded an unrelated AVD plugin into every reviewer and
 ran 35 `userPromptSubmitted` hooks, each timing out after 45 seconds. The

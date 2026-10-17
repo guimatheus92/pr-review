@@ -1,4 +1,5 @@
 import { killOnExit, killTree, spawnCli } from '../util/spawn.js';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
@@ -188,24 +189,38 @@ function agreedDefinition(
     }
     return definition;
   });
-  const bodies = new Set(definitions.map((definition) => definition.body.replace(/\r\n/g, '\n')));
-  if (bodies.size !== 1) {
-    // Name every root: with duplicate runtime records this is the only place a stale
-    // record surfaces, and the operator has to know WHICH install to update.
+  const normalized = definitions.map((definition) => definition.body.replace(/\r\n/g, '\n'));
+  if (new Set(normalized).size !== 1) {
+    // Name every root WITH a digest of its definition: with duplicate runtime records
+    // this is the only place a stale record surfaces, and the operator has to know
+    // WHICH install to update — with three roots where two agree, the digest is what
+    // singles out the odd one.
+    const tagged = source.roots.map((root, index) => {
+      const digest = createHash('sha256').update(normalized[index]!).digest('hex').slice(0, 8);
+      return `${root} (sha256:${digest})`;
+    });
     throw new Error(
-      `companion plugin '${source.id}' has divergent active definitions for ${relativePath} across ${definitions.length} active roots: ${source.roots.join(' | ')}`,
+      `companion plugin '${source.id}' has divergent active definition files for ${relativePath} across ${definitions.length} active roots: ${tagged.join(' | ')}`,
     );
   }
-  return [...bodies][0]!;
+  return normalized[0]!;
 }
 
 interface CriteriaSlice {
-  /** Exact sentence that opens the slice. */
+  /** Exact sentence that opens the slice; it is part of the criteria. */
   from: string;
-  /** Whether that sentence itself is part of the criteria or only locates them. */
-  keepFrom: boolean;
   /** Exact text that closes the slice, searched after the end of `from`. */
   until: string;
+}
+
+interface CodeReviewShape {
+  marketplace: string;
+  /** One sentence, in the dispatch contract's own terms, prepended to the criteria. */
+  framing: string;
+  criteria: CriteriaSlice;
+  falsePositives: CriteriaSlice;
+  /** Exact host-facing phrases inside the criteria that are rewritten for a single agent. */
+  rewrites?: readonly (readonly [from: string, to: string])[];
 }
 
 /**
@@ -222,60 +237,79 @@ interface CriteriaSlice {
  * official install (#54).
  *
  * Each shape is a pair of exact slices, never a heading scan: what reaches the
- * dispatched agent must be predictable per version. The official rubric is taken
- * WITHOUT the sentence that introduces it ("launch a parallel Haiku agent …") and
- * WITHOUT the step after it ("Filter out … do not proceed"): both are host workflow —
- * the first would be refused by `NATIVE_COMPANION_DIRECTIVE_RE`, the second tells an
- * agent contracted to write `[]` to stop instead — so the framing line restates the
- * cutoff in the dispatch contract's own terms.
+ * dispatched agent must be predictable per version, and an upstream edit that moves
+ * a marker makes the shape miss and the companion refused by name — fail closed. The
+ * official criteria start at "To do that, the agent should score each issue …", which
+ * keeps the CLAUDE.md double-check (a review criterion) and drops only the sentence
+ * before it that launches scoring agents; they end before step 6 ("Filter out … do
+ * not proceed"), host workflow that tells an agent contracted to write `[]` to stop
+ * — the framing line restates the cutoff instead. The one host-facing phrase left
+ * inside, "(give this rubric to the agent verbatim)", is rewritten: the dispatched
+ * agent IS the scorer and must not hand anything to another agent.
  */
-const CODE_REVIEW_SHAPES: readonly { marketplace: string; framing: string; criteria: CriteriaSlice; falsePositives: CriteriaSlice }[] = [
+const CODE_REVIEW_SHAPES: readonly CodeReviewShape[] = [
   {
     marketplace: 'claude-code-plugins',
     framing: 'Validate each candidate directly and report only issues that meet these source-plugin criteria.',
-    criteria: { from: '**CRITICAL: We only want HIGH SIGNAL issues.**', keepFrom: true, until: '\n5. For each issue found' },
+    criteria: { from: '**CRITICAL: We only want HIGH SIGNAL issues.**', until: '\n5. For each issue found' },
     falsePositives: {
       from: 'Use this list when evaluating issues in Steps 4 and 5 (these are false positives, do NOT flag):',
-      keepFrom: true,
       until: '\nNotes:',
     },
   },
   {
     marketplace: 'claude-plugins-official',
     framing: 'Score each candidate issue 0-100 with this rubric and report only issues scoring 80 or higher.',
-    criteria: { from: 'The scale is (give this rubric to the agent verbatim):', keepFrom: false, until: '\n6. ' },
-    falsePositives: { from: 'Examples of false positives, for steps 4 and 5:', keepFrom: true, until: '\nNotes:' },
+    criteria: {
+      from: 'To do that, the agent should score each issue on a scale from 0-100',
+      until: '\n6. Filter out any issues with a score less than 80',
+    },
+    falsePositives: { from: 'Examples of false positives, for steps 4 and 5:', until: '\nNotes:' },
+    rewrites: [['The scale is (give this rubric to the agent verbatim):', 'The scale is:']],
   },
 ];
 
-function sliceCriteria(body: string, slice: CriteriaSlice): string | undefined {
+/**
+ * The slice's text, or the exact marker that was not found. A slice holding no line
+ * of its own beyond the opening sentence (the rubric or the list removed upstream) is
+ * a miss too: both shapes' criteria are multi-line lists, and the framing line would
+ * otherwise promise criteria the brief does not carry.
+ */
+function sliceCriteria(body: string, slice: CriteriaSlice): { text: string } | { missing: string } {
   const at = body.indexOf(slice.from);
-  if (at < 0) return undefined;
-  const afterFrom = at + slice.from.length;
-  const end = body.indexOf(slice.until, afterFrom);
-  if (end < 0) return undefined;
-  return body.slice(slice.keepFrom ? at : afterFrom, end).trim();
+  if (at < 0) return { missing: slice.from };
+  const end = body.indexOf(slice.until, at + slice.from.length);
+  if (end < 0) return { missing: slice.until };
+  const text = body.slice(at, end).trim();
+  const beyondOpening = /\n\s*\S/.test(text.slice(slice.from.length));
+  return beyondOpening ? { text } : { missing: `text between "${slice.from}" and "${slice.until}"` };
 }
 
-function codeReviewCriteria(body: string): string {
+function codeReviewCriteria(body: string, source: string): string {
+  const misses: string[] = [];
   for (const shape of CODE_REVIEW_SHAPES) {
     const criteria = sliceCriteria(body, shape.criteria);
     const falsePositives = sliceCriteria(body, shape.falsePositives);
-    if (criteria === undefined || falsePositives === undefined) continue;
+    const missing = [criteria, falsePositives].flatMap((slice) => ('missing' in slice ? [slice.missing] : []));
+    if (missing.length > 0 || !('text' in criteria) || !('text' in falsePositives)) {
+      misses.push(`${shape.marketplace}: missing ${missing.map((marker) => JSON.stringify(marker.trim())).join(' and ')}`);
+      continue;
+    }
+    let criteriaText = criteria.text;
+    for (const [from, to] of shape.rewrites ?? []) criteriaText = criteriaText.split(from).join(to);
     return [
       '# Companion review criteria: code-review',
       '',
       `Review only the materialized PR context and diff. ${shape.framing}`,
       '',
-      criteria,
+      criteriaText,
       '',
-      falsePositives,
+      falsePositives.text,
     ].join('\n');
   }
-  const wordings = CODE_REVIEW_SHAPES.map((shape) => shape.marketplace).join(', ');
-  throw new Error(
-    `companion plugin 'code-review' no longer contains the expected high-signal review criteria (matches neither known marketplace wording: ${wordings})`,
-  );
+  // Which shape came closest and which marker moved is the whole diagnosis: a bare
+  // refusal is what 51 summaries carried through #54 without anyone able to act on it.
+  throw new Error(`companion plugin 'code-review' matches no known marketplace wording in ${source} (${misses.join('; ')})`);
 }
 
 /**
@@ -332,11 +366,15 @@ function companionBriefs(
       };
     });
   }
-  const definition = agreedDefinition(source, join('commands', 'code-review.md'));
+  const relativePath = join('commands', 'code-review.md');
+  const definition = agreedDefinition(source, relativePath);
   return [{
     reviewerName: `companion:${companion.id}`,
     companionId: companion.id,
-    body: safeCompanionCriteria(codeReviewCriteria(definition), join('commands', 'code-review.md')),
+    body: safeCompanionCriteria(
+      codeReviewCriteria(definition, `${relativePath} at ${source.roots.join(' | ')}`),
+      relativePath,
+    ),
   }];
 }
 
@@ -524,7 +562,7 @@ export function parseClaudePluginListJson(raw: string, cwd = process.cwd()): {
       return { installed: [], activeClaudePlugins: [], detectionError: '`claude plugin list --json` has no plugin array' };
     }
     const installed = new Set<string>();
-    const active = new Map<string, RuntimePluginSelector>();
+    const active: RuntimePluginSelector[] = [];
     for (const value of entries) {
       if (!value || typeof value !== 'object' || Array.isArray(value)) {
         return { installed: [], activeClaudePlugins: [], detectionError: '`claude plugin list --json` contains a malformed plugin entry' };
@@ -559,19 +597,14 @@ export function parseClaudePluginListJson(raw: string, cwd = process.cwd()): {
           detectionError: safeDetectionError(`enabled Claude plugin '${id}' has no qualified identity, version, and install path`),
         };
       }
-      // One selector per distinct root, never a conflict. Claude Code records the SAME
-      // project twice when its tools spell the folder `C:\…` and `c:\…` (VS Code vs
-      // Git Bash), and only one record moves on at `plugin update`; a user-scope record
-      // sits beside them too. A version or root mismatch is not "effective plugin state
-      // unknown" (#54): the version string is not the integrity check — the CONTENT is.
-      // Every root whose manifest names the plugin reaches `agreedDefinition`, which
-      // refuses divergent criteria for that one companion while the rest still dispatch.
-      // Keyed by the exact resolved path: on a case-sensitive filesystem two spellings
-      // are two directories, and both must be read.
-      const resolvedRoot = resolve(root);
-      active.set(`${key}\0${resolvedRoot}`, { key, version, root: resolvedRoot });
+      // One selector per record. Claude Code may record one project twice (`C:\…` vs
+      // `c:\…`) on different versions, plus a user-scope record; the version string
+      // proves nothing, so every record is a root to read. `runtimeInstalledPluginRoots`
+      // keeps each distinct resolved path once, and `agreedDefinition` compares the
+      // definition files behind them, dropping only that companion on divergence.
+      active.push({ key, version, root: resolve(root) });
     }
-    return { installed: [...installed], activeClaudePlugins: [...active.values()] };
+    return { installed: [...installed], activeClaudePlugins: active };
   } catch (error) {
     return {
       installed: [],

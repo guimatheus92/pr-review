@@ -535,3 +535,55 @@ test('runtimeInstalledPluginRoots — identity is still enforced: a manifest nam
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+// Several `claude plugin list --json` records of ONE plugin for this project (#54):
+// the parser hands over one selector per distinct root, and every root whose
+// manifest names the plugin must come out here, so `agreedDefinition` can compare
+// their content. Collapsing them by key would silently skip the integrity check.
+test('runtimeInstalledPluginRoots — several selectors for one key yield every distinct root, once each', () => {
+  const home = mkdtempSync(join(tmpdir(), 'claude-multi-root-'));
+  try {
+    const roots = ['c2bdb427efe8', '8f814f49002f'].map((version) => {
+      const root = join(home, '.claude', 'plugins', 'cache', 'claude-plugins-official', 'code-review', version);
+      mkdirSync(join(root, '.claude-plugin'), { recursive: true });
+      writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'code-review' }), 'utf8');
+      return root;
+    });
+    const key = 'code-review@claude-plugins-official';
+
+    const resolved = runtimeInstalledPluginRoots('claude', home, [
+      { key, version: 'c2bdb427efe8', root: roots[0]! },
+      { key, version: '8f814f49002f', root: roots[1]! },
+      { key, version: 'c2bdb427efe8', root: roots[0]! },
+    ]);
+
+    assert.deepEqual(resolved.map((plugin) => plugin.root), roots);
+    assert.ok(resolved.every((plugin) => plugin.id === 'code-review'));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('runtimeInstalledPluginRoots — roots differing only by case are two roots, each with its exact spelling', () => {
+  // The dedupe key is the exact resolved path, never case-folded: on a case-sensitive
+  // filesystem `code-review/v1` and `Code-Review/v1` are two directories whose
+  // definition files `agreedDefinition` must compare. (On a case-insensitive one both
+  // spellings reach the same directory, and reading it twice is harmless.)
+  const home = mkdtempSync(join(tmpdir(), 'claude-case-roots-'));
+  try {
+    const roots = ['code-review', 'Code-Review'].map((dir) => {
+      const root = join(home, '.claude', 'plugins', 'cache', 'm', dir, 'v1');
+      mkdirSync(join(root, '.claude-plugin'), { recursive: true });
+      writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'code-review' }), 'utf8');
+      return root;
+    });
+
+    const resolved = runtimeInstalledPluginRoots('claude', home, roots.map((root) => ({
+      key: 'code-review@m', version: 'v1', root,
+    })));
+
+    assert.deepEqual(resolved.map((plugin) => plugin.root), roots);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

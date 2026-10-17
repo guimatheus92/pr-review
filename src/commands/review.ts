@@ -32,6 +32,7 @@ import {
   companionReviewerNames,
   detectCompanions,
   formatWarning,
+  KNOWN_COMPANIONS,
   materializeCompanionBriefs,
   type CompanionState,
   type MaterializedCompanionBrief,
@@ -1417,6 +1418,13 @@ async function reviewPipeline(opts: ReviewCmdOptions, where: { outDir?: string }
   let installedCompanions: string[] = [];
   let companionState: CompanionState | undefined;
   let companionDetectionWarning: string | undefined;
+  // A bare reason hides the cost; name how many companion reviewers the failure
+  // dropped. Detection also runs for the install hint alone (`companionWarn`), and
+  // then nothing was planned, so there is no cost to name.
+  const detectionFailure = (reason: string): string =>
+    config.invokeCompanions
+      ? `companion detection failed — 0 of ${companionDispatchCount(KNOWN_COMPANIONS.map((c) => c.id))} companion reviewers dispatched: ${reason}`
+      : `companion detection failed (companions not invoked on this run): ${reason}`;
   const companionDegraded: string[] = [];
   let companionPromise: Promise<void> = Promise.resolve();
   if (config.invokeCompanions || config.companionWarn) {
@@ -1426,13 +1434,13 @@ async function reviewPipeline(opts: ReviewCmdOptions, where: { outDir?: string }
         const state = await (opts.detectCompanionsFn ?? detectCompanions)(companionBinary, runtime);
         companionState = state;
         installedCompanions = state.recognized;
-        if (state.detectionError) companionDetectionWarning = `companion detection failed: ${state.detectionError}`;
+        if (state.detectionError) companionDetectionWarning = detectionFailure(state.detectionError);
         if (state.missing.length > 0 && config.companionWarn && !opts.noCompanionWarning) {
           const warn = formatWarning(state.missing, runtime);
           if (warn) process.stderr.write(warn + '\n');
         }
       } catch (err) {
-        companionDetectionWarning = `companion detection failed: ${safeRuntimeDiagnostic((err as Error).message) ?? 'unknown error'}`;
+        companionDetectionWarning = detectionFailure(safeRuntimeDiagnostic((err as Error).message) ?? 'unknown error');
         process.stderr.write(`[companions] ${companionDetectionWarning}\n`);
       }
     })();
@@ -1500,6 +1508,21 @@ async function reviewPipeline(opts: ReviewCmdOptions, where: { outDir?: string }
     id,
     roots: runtimePluginRoots.filter((plugin) => plugin.id === id).map((plugin) => plugin.root),
   }));
+  // A Claude record whose installPath has no manifest naming the plugin (a GC'd cache
+  // version, a manifest for another plugin) is dropped by `runtimeInstalledPluginRoots`.
+  // With several records per plugin that drop is silent while another root survives —
+  // and it is exactly the stale record the operator needs to find, so name it.
+  if (runtime === 'claude' && config.invokeCompanions) {
+    for (const id of installedCompanions) {
+      const kept = new Set(runtimePluginRoots.filter((plugin) => plugin.id === id).map((plugin) => plugin.root));
+      for (const selector of companionState?.activeClaudePlugins ?? []) {
+        if (selector.key.split('@')[0] !== id || kept.has(selector.root)) continue;
+        const note = `companion ${id}: active record ${safeRuntimeDiagnostic(selector.root) ?? '<unprintable path>'} has no manifest naming '${id}' — ignored`;
+        companionDegraded.push(note);
+        process.stderr.write(`[companions] warning: ${note}\n`);
+      }
+    }
+  }
   // Resolve the briefs BEFORE the roster is fixed. A companion that cannot be
   // materialized is dropped from `installedCompanions`, so it is never planned —
   // planning it and failing to dispatch it is what INV-DEL-01 reads as a missing
@@ -1509,7 +1532,7 @@ async function reviewPipeline(opts: ReviewCmdOptions, where: { outDir?: string }
     const materialized = materializeCompanionBriefs({ installed: installedCompanions, sources: companionSources });
     companionBriefs.push(...materialized.briefs);
     for (const failure of materialized.failures) {
-      const note = `companion ${failure.id} not dispatched — ${failure.reason}`;
+      const note = `companion ${failure.id} not dispatched (${companionDispatchCount([failure.id])} reviewer(s) lost) — ${failure.reason}`;
       companionDegraded.push(note);
       process.stderr.write(`[companions] warning: ${note}\n`);
     }
